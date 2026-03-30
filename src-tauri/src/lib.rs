@@ -20,6 +20,8 @@ mod types;
 mod ollama;
 mod venice;
 mod commands;
+#[cfg(not(debug_assertions))]
+mod http_server;
 
 pub use types::{Video, ChannelInfo, VideoResponse, DisplaySettings, DbDetails};
 pub use types::{parse_view_count, extract_handle_from_url};
@@ -125,6 +127,11 @@ fn get_app_info() -> serde_json::Value {
 // ─── App entry point ──────────────────────────────────────────────────────────
 
 pub fn run() {
+    // We'll start the HTTP server from the setup() closure where we can access
+    // the app's resource directory. This ensures the server finds the bundled
+    // `dist/index.html` at runtime instead of guessing paths before the app
+    // context exists.
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
@@ -193,10 +200,60 @@ pub fn run() {
             get_app_info,
         ])
         .manage(DbPathState(Mutex::new(None)))
-        .setup(|app| {
+        .setup(move |app| {
             let app_handle = app.handle();
             let db_path = get_db_path(app_handle);
+                // Start the HTTP server here where we can discover the real resource
+                // directory for the packaged app. Prefer the app's resource_dir, but
+                // fall back to common relative locations.
+                let port_opt: Option<u16> = {
+                    #[cfg(not(debug_assertions))]
+                    {
+                        // Try resource dir first
+                        let resource_dir = app_handle.path().resource_dir().ok().and_then(|p| Some(p));
+                        // If resources are bundled, the built frontend will typically be at <resource_dir>/dist
+                        let resource_dist = resource_dir.as_ref().map(|p| p.join("dist"));
+                        let candidates = vec![
+                            resource_dist.clone().unwrap_or_default(),
+                            std::path::PathBuf::from("./dist"),
+                            std::path::PathBuf::from("../dist"),
+                            std::path::PathBuf::from("../../dist"),
+                        ];
 
+                        let chosen = candidates.into_iter().find(|p| p.join("index.html").exists()).unwrap_or_else(|| {
+                            eprintln!("⚠️  dist folder not found in standard locations, using ./dist (this may fail if dist isn't bundled)");
+                            std::path::PathBuf::from("./dist")
+                        });
+
+                        match http_server::start_server(chosen) {
+                            Ok(port) => {
+                                eprintln!("✓ HTTP server started successfully on port {}", port);
+                                // short pause to allow server threads to accept connections
+                                std::thread::sleep(std::time::Duration::from_millis(300));
+                                Some(port)
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Failed to start HTTP server: {}", e);
+                                None
+                            }
+                        }
+                    }
+                    #[cfg(debug_assertions)]
+                    {
+                        // In dev mode we don't start the local file server; Vite dev server serves assets
+                        None
+                    }
+                };
+
+                // If we successfully started an HTTP server, navigate the main window to it
+                if let Some(port) = port_opt {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let url = format!("http://127.0.0.1:{}", port);
+                        // Replace location after the webview is created
+                        let _ = window.eval(&format!("window.location.replace('{}');", url));
+                        eprintln!("➡️ Navigated main window to {}", url);
+                    }
+                    }
             let resolution = db::get_setting(&db_path, "resolution").unwrap_or(None).unwrap_or_else(|| "1440x900".to_string());
             let fullscreen = db::get_setting(&db_path, "fullscreen").unwrap_or(None).map(|s| s == "true").unwrap_or(false);
 

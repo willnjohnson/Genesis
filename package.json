@@ -1,7 +1,7 @@
 {
   "name": "kinesis",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "bin": {
     "tauri-branding": "./tauri-branding.cjs"
@@ -16,9 +16,9 @@
     "tauri:dev": "cross-env TAURI_BRANDING=kinesis node scripts/set-tauri.cjs && cross-env VITE_BRANDING=kinesis tauri dev --features kinesis",
     "tauri:dev:kinesis": "cross-env TAURI_BRANDING=kinesis node scripts/set-tauri.cjs && cross-env VITE_BRANDING=kinesis tauri dev --features kinesis",
     "tauri:dev:genesis": "cross-env TAURI_BRANDING=genesis node scripts/set-tauri.cjs && cross-env VITE_BRANDING=genesis tauri dev --features genesis",
-    "tauri:build": "cross-env TAURI_BRANDING=kinesis node scripts/set-tauri.cjs && cross-env VITE_BRANDING=kinesis tauri build --features kinesis",
-    "tauri:build:kinesis": "cross-env TAURI_BRANDING=kinesis node scripts/set-tauri.cjs && cross-env VITE_BRANDING=kinesis tauri build --features kinesis",
-    "tauri:build:genesis": "cross-env TAURI_BRANDING=genesis node scripts/set-tauri.cjs && cross-env VITE_BRANDING=genesis tauri build --features genesis",
+  "tauri:build": "cross-env TAURI_BRANDING=kinesis node scripts/set-tauri.cjs && npm run build && cross-env VITE_BRANDING=kinesis tauri build --features kinesis",
+  "tauri:build:kinesis": "cross-env TAURI_BRANDING=kinesis node scripts/set-tauri.cjs && npm run build && cross-env VITE_BRANDING=kinesis tauri build --features kinesis",
+  "tauri:build:genesis": "cross-env TAURI_BRANDING=genesis node scripts/set-tauri.cjs && npm run build && cross-env VITE_BRANDING=genesis tauri build --features genesis",
     "lint": "eslint .",
     "preview": "vite preview"
   },

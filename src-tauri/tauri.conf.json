@@ -1,10 +1,9 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Kinesis",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "kinesisapp",
   "build": {
-    "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
@@ -13,7 +12,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Kinesis v0.2.0",
+        "title": "Kinesis v0.2.1",
         "width": 800,
         "height": 600,
         "resizable": true,
@@ -21,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-src https://www.youtube.com https://www.youtube-nocookie.com; img-src 'self' data: https://i.ytimg.com https://*.googlevideo.com; connect-src 'self' https://www.youtube.com https://www.googleapis.com https://*.googlevideo.com"
+      "csp": "default-src 'self' http://localhost:*; script-src 'self' 'unsafe-inline' http://localhost:* https://www.youtube.com https://www.youtube-nocookie.com https://www.google.com https://youtube.com; style-src 'self' 'unsafe-inline'; font-src 'self' https:; frame-src 'self' http://localhost:* https://www.youtube.com https://www.youtube-nocookie.com https://youtube.com; img-src 'self' data: https: blob:; media-src 'self' https: blob:; connect-src 'self' https: wss: http://localhost:*"
     }
   },
   "bundle": {
@@ -34,6 +33,8 @@
       "icons-kinesis/icon.icns",
       "icons-kinesis/icon.ico"
     ],
-    "resources": []
+    "resources": [
+      "dist"
+    ]
   }
 }
