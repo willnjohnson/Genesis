@@ -38,7 +38,7 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf-8'));
 
 // Default version from package.json if not provided via flag
-const defaultVersion = packageJson.version || '0.2.0';
+const defaultVersion = packageJson.version || '0.2.1';
 const currentVersion = version || defaultVersion;
 
 // Update version in tauri.conf.json if provided

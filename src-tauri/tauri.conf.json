@@ -34,7 +34,7 @@
       "icons-kinesis/icon.ico"
     ],
     "resources": [
-      "../dist"
+      "dist"
     ]
   }
 }

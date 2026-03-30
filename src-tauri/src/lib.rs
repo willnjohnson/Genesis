@@ -7,7 +7,7 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.2.0";
+const VERSION: &str = "0.2.1";
 
 fn get_window_title() -> String {
     format!("{} v{}", APP_NAME, VERSION)
@@ -209,16 +209,36 @@ pub fn run() {
                 let port_opt: Option<u16> = {
                     #[cfg(not(debug_assertions))]
                     {
+                        // Always use HTTP server to serve frontend assets
+                        // This works cross-platform and avoids asset loading issues
                         // Try resource dir first
                         let resource_dir = app_handle.path().resource_dir().ok().and_then(|p| Some(p));
                         // If resources are bundled, the built frontend will typically be at <resource_dir>/dist
                         let resource_dist = resource_dir.as_ref().map(|p| p.join("dist"));
                         let candidates = vec![
+                            // Try resource dir first
                             resource_dist.clone().unwrap_or_default(),
+                            // Try local paths relative to CWD (which is workspace root in dev, but might be different in production)
                             std::path::PathBuf::from("./dist"),
+                            std::path::PathBuf::from("Kinesis/dist"),
+                            std::path::PathBuf::from("Kinesis/src-tauri/dist"),
                             std::path::PathBuf::from("../dist"),
                             std::path::PathBuf::from("../../dist"),
+                            std::path::PathBuf::from("dist"),
+                            // Try paths relative to executable in bundled app
+                            std::env::current_exe().ok()
+                                .and_then(|p| p.parent().map(|p| p.join("resources/dist")))
+                                .unwrap_or_default(),
+                            // Try direct workspace path
+                            std::path::PathBuf::from("C:/Users/William/Desktop/Kinesis-Update/Kinesis/src-tauri/dist"),
                         ];
+
+                        // Debug: print all candidates
+                        eprintln!("Looking for dist folder...");
+                        for (i, c) in candidates.iter().enumerate() {
+                            let exists = c.join("index.html").exists();
+                            eprintln!("  Candidate {}: {} -> {}", i, c.display(), if exists { "FOUND" } else { "not found" });
+                        }
 
                         let chosen = candidates.into_iter().find(|p| p.join("index.html").exists()).unwrap_or_else(|| {
                             eprintln!("⚠️  dist folder not found in standard locations, using ./dist (this may fail if dist isn't bundled)");
