@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import {
     getTranscript, getDisplaySettings, setDisplaySettings,
-    getApiKey, getSetting, setDbPath,
+    getApiKey, getSetting, setDbPath, openExternalUrl,
     type Video
 } from "./api";
 import { SearchBar, type Facet } from "./components/SearchBar";
@@ -11,15 +11,23 @@ import { BRAND } from "./branding";
 import { Notification, type NotificationType } from "./components/Notification";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SettingsModal } from "./components/SettingsModal";
-import { Settings, ChevronUp, LayoutGrid, List } from "lucide-react";
+import { Settings, ChevronUp, LayoutGrid, List, ChevronDown } from "lucide-react";
+import { GlossaryView } from "./components/GlossaryView";
 import { useSearch } from "./hooks/useSearch";
 import { useLibrary } from "./hooks/useLibrary";
 
-type ViewMode = 'search' | 'library';
+type ViewMode = 'search' | 'library' | 'glossary';
+
+const DEFAULT_FILTER_FACET = [{ type: 'title_search', value: '' }] as Facet[];
+const DEFAULT_GLOSSARY_FACET = [{ type: 'term_search', value: '' }] as Facet[];
 
 function App() {
     // ── App-level state ─────────────────────────────────────────────────────
     const [viewMode, setViewMode] = useState<ViewMode>('search');
+    const [showGlossaryMenu, setShowGlossaryMenu] = useState(false);
+    const [glossarySearchQuery, setGlossarySearchQuery] = useState("");
+    const [initialLibrarySearch, setInitialLibrarySearch] = useState("");
+    const [initialLibraryFacets, setInitialLibraryFacets] = useState<Facet[]>(DEFAULT_FILTER_FACET);
     const [notification, setNotification] = useState<{ message: string; type: NotificationType } | null>(null);
     const [showScrollTop, setShowScrollTop] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
@@ -66,12 +74,14 @@ function App() {
                         if (!v.handle?.toLowerCase().includes(f.value)) return false;
                     } else if (f.type === 'video') {
                         if (!v.id.toLowerCase().includes(f.value)) return false;
-                    } else if (f.type === 'filter_search') {
+                    } else if (f.type === 'title_search') {
                         const terms = f.value.split(' ').filter(Boolean);
                         if (!terms.every(t =>
                             v.title.toLowerCase().includes(t) ||
                             v.author?.toLowerCase().includes(t)
                         )) return false;
+                    } else if (f.type === 'transcript_search') {
+                        if (!v.transcript?.toLowerCase().includes(f.value)) return false;
                     }
                 }
                 // Check remaining text
@@ -88,6 +98,23 @@ function App() {
     })();
 
     // ── Init ─────────────────────────────────────────────────────────────────
+    useEffect(() => {
+        const handleLinkClick = async (e: MouseEvent) => {
+            const target = e.target as HTMLElement;
+            const anchor = target.closest('a');
+            if (anchor && anchor.href && 
+                !anchor.href.startsWith(window.location.origin) && 
+                !anchor.href.startsWith('blob:') &&
+                anchor.getAttribute('href') !== '#' &&
+                !anchor.href.startsWith('javascript:')) {
+                e.preventDefault();
+                await openExternalUrl(anchor.href);
+            }
+        };
+        document.addEventListener('click', handleLinkClick);
+        return () => document.removeEventListener('click', handleLinkClick);
+    }, []);
+
     useEffect(() => {
         const initialize = async () => {
             const savedPath = localStorage.getItem(BRAND.storageKey);
@@ -167,6 +194,13 @@ function App() {
         } catch { /* ignore */ }
     };
 
+    const handleSearchInLibrary = (term: string, mode: 'title' | 'transcript') => {
+        setInitialLibrarySearch(term);
+        setInitialLibraryFacets([{ type: mode === 'title' ? 'title_search' : 'transcript_search', value: '' }]);
+        setViewMode('library');
+        library.setLibrarySearch(`${mode === 'title' ? 'title_search' : 'transcript_search'}:"${term}"`);
+    };
+
     return (
         <div className="min-h-screen bg-[#0f0f0f] text-white font-sans selection:bg-red-500/30 selection:text-white pb-20 select-none">
             <div className="container mx-auto px-4 pt-4">
@@ -187,12 +221,39 @@ function App() {
                             {(['search', 'library'] as ViewMode[]).map(mode => (
                                 <button
                                     key={mode}
-                                    onClick={() => setViewMode(mode)}
+                                    onClick={() => {
+                                        if (mode === 'library') {
+                                            setInitialLibrarySearch("");
+                                            setInitialLibraryFacets(DEFAULT_FILTER_FACET);
+                                            library.setLibrarySearch("title_search:");
+                                        }
+                                        setViewMode(mode);
+                                    }}
                                     className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all cursor-pointer capitalize ${viewMode === mode ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
                                 >
                                     {mode}
                                 </button>
                             ))}
+                            <div className="relative">
+                                <button
+                                    onClick={() => setShowGlossaryMenu(!showGlossaryMenu)}
+                                    onBlur={() => setTimeout(() => setShowGlossaryMenu(false), 200)}
+                                    className={`p-2 rounded-lg transition-all cursor-pointer flex items-center justify-center ${viewMode === 'glossary' || showGlossaryMenu ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
+                                    title="More Options"
+                                >
+                                    <ChevronDown className="w-5 h-5" />
+                                </button>
+                                {showGlossaryMenu && (
+                                    <div className="absolute top-full right-0 mt-2 w-32 bg-[#272727] border border-[#3f3f3f] rounded-lg shadow-xl z-50 overflow-hidden">
+                                        <button
+                                            onClick={() => { setGlossarySearchQuery(""); setViewMode('glossary'); setShowGlossaryMenu(false); }}
+                                            className={`w-full text-left px-4 py-2 text-sm hover:bg-[#3f3f3f] cursor-pointer ${viewMode === 'glossary' ? 'text-white font-bold' : 'text-gray-300'}`}
+                                        >
+                                            Glossary
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
                             <button
                                 onClick={toggleVideoListMode}
                                 className="p-2 ml-2 text-gray-400 hover:text-white transition-all cursor-pointer bg-[#272727] rounded-lg"
@@ -212,13 +273,25 @@ function App() {
 
                     <SearchBar
                         key={viewMode}
-                        onSearch={handleSearch}
-                        onLiveFilter={viewMode === 'search' ? search.setSearchQuery : undefined}
+                        onSearch={viewMode === 'glossary' ? setGlossarySearchQuery : handleSearch}
+                        onLiveFilter={viewMode === 'search' ? search.setSearchQuery : (viewMode === 'glossary' ? setGlossarySearchQuery : undefined)}
                         loading={search.loading || library.loading}
                         viewMode={viewMode}
-                        initialFacets={search.activeFacets as Facet[]}
-                        initialQuery={search.activeText}
-                        placeholder={viewMode === 'library' ? "Search your library" : "Search YouTube"}
+                        initialFacets={
+                            viewMode === 'glossary'
+                                ? DEFAULT_GLOSSARY_FACET
+                                : viewMode === 'library'
+                                    ? initialLibraryFacets
+                                    : (search.activeFacets as Facet[])
+                        }
+                        initialQuery={
+                            viewMode === 'glossary'
+                                ? glossarySearchQuery.replace(/term_search:/g, '').replace(/definition_search:/g, '').replace(/^"|"$/g, '')
+                                : viewMode === 'library'
+                                    ? initialLibrarySearch
+                                    : search.activeText
+                        }
+                        placeholder={viewMode === 'glossary' ? "Search Glossary" : (viewMode === 'library' ? "Search your library" : "Search YouTube")}
                     />
                 </header>
 
@@ -231,7 +304,12 @@ function App() {
                 )}
 
                 <div className="mt-8">
-                    {viewMode === 'search' ? (
+                    {viewMode === 'glossary' ? (
+                        <GlossaryView
+                            searchQuery={glossarySearchQuery}
+                            onSearchInLibrary={handleSearchInLibrary}
+                        />
+                    ) : viewMode === 'search' ? (
                         <>
                             <VideoList
                                 videos={displayedVideos}

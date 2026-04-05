@@ -134,7 +134,7 @@ pub async fn fetch_channel_videos_v3(
                     view_count: "0".to_string(),
                     author: snippet["channelTitle"].as_str().map(|s| decode_html(s)),
                     handle: None, status: None, date_added: None,
-                    length_seconds: None, video_type: None,
+                    length_seconds: None, video_type: None, transcript: None,
                 });
             }
         }
@@ -208,7 +208,7 @@ pub async fn fetch_video_info(_app: tauri::AppHandle, video_id: String) -> Resul
         published_at,
         view_count: parse_view_count(details["viewCount"].as_str().unwrap_or("0")).to_string(),
         author, handle, status: None, date_added: None,
-        length_seconds: None, video_type: None,
+        length_seconds: None, video_type: None, transcript: None,
     })
 }
 
@@ -274,6 +274,7 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
             date_added: Some(v_data.9),
             length_seconds: Some(v_data.3),
             video_type: Some(v_data.8),
+            transcript: Some(v_data.4),
         });
     }
 
@@ -350,6 +351,7 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
         date_added,
         length_seconds: Some(length),
         video_type: Some(video_type.to_string()),
+        transcript: Some(transcript),
     })
 }
 
@@ -429,7 +431,7 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
                         view_count: "0".to_string(),
                         author: snippet["channelTitle"].as_str().map(|s| decode_html(s)),
                         handle: None, status: None, date_added: None,
-                        length_seconds: None, video_type: None,
+                        length_seconds: None, video_type: None, transcript: None,
                     });
                 }
             }

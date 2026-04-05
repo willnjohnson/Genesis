@@ -62,6 +62,7 @@ pub struct Video {
     pub length_seconds: Option<i32>,
     #[serde(rename = "videoType")]
     pub video_type: Option<String>,
+    pub transcript: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

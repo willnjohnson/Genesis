@@ -7,7 +7,7 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.2.1";
+const VERSION: &str = "0.2.2";
 
 fn get_window_title() -> String {
     format!("{} v{}", APP_NAME, VERSION)
@@ -197,6 +197,9 @@ pub fn run() {
             commands::delete_history_entry,
             commands::clear_all_history,
             // Misc
+            commands::add_glossary_term,
+            commands::get_glossary_terms,
+            commands::delete_glossary_term,
             get_app_info,
         ])
         .manage(DbPathState(Mutex::new(None)))

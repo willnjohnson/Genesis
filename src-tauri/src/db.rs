@@ -31,6 +31,15 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     )?;
 
+    // Create glossary table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS glossary (
+            term TEXT PRIMARY KEY,
+            definition TEXT NOT NULL
+        )",
+        [],
+    )?;
+
     // Create search_history table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS search_history (
@@ -73,7 +82,6 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // Migration: Add missing columns or update column types for older database files
     // Use a robust check to ensure columns are exactly as expected
     let schema_ok = {
-        let mut ok = true;
         let mut stmt = conn.prepare("PRAGMA table_info(videos)").unwrap();
         let mut rows = stmt.query([]).unwrap();
         let mut found_published_at_dt = false;
@@ -149,9 +157,9 @@ pub fn list_videos(db_path: &str, video_type_filter: Option<&str>) -> Result<Vec
     let conn = Connection::open(db_path)?;
     
     let query = match video_type_filter {
-        Some("short") => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type FROM videos WHERE video_type = 'short' ORDER BY date_added DESC, rowid DESC",
-        Some("standard") => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type FROM videos WHERE video_type = 'standard' ORDER BY date_added DESC, rowid DESC",
-        _ => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type FROM videos ORDER BY date_added DESC, rowid DESC",
+        Some("short") => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript FROM videos WHERE video_type = 'short' ORDER BY date_added DESC, rowid DESC",
+        Some("standard") => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript FROM videos WHERE video_type = 'standard' ORDER BY date_added DESC, rowid DESC",
+        _ => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript FROM videos ORDER BY date_added DESC, rowid DESC",
     };
     
     let mut stmt = conn.prepare(query)?;
@@ -182,6 +190,7 @@ pub fn list_videos(db_path: &str, video_type_filter: Option<&str>) -> Result<Vec
             date_added: row.get::<_, Option<String>>(6).unwrap_or(None),
             handle: row.get::<_, Option<String>>(7).unwrap_or(None),
             video_type: row.get::<_, Option<String>>(8).unwrap_or(None),
+            transcript: row.get::<_, Option<String>>(9).unwrap_or(None),
         })
     })?;
 
@@ -354,4 +363,30 @@ pub fn get_videos_with_summaries(db_path: &str) -> Result<Vec<String>> {
         ids.push(row.get(0)?);
     }
     Ok(ids)
+}
+
+pub fn add_glossary_term(db_path: &str, term: &str, definition: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "INSERT INTO glossary (term, definition) VALUES (?1, ?2) ON CONFLICT(term) DO UPDATE SET definition=excluded.definition",
+        params![term, definition],
+    )?;
+    Ok(())
+}
+
+pub fn get_glossary_terms(db_path: &str) -> Result<Vec<(String, String)>> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare("SELECT term, definition FROM glossary ORDER BY term COLLATE NOCASE")?;
+    let mut rows = stmt.query([])?;
+    let mut terms = Vec::new();
+    while let Some(row) = rows.next()? {
+        terms.push((row.get(0)?, row.get(1)?));
+    }
+    Ok(terms)
+}
+
+pub fn delete_glossary_term(db_path: &str, term: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    conn.execute("DELETE FROM glossary WHERE term = ?", params![term])?;
+    Ok(())
 }

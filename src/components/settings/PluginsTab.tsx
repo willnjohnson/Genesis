@@ -37,7 +37,7 @@ function PromptEditor({
                 {dirty && (
                     <button
                         onClick={onSave}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-[10px] font-bold transition-colors cursor-pointer"
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-[10px] font-bold transition-colors cursor-pointer shadow-lg shadow-blue-900/10"
                     >
                         <Save className="w-3 h-3" />
                         Save
@@ -146,7 +146,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
                             <button
                                 onClick={handleInstallOrPull}
                                 disabled={loading}
-                                className="px-3 py-1.5 bg-white text-black hover:bg-[#e5e5e5] rounded-md text-[10px] font-bold transition-all cursor-pointer disabled:opacity-50"
+                                className="px-3 py-1.5 bg-red-600 text-white hover:bg-red-500 rounded-md text-[10px] font-bold transition-all cursor-pointer disabled:opacity-50 shadow-lg shadow-red-900/10"
                             >
                                 Pull Model
                             </button>
@@ -154,7 +154,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
                             <button
                                 onClick={handleRemoveModel}
                                 disabled={loading}
-                                className="px-3 py-1.5 bg-[#272727] text-red-500 hover:bg-[#333] rounded-md text-[10px] font-bold transition-all cursor-pointer border border-red-500/20 disabled:opacity-50"
+                                className="px-3 py-1.5 bg-red-600 text-white hover:bg-red-500 rounded-md text-[10px] font-bold transition-all cursor-pointer shadow-lg shadow-red-900/10 disabled:opacity-50"
                             >
                                 Remove Model
                             </button>
@@ -164,7 +164,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
                             : (
                                 <button
                                     onClick={onSetDefault}
-                                    className="px-3 py-1.5 bg-[#272727] border border-[#303030] hover:bg-[#3f3f3f] text-white rounded-md text-[10px] font-bold transition-colors cursor-pointer"
+                                    className="px-3 py-1.5 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white rounded-md text-[10px] font-semibold transition-colors cursor-pointer"
                                 >
                                     Make Default
                                 </button>
@@ -275,7 +275,7 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
                             <button
                                 onClick={handleRemoveKey}
                                 disabled={loading}
-                                className="bg-[#272727] border border-[#303030] hover:bg-[#3f3f3f] text-red-500 px-3 py-1.5 rounded-md font-bold text-[10px] transition-colors cursor-pointer disabled:opacity-50"
+                                className="bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-3 py-1.5 rounded-md font-semibold text-[10px] transition-colors cursor-pointer disabled:opacity-50"
                             >
                                 Deactivate
                             </button>
@@ -283,7 +283,7 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
                             <button
                                 onClick={handleSaveKey}
                                 disabled={loading || !keyInput.trim()}
-                                className="bg-white text-black hover:bg-[#e5e5e5] px-3 py-1.5 rounded-md font-bold text-[10px] transition-colors cursor-pointer disabled:opacity-50"
+                                className="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-md font-bold text-[10px] transition-colors cursor-pointer disabled:opacity-50 shadow-lg shadow-red-900/10"
                             >
                                 Activate
                             </button>
@@ -293,7 +293,7 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
                             : (
                                 <button
                                     onClick={onSetDefault}
-                                    className="px-3 py-1.5 bg-[#272727] border border-[#303030] hover:bg-[#3f3f3f] text-white rounded-md text-[10px] font-bold transition-colors cursor-pointer"
+                                    className="px-3 py-1.5 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white rounded-md text-[10px] font-semibold transition-colors cursor-pointer"
                                 >
                                     Make Default
                                 </button>
@@ -367,7 +367,7 @@ export function PluginsTab({ plugins, onTogglePlugin, loading }: Props) {
                                     <button
                                         onClick={() => onTogglePlugin(plugin.id, !plugin.enabled)}
                                         disabled={loading}
-                                        className={`px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer bg-[#272727] border border-[#303030] hover:bg-[#3f3f3f] disabled:opacity-50 ${plugin.enabled ? 'text-red-500' : 'text-white'}`}
+                                        className={`px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer disabled:opacity-50 ${plugin.enabled ? 'bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white font-semibold' : 'bg-red-600 text-white hover:bg-red-500 shadow-lg shadow-red-900/10'}`}
                                     >
                                         {plugin.enabled ? 'Disable' : 'Enable'}
                                     </button>

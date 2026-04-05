@@ -1,6 +1,6 @@
-import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check } from 'lucide-react';
+import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink } from 'lucide-react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting } from '../api';
+import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, openExternalUrl } from '../api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -248,6 +248,15 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                         referrerPolicy="strict-origin-when-cross-origin"
                                         allowFullScreen
                                     ></iframe>
+                                    <div className="absolute bottom-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <button
+                                            onClick={() => openExternalUrl(`https://www.youtube.com/watch?v=${videoId}`)}
+                                            className="bg-black/80 hover:bg-black text-white px-3 py-1.5 rounded-md text-[10px] font-bold flex items-center gap-1.5 shadow-xl border border-white/10 cursor-pointer backdrop-blur-sm"
+                                        >
+                                            <ExternalLink className="w-3 h-3" />
+                                            Open in YouTube
+                                        </button>
+                                    </div>
                                 </div>
                             ) : (
                                 <div className="aspect-video w-full bg-gray-900/50 rounded-lg flex items-center justify-center text-gray-700 text-[10px] uppercase tracking-widest font-bold">
@@ -343,7 +352,24 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                         {summaryCopied ? "Copied" : "Copy Summary"}
                                     </button>
                                     <div className="text-gray-300 leading-relaxed prose prose-invert prose-sm max-w-none">
-                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary}</ReactMarkdown>
+                                        <ReactMarkdown
+                                            remarkPlugins={[remarkGfm]}
+                                            components={{
+                                                a: ({ node, ...props }) => (
+                                                    <a
+                                                        {...props}
+                                                        href="#"
+                                                        onClick={(e) => {
+                                                            e.preventDefault();
+                                                            if (props.href) openExternalUrl(props.href);
+                                                        }}
+                                                        className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
+                                                    />
+                                                )
+                                            }}
+                                        >
+                                            {summary}
+                                        </ReactMarkdown>
                                     </div>
                                 </div>
                             ) : loading ? (
@@ -381,34 +407,34 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                         </div>
                     </div>
 
-                    <div className="p-8 border-t border-[#303030] flex gap-4 bg-[#0f0f0f]">
+                    <div className="px-8 py-6 border-t border-[#303030] flex gap-4 bg-[#141414]">
                         <button
                             onClick={handleCopy}
                             disabled={loading || isTranscriptInvalid}
-                            className={`flex-1 bg-[#272727] border border-[#303030] text-[#aaaaaa] py-3 rounded-lg transition-all font-bold uppercase text-[10px] tracking-[0.2em] disabled:opacity-20 ${loading || isTranscriptInvalid ? 'cursor-default' : 'hover:text-white hover:bg-[#3f3f3f] cursor-pointer'}`}
+                            className={`flex-1 py-2 rounded-lg border border-[#383838] bg-[#222222] text-white transition-all text-sm font-semibold disabled:opacity-20 ${loading || isTranscriptInvalid ? 'cursor-default' : 'hover:bg-[#3f3f3f] cursor-pointer'}`}
                         >
-                            {copied ? "Copied Transcript" : "Copy Transcript"}
+                            {copied ? "Copied" : "Copy Transcript"}
                         </button>
 
                         {existsInDb && onDelete ? (
                             <button
                                 onClick={onDelete}
                                 disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
-                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to delete" : "Delete from library"}
-                                className={`flex-1 bg-red-900/10 border border-red-900/20 text-red-500 py-3 rounded-lg transition-all font-bold uppercase text-[10px] tracking-[0.2em] disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-900/20 hover:border-red-500/50 cursor-pointer'}`}
+                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to delete" : "Delete from Library"}
+                                className={`flex-1 py-2 rounded-lg bg-red-600 text-white transition-all text-sm font-bold disabled:opacity-20 shadow-lg shadow-red-900/10 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                             >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                Delete from library
+                                <Trash2 className="w-4 h-4" />
+                                Delete from Library
                             </button>
                         ) : (
                             <button
                                 onClick={handleOnSave}
                                 disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
-                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to save" : "Save to library"}
-                                className={`flex-1 bg-white text-black py-3 rounded-lg transition-all font-bold uppercase text-[10px] tracking-[0.2em] disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-[#e5e5e5] cursor-pointer'}`}
+                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to save" : "Save to Library"}
+                                className={`flex-1 py-2 rounded-lg bg-red-600 text-white transition-all text-sm font-bold disabled:opacity-20 shadow-lg shadow-red-900/10 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                             >
-                                <Save className="w-3.5 h-3.5" />
-                                Save to library
+                                <Save className="w-4 h-4" />
+                                Save to Library
                             </button>
                         )}
                     </div>

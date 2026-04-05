@@ -46,7 +46,7 @@ export function DatabaseTab({ dbDetails, onOpen, onChangeLocation, loading }: Pr
                         <button
                             onClick={onOpen}
                             disabled={loading}
-                            className="flex-1 bg-[#272727] border border-[#303030] hover:bg-[#3f3f3f] text-white px-4 py-3 rounded-xl font-bold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer mt-4 disabled:opacity-50"
+                            className="flex-1 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer mt-4 disabled:opacity-50"
                         >
                             <Database className="w-4 h-4" />
                             Open DB Location
@@ -54,7 +54,7 @@ export function DatabaseTab({ dbDetails, onOpen, onChangeLocation, loading }: Pr
                         <button
                             onClick={onChangeLocation}
                             disabled={loading}
-                            className="flex-1 bg-[#272727] border border-[#303030] hover:bg-[#3f3f3f] text-white px-4 py-3 rounded-xl font-bold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer mt-4 disabled:opacity-50"
+                            className="flex-1 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer mt-4 disabled:opacity-50"
                         >
                             <Settings className="w-4 h-4" />
                             Change DB Path

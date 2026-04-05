@@ -100,9 +100,9 @@ export function useSearch(hasApiKey: boolean) {
                 if (res.videos.length === 0) setError("No videos found for this search.");
             }
 
-            setActiveFacets([{ type: 'filter_search', value: '' }]);
+            setActiveFacets([{ type: 'title_search', value: '' }]);
             setActiveText("");
-            setSearchQuery("filter_search:");
+            setSearchQuery("title_search:");
         } catch (e: any) {
             console.error(e);
             setError(e.message || "Failed to fetch. Check your connection or the URL/handle.");
@@ -174,7 +174,7 @@ export function useSearch(hasApiKey: boolean) {
             facets.push({ type: m[1], value: m[2] || m[3] || "" });
         }
         const textTerms = searchQuery.replace(facetRegex, '').trim().toLowerCase().split(' ').filter(Boolean);
-        const filterBadge = facets.find(f => f.type === 'filter_search');
+        const filterBadge = facets.find(f => f.type === 'title_search');
         if (!filterBadge) return videos;
         const badgeTerms = filterBadge.value.toLowerCase().split(' ').filter(Boolean);
         const allTerms = [...textTerms, ...badgeTerms];

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Kinesis",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "kinesisapp",
   "build": {
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Kinesis v0.2.1",
+        "title": "Kinesis v0.2.2",
         "width": 800,
         "height": 600,
         "resizable": true,

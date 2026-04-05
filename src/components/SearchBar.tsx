@@ -13,18 +13,19 @@ interface Props {
     onLiveFilter?: (query: string) => void;
     loading: boolean;
     placeholder?: string;
-    viewMode?: 'search' | 'library';
+    viewMode?: 'search' | 'library' | 'glossary';
     initialFacets?: Facet[];
     initialQuery?: string;
 }
 
-export type SearchFacet = 'handle' | 'playlist' | 'video' | 'filter_search';
+export type SearchFacet = 'handle' | 'playlist' | 'video' | 'title_search' | 'transcript_search' | 'term_search' | 'definition_search';
 
 export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search', initialFacets = [], initialQuery = '' }: Props) {
     const [query, setQuery] = useState(initialQuery);
     const [facets, setFacets] = useState<Facet[]>(() => {
         if (initialFacets.length > 0) return initialFacets;
-        if (viewMode === 'library') return [{ type: 'filter_search', value: '' }];
+        if (viewMode === 'library') return [{ type: 'title_search', value: '' }];
+        if (viewMode === 'glossary') return [{ type: 'term_search', value: '' }];
         return [];
     });
     const [showHistory, setShowHistory] = useState(false);
@@ -33,14 +34,19 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     const containerRef = useRef<HTMLDivElement>(null);
 
     const isLibrary = viewMode === 'library';
-    const isFilterSearchActive = facets.some(f => f.type === 'filter_search');
+    const isGlossary = viewMode === 'glossary';
+    const isLibraryOrGlossary = isLibrary || isGlossary;
+    const isFilterSearchActive = facets.some(f => f.type === 'title_search' || f.type === 'transcript_search' || f.type === 'term_search' || f.type === 'definition_search');
 
     useEffect(() => {
         if (initialFacets.length > 0) {
             setFacets(initialFacets);
         }
+    }, [initialFacets]);
+
+    useEffect(() => {
         setQuery(initialQuery);
-    }, [initialFacets, initialQuery]);
+    }, [initialQuery]);
 
     useEffect(() => {
         const fullQuery = facets.map(f => {
@@ -80,22 +86,32 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             case 'handle': return <AtSign className="w-3 h-3" />;
             case 'video': return <Youtube className="w-3 h-3" />;
             case 'playlist': return <ListVideo className="w-3 h-3" />;
-            case 'filter_search': return <Filter className="w-3 h-3" />;
+            case 'title_search': 
+            case 'transcript_search': 
+            case 'term_search':
+            case 'definition_search': return <Filter className="w-3 h-3" />;
             default: return null;
         }
     };
 
     const facetPatterns = useMemo(() => {
-        const patterns: Record<string, SearchFacet> = {
-            'handle:': 'handle',
-            'video:': 'video',
-            'filter_search:': 'filter_search'
-        };
-        if (!isLibrary) {
-            patterns['playlist:'] = 'playlist';
+        const patterns: Record<string, SearchFacet> = {};
+        if (isGlossary) {
+            patterns['term_search:'] = 'term_search';
+            patterns['definition_search:'] = 'definition_search';
+        } else {
+            patterns['title_search:'] = 'title_search';
+            if (isLibrary) {
+                patterns['transcript_search:'] = 'transcript_search';
+            }
+            patterns['handle:'] = 'handle';
+            patterns['video:'] = 'video';
+            if (!isLibrary) {
+                patterns['playlist:'] = 'playlist';
+            }
         }
         return patterns;
-    }, [isLibrary]);
+    }, [isLibrary, isGlossary]);
 
     const extractPlaylistId = (val: string) => {
         const match = val.match(/[?&]list=([^#&?]+)/);
@@ -127,24 +143,22 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             const prefixIndex = lowVal.indexOf(prefix);
             if (prefixIndex !== -1) {
                 const afterPrefix = currentVal.slice(prefixIndex + prefix.length);
-                if (afterPrefix.trimStart().includes(' ') || (afterPrefix.length > 0 && afterPrefix.endsWith(' '))) {
-                    const parts = afterPrefix.trimStart().split(' ');
-                    const rawValue = parts[0];
-                    const remaining = parts.slice(1).join(' ');
+                const parts = afterPrefix.trimStart().split(' ');
+                const rawValue = parts[0];
+                const remaining = parts.slice(1).join(' ');
 
-                    let actualValue = rawValue;
-                    if (type === 'video') actualValue = extractVideoId(rawValue) || rawValue;
-                    if (type === 'playlist') actualValue = extractPlaylistId(rawValue) || rawValue;
-                    if (type === 'handle') actualValue = extractHandle(rawValue) || rawValue;
+                let actualValue = rawValue;
+                if (type === 'video') actualValue = extractVideoId(rawValue) || rawValue;
+                if (type === 'playlist') actualValue = extractPlaylistId(rawValue) || rawValue;
+                if (type === 'handle') actualValue = extractHandle(rawValue) || rawValue;
 
-                    setFacets([{ type, value: "" }]);
-                    setQuery(actualValue + (remaining ? " " + remaining : ""));
-                    return;
-                }
+                setFacets([{ type, value: "" }]);
+                setQuery(actualValue + (remaining ? " " + remaining : ""));
+                return;
             }
         }
 
-        if (facets.length === 0 || (isLibrary && facets.length === 1 && facets[0].type === 'filter_search')) {
+        if (!isGlossary && (facets.length === 0 || (isLibrary && facets.length === 1 && (facets[0].type === 'title_search' || facets[0].type === 'transcript_search')))) {
             const handle = extractHandle(val);
             const videoId = extractVideoId(val);
             const playlistId = !isLibrary ? extractPlaylistId(val) : null;
@@ -185,7 +199,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (isFilterSearchActive && !isLibrary) return;
+        if (isFilterSearchActive && !isLibraryOrGlossary) return;
         const fullQuery = facets.map(f => `${f.type}:${query}`).join(' ') + (facets.length === 0 ? query : "");
         const trimmed = fullQuery.trim();
         if (trimmed) {
@@ -216,7 +230,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         <form onSubmit={handleSubmit} className="w-full max-w-2xl mx-auto mb-10 px-4">
             <div className={`flex items-stretch justify-center transition-all ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
                 <div ref={containerRef} className="relative flex-1">
-                    <div className={`flex flex-wrap items-center bg-[#121212] border border-[#404040] ${isLibrary ? 'rounded-full' : 'rounded-l-full'} focus-within:ring-1 focus-within:ring-[red] transition-all min-h-11 py-1 px-3 gap-2`}>
+                    <div className={`flex flex-wrap items-center bg-[#121212] border border-[#404040] ${isLibraryOrGlossary ? 'rounded-full' : 'rounded-l-full'} focus-within:ring-1 focus-within:ring-[red] transition-all min-h-11 py-1 px-3 gap-2`}>
                         {facets.map((f, i) => (
                             <div key={`${f.type}-${i}`} className="flex items-center gap-1.5 bg-[#272727] border border-[#444444] text-[#aaaaaa] rounded-full px-3 py-0.5 animate-in zoom-in-95 duration-200 shadow-sm shrink-0 select-none">
                                 {getFacetIcon(f.type)}
@@ -237,7 +251,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                             onChange={(e) => handleInput(e.target.value)}
                             onKeyDown={handleKeyDown}
                             onFocus={handleFocus}
-                            placeholder={isLibrary ? "" : facets.length > 0 ? "" : "Search YouTube handle, playlist URL, or video URL"}
+                            placeholder={isLibraryOrGlossary ? "" : facets.length > 0 ? "" : "Search YouTube handle, playlist URL, or video URL"}
                             className="flex-1 min-w-[120px] bg-transparent text-white px-2 focus:outline-none placeholder-gray-500 text-[16px] h-full"
                             disabled={loading}
                         />
@@ -246,36 +260,61 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                         <div className="group/hint relative flex items-center pr-1">
                             <Lightbulb className="w-4 h-4 text-gray-500 hover:text-yellow-400 transition-colors cursor-help" />
 
-                            <div className="absolute top-full right-0 mt-3 w-64 bg-[#1a1a1a] border border-[#333] rounded-xl p-4 shadow-2xl opacity-0 translate-y-2 pointer-events-none group-hover/hint:opacity-100 group-hover/hint:translate-y-0 transition-all duration-200 z-100">
+                            <div className="absolute top-full right-0 mt-3 w-80 bg-[#1a1a1a] border border-[#333] rounded-xl p-4 shadow-2xl opacity-0 translate-y-2 pointer-events-none group-hover/hint:opacity-100 group-hover/hint:translate-y-0 transition-all duration-200 z-100">
                                 <h4 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 border-b border-[#333] pb-2">Search Tips</h4>
                                 <div className="space-y-4">
                                     <div className="flex flex-col gap-1">
-                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-tighter">{isLibrary ? "Library Mode" : "Paste Mode"}</span>
+                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-tighter">{isGlossary ? "Glossary Mode" : isLibrary ? "Library Mode" : "Paste Mode"}</span>
                                         <p className="text-[12px] text-gray-300">
-                                            {isLibrary ? "Filter your saved videos using facets." : "Paste any YouTube URL directly into the search bar."}
+                                            {isGlossary ? "Filter your glossary terms." : isLibrary ? "Filter your saved videos using facets." : "Paste any YouTube URL directly into the search bar."}
                                         </p>
                                     </div>
                                     <div className="flex flex-col gap-1">
                                         <span className="text-[10px] text-gray-500 font-bold uppercase tracking-tighter">Facet Options</span>
                                         <div className="grid grid-cols-1 gap-1.5 pt-1 text-[11px]">
-                                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                                <span>filter_search:</span>
-                                                <span className="text-gray-500 group-hover/code:text-gray-300">Title Filter</span>
-                                            </code>
-                                            {!isLibrary && (
+                                            {isGlossary ? (
+                                                <>
+                                                    <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                        <span>term_search:</span>
+                                                        <span className="text-gray-500 group-hover/code:text-gray-300">Term Filter</span>
+                                                    </code>
+                                                    <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                        <span>definition_search:</span>
+                                                        <span className="text-gray-500 group-hover/code:text-gray-300">Definition Filter</span>
+                                                    </code>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                        <span>title_search:</span>
+                                                        <span className="text-gray-500 group-hover/code:text-gray-300">Title Filter</span>
+                                                    </code>
+                                                    {isLibrary && (
+                                                        <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                            <span>transcript_search:</span>
+                                                            <span className="text-gray-500 group-hover/code:text-gray-300">Transcript Filter</span>
+                                                        </code>
+                                                    )}
+                                                </>
+                                            )}
+                                            {!isLibraryOrGlossary && (
                                                 <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                     <span>playlist:</span>
                                                     <span className="text-gray-500 group-hover/code:text-gray-300">ID / URL</span>
                                                 </code>
                                             )}
-                                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                                <span>video:</span>
-                                                <span className="text-gray-500 group-hover/code:text-gray-300">{'>'} / ID / URL</span>
-                                            </code>
-                                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                                <span>handle:</span>
-                                                <span className="text-gray-500 group-hover/code:text-gray-300">@ / ID / URL</span>
-                                            </code>
+                                            {!isGlossary && (
+                                                <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                    <span>video:</span>
+                                                    <span className="text-gray-500 group-hover/code:text-gray-300">{'>'} / ID / URL</span>
+                                                </code>
+                                            )}
+                                            {!isGlossary && (
+                                                <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                    <span>handle:</span>
+                                                    <span className="text-gray-500 group-hover/code:text-gray-300">@ / ID / URL</span>
+                                                </code>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
@@ -284,7 +323,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                     </div>
 
                     {/* Search History Dropdown */}
-                    {showHistory && !isLibrary && filteredHistory.length > 0 && (
+                    {showHistory && !isLibraryOrGlossary && filteredHistory.length > 0 && (
                         <div className="absolute top-full left-0 right-0 mt-1.5 bg-white dark:bg-[#141414] border border-gray-200 dark:border-[#303030] rounded-xl shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
                             <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 dark:border-[#272727]">
                                 <History className="w-3.5 h-3.5 text-gray-400 dark:text-[#666]" />
@@ -325,7 +364,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                         </div>
                     )}
                 </div>
-                {!isLibrary && (
+                {!isLibraryOrGlossary && (
                     <button
                         type="submit"
                         disabled={loading || (query.trim() === '' && facets.length === 0) || isFilterSearchActive}

@@ -31,7 +31,7 @@ export function HistoryTab({ entries, onDeleteEntry, onClearDate, onClearAll }: 
                 {entries.length > 0 && (
                     <button
                         onClick={onClearAll}
-                        className="bg-[#272727] border border-[#303030] hover:bg-[#3f3f3f] text-red-500 px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer flex items-center gap-2"
+                        className="bg-red-600 hover:bg-red-500 text-white px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer flex items-center gap-2 shadow-lg shadow-red-900/10"
                     >
                         <Trash2 className="w-3.5 h-3.5" />
                         Clear All

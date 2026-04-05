@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export interface Video {
     id: string;
@@ -14,6 +15,7 @@ export interface Video {
     dateAdded?: string;
     handle?: string;
     status?: string;
+    transcript?: string;
 }
 
 export interface SearchResponse {
@@ -245,4 +247,24 @@ export interface AppInfo {
 
 export async function getAppInfo(): Promise<AppInfo> {
     return await invoke("get_app_info");
+}
+
+export interface GlossaryTerm {
+    term: string;
+    definition: string;
+}
+export async function addGlossaryTerm(term: string, definition: string): Promise<void> {
+    await invoke("add_glossary_term", { term, definition });
+}
+
+export async function getGlossaryTerms(): Promise<[string, string][]> {
+    return await invoke("get_glossary_terms");
+}
+
+export async function deleteGlossaryTerm(term: string): Promise<void> {
+    await invoke("delete_glossary_term", { term });
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+    await openUrl(url);
 }
