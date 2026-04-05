@@ -214,27 +214,37 @@ pub fn run() {
                     {
                         // Always use HTTP server to serve frontend assets
                         // This works cross-platform and avoids asset loading issues
-                        // Try resource dir first
-                        let resource_dir = app_handle.path().resource_dir().ok().and_then(|p| Some(p));
-                        // If resources are bundled, the built frontend will typically be at <resource_dir>/dist
-                        let resource_dist = resource_dir.as_ref().map(|p| p.join("dist"));
-                        let candidates = vec![
-                            // Try resource dir first
-                            resource_dist.clone().unwrap_or_default(),
-                            // Try local paths relative to CWD (which is workspace root in dev, but might be different in production)
-                            std::path::PathBuf::from("./dist"),
-                            std::path::PathBuf::from("Kinesis/dist"),
-                            std::path::PathBuf::from("Kinesis/src-tauri/dist"),
-                            std::path::PathBuf::from("../dist"),
-                            std::path::PathBuf::from("../../dist"),
-                            std::path::PathBuf::from("dist"),
-                            // Try paths relative to executable in bundled app
-                            std::env::current_exe().ok()
-                                .and_then(|p| p.parent().map(|p| p.join("resources/dist")))
-                                .unwrap_or_default(),
-                            // Try direct workspace path
-                            std::path::PathBuf::from("C:/Users/William/Desktop/Kinesis-Update/Kinesis/src-tauri/dist"),
-                        ];
+                        let resource_dir = app_handle.path().resource_dir().ok();
+                        let mut candidates = vec![];
+
+                        if let Some(ref p) = resource_dir {
+                            // 1. Directly in resources/
+                            candidates.push(p.clone());
+                            // 2. In resources/dist/
+                            candidates.push(p.join("dist"));
+                            // 3. Scan all subdirectories in resources/
+                            if let Ok(entries) = p.read_dir() {
+                                for entry in entries.filter_map(|e| e.ok()) {
+                                    if entry.path().is_dir() {
+                                        candidates.push(entry.path());
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Local paths for development/testing
+                        candidates.push(std::path::PathBuf::from("./dist"));
+                        candidates.push(std::path::PathBuf::from("../dist"));
+                        candidates.push(std::path::PathBuf::from("dist"));
+                        candidates.push(std::path::PathBuf::from("resources/dist"));
+                        
+                        // Relative to executable (bundled app)
+                        if let Ok(exe_path) = std::env::current_exe() {
+                            if let Some(parent) = exe_path.parent() {
+                                candidates.push(parent.join("resources").join("dist"));
+                                candidates.push(parent.join("dist"));
+                            }
+                        }
 
                         // Debug: print all candidates
                         eprintln!("Looking for dist folder...");

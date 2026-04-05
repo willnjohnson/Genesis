@@ -6,7 +6,8 @@
   "build": {
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
   },
   "app": {
     "windows": [
@@ -34,7 +35,7 @@
       "icons-kinesis/icon.ico"
     ],
     "resources": [
-      "dist"
+      "../dist"
     ]
   }
 }
