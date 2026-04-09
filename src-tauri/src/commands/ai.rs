@@ -2,6 +2,11 @@ use tauri::command;
 use crate::{get_db_path, db, ollama, venice};
 
 #[command]
+pub async fn generate_image(app: tauri::AppHandle, prompt: String) -> Result<String, String> {
+    venice::generate_image(app, prompt).await
+}
+
+#[command]
 pub async fn check_ollama() -> Result<bool, String> {
     ollama::check_ollama().await
 }

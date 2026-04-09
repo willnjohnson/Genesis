@@ -31,39 +31,102 @@ impl Default for ChunkConfig {
     }
 }
 
-/// Split transcript into chunks based on word count
+/// Split transcript into chunks based on word count while preserving newlines
 fn chunk_transcript(transcript: &str, config: &ChunkConfig) -> Vec<String> {
     if transcript.trim().is_empty() {
         return vec![];
     }
-    
-    let words: Vec<&str> = transcript.split_whitespace().collect();
-    if words.is_empty() {
+
+    // Split by newlines to preserve line structure
+    let lines: Vec<&str> = transcript.lines().collect();
+    if lines.is_empty() {
         return vec![];
     }
-    
+
     let mut chunks = Vec::new();
     let chunk_size = config.chunk_size;
-    let overlap = config.chunk_overlap.min(chunk_size / 2); // Limit overlap to half chunk size
-    
-    let mut start = 0;
-    while start < words.len() {
-        // Check if we've exceeded max chunks
+    let overlap = config.chunk_overlap.min(chunk_size / 2);
+
+    let mut current_chunk = String::new();
+    let mut word_count = 0;
+    let mut chunk_start_word = 0;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line_word_count = line.split_whitespace().count();
+        
+        // If a single line exceeds chunk size, we need to handle it
+        if line_word_count > chunk_size {
+            // First, save current chunk if not empty
+            if !current_chunk.is_empty() {
+                chunks.push(current_chunk.clone());
+                current_chunk.clear();
+                word_count = 0;
+                chunk_start_word = idx;
+            }
+            
+            // Split this long line into sub-chunks
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let mut sub_start = 0;
+            while sub_start < words.len() {
+                let sub_end = (sub_start + chunk_size).min(words.len());
+                let sub_chunk: String = words[sub_start..sub_end].join(" ");
+                chunks.push(sub_chunk);
+                sub_start = sub_end - overlap.min(sub_end);
+            }
+            chunk_start_word = idx + 1;
+            word_count = 0;
+            continue;
+        }
+
+        // Check if adding this line would exceed chunk size
+        if word_count + line_word_count > chunk_size && !current_chunk.is_empty() {
+            chunks.push(current_chunk.clone());
+            
+            // For overlap, we need to be more sophisticated
+            // Start from beginning to get proper overlap
+            current_chunk = String::new();
+            word_count = 0;
+            
+            // Rebuild chunk with overlap
+            let overlap_lines: Vec<&str> = lines[chunk_start_word..idx].to_vec();
+            for overlap_line in overlap_lines {
+                let overlap_words = overlap_line.split_whitespace().count();
+                if word_count + overlap_words <= overlap {
+                    if !current_chunk.is_empty() {
+                        current_chunk.push('\n');
+                    }
+                    current_chunk.push_str(overlap_line);
+                    word_count += overlap_words;
+                } else {
+                    break;
+                }
+            }
+            
+            if !current_chunk.is_empty() {
+                current_chunk.push('\n');
+            }
+            current_chunk.push_str(line);
+            word_count += line_word_count;
+            chunk_start_word = idx;
+        } else {
+            if !current_chunk.is_empty() {
+                current_chunk.push('\n');
+            }
+            current_chunk.push_str(line);
+            word_count += line_word_count;
+        }
+
+        // Check max chunks
         if chunks.len() >= config.max_chunks {
             break;
         }
-        
-        let end = (start + chunk_size).min(words.len());
-        let chunk_text = words[start..end].join(" ");
-        chunks.push(chunk_text);
-        
-        // Move start position with overlap
-        if end >= words.len() {
-            break;
-        }
-        start = end - overlap;
     }
-    
+
+    // Push remaining chunk
+    if !current_chunk.is_empty() {
+        chunks.push(current_chunk);
+    }
+
     chunks
 }
 

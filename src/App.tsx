@@ -34,6 +34,9 @@ function App() {
     const [hasApiKey, setHasApiKey] = useState(false);
     const [videoListMode, setVideoListMode] = useState<'grid' | 'compact'>('grid');
     const [pluginSummarizeEnabled, setPluginSummarizeEnabled] = useState(false);
+    const [showSearch, setShowSearch] = useState(true);
+    const [allowDeletionLibrary, setAllowDeletionLibrary] = useState(true);
+    const [allowModificationGlossary, setAllowModificationGlossary] = useState(true);
 
     // ── Sidebar / transcript state ───────────────────────────────────────────
     const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
@@ -126,6 +129,20 @@ function App() {
             }
             getApiKey().then(k => setHasApiKey(!!k));
             getSetting('plugin_summarize_enabled').then(v => setPluginSummarizeEnabled(v === 'true'));
+            
+            // Load DB flags
+            const sSearch = await getSetting('showSearch');
+            const sDelete = await getSetting('allowDeletionLibrary');
+            const sGlossary = await getSetting('allowModificationGlossary');
+            
+            const showSearchVal = sSearch !== 'false';
+            setShowSearch(showSearchVal);
+            setAllowDeletionLibrary(sDelete !== 'false');
+            setAllowModificationGlossary(sGlossary !== 'false');
+
+            if (!showSearchVal) {
+                setViewMode('library');
+            }
         };
         initialize();
     }, []);
@@ -218,22 +235,25 @@ function App() {
                         </div>
 
                         <div className="flex gap-3">
-                            {(['search', 'library'] as ViewMode[]).map(mode => (
-                                <button
-                                    key={mode}
-                                    onClick={() => {
-                                        if (mode === 'library') {
-                                            setInitialLibrarySearch("");
-                                            setInitialLibraryFacets(DEFAULT_FILTER_FACET);
-                                            library.setLibrarySearch("title_search:");
-                                        }
-                                        setViewMode(mode);
-                                    }}
-                                    className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all cursor-pointer capitalize ${viewMode === mode ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
-                                >
-                                    {mode}
-                                </button>
-                            ))}
+                            {(['search', 'library'] as ViewMode[]).map(mode => {
+                                if (mode === 'search' && !showSearch) return null;
+                                return (
+                                    <button
+                                        key={mode}
+                                        onClick={() => {
+                                            if (mode === 'library') {
+                                                setInitialLibrarySearch("");
+                                                setInitialLibraryFacets(DEFAULT_FILTER_FACET);
+                                                library.setLibrarySearch("title_search:");
+                                            }
+                                            setViewMode(mode);
+                                        }}
+                                        className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all cursor-pointer capitalize ${viewMode === mode ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
+                                    >
+                                        {mode}
+                                    </button>
+                                );
+                            })}
                             <div className="relative">
                                 <button
                                     onClick={() => setShowGlossaryMenu(!showGlossaryMenu)}
@@ -308,6 +328,7 @@ function App() {
                         <GlossaryView
                             searchQuery={glossarySearchQuery}
                             onSearchInLibrary={handleSearchInLibrary}
+                            allowModification={allowModificationGlossary}
                         />
                     ) : viewMode === 'search' ? (
                         <>
@@ -365,6 +386,7 @@ function App() {
                                     summarizedCount={library.summarizedCount}
                                     totalCount={library.libraryVideos.length}
                                     isLibrary={true}
+                                    allowDeletion={allowDeletionLibrary}
                                 />
                             )}
                         </div>
@@ -387,6 +409,7 @@ function App() {
                 onSummaryGenerated={library.refreshSummarizedCount}
                 cachedSummaries={cachedSummaries}
                 onCacheSummary={(id, s) => setCachedSummaries(prev => ({ ...prev, [id]: s }))}
+                allowDeletion={allowDeletionLibrary}
             />
 
             <SettingsModal

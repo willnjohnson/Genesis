@@ -19,9 +19,10 @@ interface Props {
     onSummaryGenerated?: () => void;
     cachedSummaries?: Record<string, string>;
     onCacheSummary?: (videoId: string, summary: string) => void;
+    allowDeletion?: boolean;
 }
 
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, onSummaryGenerated, cachedSummaries, onCacheSummary }: Props) {
+export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true }: Props) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
@@ -416,7 +417,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                             {copied ? "Copied" : "Copy Transcript"}
                         </button>
 
-                        {existsInDb && onDelete ? (
+                        {existsInDb && onDelete && allowDeletion ? (
                             <button
                                 onClick={onDelete}
                                 disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
@@ -426,7 +427,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                 <Trash2 className="w-4 h-4" />
                                 Delete from Library
                             </button>
-                        ) : (
+                        ) : !existsInDb ? (
                             <button
                                 onClick={handleOnSave}
                                 disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
@@ -436,7 +437,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                 <Save className="w-4 h-4" />
                                 Save to Library
                             </button>
-                        )}
+                        ) : null}
                     </div>
                 </div>
             </div>

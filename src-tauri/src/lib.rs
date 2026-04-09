@@ -190,6 +190,7 @@ pub fn run() {
             commands::remove_venice_api_key,
             commands::get_venice_prompt,
             commands::set_venice_prompt,
+            commands::generate_image,
             // History
             commands::add_search_history,
             commands::get_search_history,

@@ -17,12 +17,13 @@ interface Props {
     isLibrary?: boolean;
     onLoadMore?: () => void;
     loadingMore?: boolean;
+    allowDeletion?: boolean;
 }
 
 type SortField = 'popularity' | 'date' | 'added';
 type SortOrder = 'desc' | 'asc';
 
-export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress, compact = false, onSummarizeAll, summarizeProgress, summarizedCount = 0, totalCount = 0, isLibrary = false, onLoadMore, loadingMore }: Props) {
+export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress, compact = false, onSummarizeAll, summarizeProgress, summarizedCount = 0, totalCount = 0, isLibrary = false, onLoadMore, loadingMore, allowDeletion = true }: Props) {
     const [sortField, setSortField] = useState<SortField>('date');
     const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
     const loadMoreRef = useRef<HTMLDivElement>(null);
@@ -233,7 +234,7 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                                 </div>
                             </div>
 
-                            {onDelete && (
+                            {onDelete && allowDeletion && (
                                 <button
                                     onClick={(e) => {
                                         e.stopPropagation();

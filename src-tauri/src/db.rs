@@ -65,6 +65,20 @@ pub fn init_db(db_path: &str) -> Result<()> {
         )?;
     }
 
+    // Initialize default settings if they don't exist
+    let defaults = [
+        ("showSearch", "true"),
+        ("allowDeletionLibrary", "true"),
+        ("allowModificationGlossary", "true"),
+    ];
+
+    for (key, val) in defaults.iter() {
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+            params![key, val],
+        )?;
+    }
+
     // Migration: Ensure search_history has the correct new schema (drop and recreate if it lacks search_query)
     if conn.query_row("SELECT search_query FROM search_history LIMIT 1", [], |_| Ok(())).is_err() {
         let _ = conn.execute("DROP TABLE search_history", []);
