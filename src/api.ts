@@ -16,11 +16,13 @@ export interface Video {
     handle?: string;
     status?: string;
     transcript?: string;
+    tags?: string;
 }
 
 export interface SearchResponse {
     videos: Video[];
     continuation: string | null;
+    totalCount?: number;
 }
 
 export interface DbDetails {
@@ -56,8 +58,12 @@ export async function getTranscript(id: string): Promise<string> {
     return await invoke("fetch_transcript", { videoId: id });
 }
 
-export async function summarizeTranscript(transcript: string): Promise<string> {
-    return await invoke("summarize_transcript", { transcript });
+export async function getVideoHandle(id: string): Promise<string | null> {
+    return await invoke("fetch_video_handle", { videoId: id });
+}
+
+export async function summarizeTranscript(transcript: string, handle?: string): Promise<string> {
+    return await invoke("summarize_transcript", { transcript, handle: handle ?? null });
 }
 
 export async function getVideoInfo(id: string): Promise<Video> {
@@ -196,6 +202,10 @@ export async function saveSummary(videoId: string, summary: string): Promise<voi
     await invoke("save_summary", { videoId, summary });
 }
 
+export async function saveTags(videoId: string, tags: string): Promise<void> {
+    await invoke("save_tags", { videoId, tags });
+}
+
 export async function getSummary(videoId: string): Promise<string | null> {
     return await invoke("get_summary", { videoId });
 }
@@ -267,4 +277,35 @@ export async function deleteGlossaryTerm(term: string): Promise<void> {
 
 export async function openExternalUrl(url: string): Promise<void> {
     await openUrl(url);
+}
+
+export interface CustomPrompt {
+    handle: string;
+    localPromptText: string | null;
+    cloudPromptText: string | null;
+}
+
+export async function getCustomPrompt(handle: string): Promise<[string | null, string | null]> {
+    return await invoke("get_custom_prompt", { handle });
+}
+
+export async function getAllCustomPrompts(): Promise<CustomPrompt[]> {
+    const prompts = await invoke("get_all_custom_prompts") as [string, string | null, string | null][];
+    return prompts.map(([handle, localPromptText, cloudPromptText]) => ({
+        handle,
+        localPromptText,
+        cloudPromptText,
+    }));
+}
+
+export async function setCustomPrompt(handle: string, localPromptText: string | null, cloudPromptText: string | null): Promise<void> {
+    await invoke("set_custom_prompt", { handle, localPromptText, cloudPromptText });
+}
+
+export async function deleteCustomPrompt(handle: string): Promise<void> {
+    await invoke("delete_custom_prompt", { handle });
+}
+
+export async function getUniqueHandles(): Promise<string[]> {
+    return await invoke("get_unique_handles");
 }

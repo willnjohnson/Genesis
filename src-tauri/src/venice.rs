@@ -3,10 +3,6 @@ use serde_json::Value;
 use tauri::AppHandle;
 use crate::{db, get_db_path};
 
-const DEFAULT_CHUNK_SIZE: usize = 1000;
-const DEFAULT_CHUNK_OVERLAP: usize = 100;
-const DEFAULT_MAX_CHUNKS: usize = 10;
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VeniceMessage {
     pub role: String,
@@ -19,6 +15,7 @@ pub struct VeniceRequest {
     pub messages: Vec<VeniceMessage>,
 }
 
+#[allow(dead_code)]
 fn chunk_transcript(transcript: &str, chunk_size: usize, overlap: usize, max_chunks: usize) -> Vec<String> {
     if transcript.trim().is_empty() {
         return vec![];
@@ -33,7 +30,6 @@ fn chunk_transcript(transcript: &str, chunk_size: usize, overlap: usize, max_chu
     let effective_overlap = overlap.min(chunk_size / 2);
 
     let mut current_chunk = String::new();
-    let mut word_count = 0;
     let mut chunk_start_idx = 0;
 
     for (idx, line) in lines.iter().enumerate() {
@@ -43,7 +39,6 @@ fn chunk_transcript(transcript: &str, chunk_size: usize, overlap: usize, max_chu
             if !current_chunk.is_empty() {
                 chunks.push(current_chunk.clone());
                 current_chunk.clear();
-                word_count = 0;
             }
             
             let words: Vec<&str> = line.split_whitespace().collect();
@@ -58,25 +53,24 @@ fn chunk_transcript(transcript: &str, chunk_size: usize, overlap: usize, max_chu
                 sub_start = sub_end - effective_overlap.min(sub_end);
             }
             chunk_start_idx = idx + 1;
-            word_count = 0;
             continue;
         }
 
-        if word_count + line_word_count > chunk_size && !current_chunk.is_empty() {
+        let current_word_count = current_chunk.split_whitespace().count();
+        if current_word_count + line_word_count > chunk_size && !current_chunk.is_empty() {
             chunks.push(current_chunk.clone());
             
             current_chunk = String::new();
-            word_count = 0;
             
             let overlap_lines: Vec<&str> = lines[chunk_start_idx..idx].to_vec();
             for overlap_line in overlap_lines {
                 let overlap_words = overlap_line.split_whitespace().count();
-                if word_count + overlap_words <= effective_overlap {
+                let new_count = current_chunk.split_whitespace().count();
+                if new_count + overlap_words <= effective_overlap {
                     if !current_chunk.is_empty() {
                         current_chunk.push('\n');
                     }
                     current_chunk.push_str(overlap_line);
-                    word_count += overlap_words;
                 } else {
                     break;
                 }
@@ -86,14 +80,12 @@ fn chunk_transcript(transcript: &str, chunk_size: usize, overlap: usize, max_chu
                 current_chunk.push('\n');
             }
             current_chunk.push_str(line);
-            word_count += line_word_count;
             chunk_start_idx = idx;
         } else {
             if !current_chunk.is_empty() {
                 current_chunk.push('\n');
             }
             current_chunk.push_str(line);
-            word_count += line_word_count;
         }
 
         if chunks.len() >= max_chunks {
@@ -110,7 +102,7 @@ fn chunk_transcript(transcript: &str, chunk_size: usize, overlap: usize, max_chu
 
 async fn call_venice_api(client: &reqwest::Client, api_key: &str, prompt: &str) -> Result<String, String> {
     let request_body = VeniceRequest {
-        model: "default".to_string(),
+        model: "zai-org-glm-5".to_string(),
         messages: vec![VeniceMessage {
             role: "user".to_string(),
             content: prompt.to_string(),
@@ -144,63 +136,36 @@ async fn call_venice_api(client: &reqwest::Client, api_key: &str, prompt: &str) 
     Ok(summary)
 }
 
-pub async fn summarize_transcript(app: AppHandle, transcript: String) -> Result<String, String> {
+pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Option<String>) -> Result<String, String> {
     let db_path = get_db_path(&app);
     
     let api_key = db::get_setting(&db_path, "venice_api_key")
         .map_err(|e| e.to_string())?
         .ok_or("Venice API key not found. Please set it in Settings.")?;
         
-    let prompt_template = db::get_setting(&db_path, "venice_prompt")
-        .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| "Create a synopsis of this video transcript with pretty format.".to_string());
-
-    let word_count = transcript.split_whitespace().count();
-    
-    if word_count <= DEFAULT_CHUNK_SIZE {
-        let prompt = if prompt_template.contains("{}") {
-            prompt_template.replace("{}", &transcript)
-        } else {
-            format!("{}\n\nTranscript:\n{}", prompt_template, transcript)
-        };
-
-        let client = reqwest::Client::new();
-        return call_venice_api(&client, &api_key, &prompt).await;
-    }
-
-    let chunks = chunk_transcript(&transcript, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, DEFAULT_MAX_CHUNKS);
-    
-    if chunks.is_empty() {
-        return Err("Failed to chunk transcript".to_string());
-    }
-
-    let client = reqwest::Client::new();
-    let mut chunk_summaries = Vec::new();
-
-    for (i, chunk) in chunks.iter().enumerate() {
-        let chunk_prompt = if prompt_template.contains("{}") {
-            prompt_template.replace("{}", chunk)
-        } else {
-            format!("[Part {} of {} of the transcript]\n\n{}\n\n{}", i + 1, chunks.len(), chunk, prompt_template)
-        };
-
-        match call_venice_api(&client, &api_key, &chunk_prompt).await {
-            Ok(summary) => chunk_summaries.push(summary),
-            Err(e) => return Err(format!("Failed to process chunk {}: {}", i + 1, e)),
+    let mut prompt_template = None;
+    if let Some(ref h) = handle {
+        if let Ok(Some((_, Some(cloud_prompt)))) = db::get_custom_prompt(&db_path, h) {
+            if !cloud_prompt.trim().is_empty() {
+                prompt_template = Some(cloud_prompt);
+            }
         }
     }
+    
+    let prompt_template = prompt_template.unwrap_or_else(|| {
+        db::get_setting(&db_path, "venice_prompt")
+            .unwrap_or(None)
+            .unwrap_or_else(|| "Create a synopsis of this video transcript with pretty format.".to_string())
+    });
 
-    if chunk_summaries.len() == 1 {
-        return Ok(chunk_summaries.into_iter().next().unwrap());
-    }
+    let prompt = if prompt_template.contains("{}") {
+        prompt_template.replace("{}", &transcript)
+    } else {
+        format!("{}\n\nTranscript:\n{}", prompt_template, transcript)
+    };
 
-    let combined = chunk_summaries.join("\n\n---\n\n");
-    let combine_prompt = format!(
-        "The following are summaries from different segments of a video transcript. Combine them into a single coherent synopsis:\n\n{}\n\nFinal Synopsis:",
-        combined
-    );
-
-    call_venice_api(&client, &api_key, &combine_prompt).await
+    let client = reqwest::Client::new();
+    call_venice_api(&client, &api_key, &prompt).await
 }
 
 #[derive(Debug, Serialize, Deserialize)]

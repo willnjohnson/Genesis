@@ -81,7 +81,7 @@ export function ApiKeyTab({ hasKey: initialHasKey, onKeyChange }: Props) {
                         <button
                             onClick={handleSave}
                             disabled={loading || !apiKeyInput.trim()}
-                            className="bg-red-600 hover:bg-red-500 text-white disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer shadow-lg shadow-red-900/10"
+                            className="bg-red-600 hover:bg-red-500 text-white disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer"
                         >
                             {loading ? "Saving..." : "Submit"}
                         </button>

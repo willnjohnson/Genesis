@@ -1,8 +1,14 @@
-import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink } from 'lucide-react';
+import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink, Tags, Plus } from 'lucide-react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, openExternalUrl } from '../api';
+import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms } from '../api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { TermDefinitionModal } from './TermDefinitionModal';
+
+interface GlossaryTerm {
+    term: string;
+    definition: string;
+}
 
 interface Props {
     isOpen: boolean;
@@ -11,6 +17,7 @@ interface Props {
     loading: boolean;
     title: string;
     videoId?: string;
+    handle?: string;
     onSave?: (summary?: string | null) => void;
     onDelete?: () => void;
     onRefetch?: () => void;
@@ -20,9 +27,15 @@ interface Props {
     cachedSummaries?: Record<string, string>;
     onCacheSummary?: (videoId: string, summary: string) => void;
     allowDeletion?: boolean;
+    isLibrary?: boolean;
+    videoTags?: string[];
+    onTagClick?: (term: GlossaryTerm) => void;
+    onAddTag?: (term: string) => void;
+    onRemoveTag?: (term: string) => void;
+    onSearchInLibrary?: (term: string, mode: 'title' | 'transcript' | 'tag') => void;
 }
 
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true }: Props) {
+export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onTagClick, onAddTag, onRemoveTag, onSearchInLibrary }: Props) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
@@ -37,6 +50,17 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [hasExistingSummary, setHasExistingSummary] = useState(false);
     const [checkingSummary, setCheckingSummary] = useState(false);
     const [summarizeProvider, setSummarizeProvider] = useState<'local' | 'cloud'>('local');
+    const [localPromptText, setLocalPromptText] = useState<string>('');
+    const [cloudPromptText, setCloudPromptText] = useState<string>('');
+    const [defaultLocalPrompt, setDefaultLocalPrompt] = useState<string>('');
+    const [defaultCloudPrompt, setDefaultCloudPrompt] = useState<string>('');
+    const [showPromptEditor, setShowPromptEditor] = useState(false);
+    const [showCustomPrompt, setShowCustomPrompt] = useState(true);
+    const [hasCustomPrompt, setHasCustomPrompt] = useState(false);
+    const [glossaryTerms, setGlossaryTerms] = useState<GlossaryTerm[]>([]);
+    const [showTagDropdown, setShowTagDropdown] = useState(false);
+    const [tagFilter, setTagFilter] = useState("");
+    const [selectedTerm, setSelectedTerm] = useState<GlossaryTerm | null>(null);
 
     const startResizing = useCallback((e: React.MouseEvent) => {
         isResizingRef.current = true;
@@ -82,6 +106,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                 else setSummarizeProvider('local');
             });
             document.body.style.overflow = 'hidden';
+
+            getGlossaryTerms().then(terms => {
+                setGlossaryTerms(terms.map(t => ({ term: t[0], definition: t[1] })));
+            }).catch(console.error);
         } else {
             document.body.style.overflow = 'auto';
         }
@@ -90,8 +118,22 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         };
     }, [isOpen]);
 
+    const handleClickOutside = useCallback((e: MouseEvent) => {
+        const target = e.target as HTMLElement;
+        if (showTagDropdown && !target.closest('.tag-dropdown-container')) {
+            setShowTagDropdown(false);
+            setTagFilter("");
+        }
+    }, [showTagDropdown]);
+
     useEffect(() => {
-        // Reset summary state when video changes or sidebar is closed
+        if (showTagDropdown) {
+            document.addEventListener('click', handleClickOutside);
+            return () => document.removeEventListener('click', handleClickOutside);
+        }
+    }, [showTagDropdown, handleClickOutside]);
+
+    useEffect(() => {
         if (!isOpen) {
             setSummary(null);
             setShowSummary(false);
@@ -107,19 +149,16 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                 setCheckingDb(false);
             });
 
-            // check runtime cache first
             if (cachedSummaries && cachedSummaries[videoId]) {
                 setSummary(cachedSummaries[videoId]);
                 setShowSummary(true);
                 setHasExistingSummary(true);
                 setCheckingSummary(false);
             } else {
-                // Reset states ONLY if not in cache
                 setSummary(null);
                 setShowSummary(false);
                 setHasExistingSummary(false);
 
-                // Check if summary already exists in DB
                 setCheckingSummary(true);
                 getSummary(videoId).then(existingSummary => {
                     if (existingSummary && existingSummary.trim()) {
@@ -137,6 +176,33 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             }
         }
     }, [videoId, isOpen, pluginSummarizeEnabled, cachedSummaries]);
+
+    useEffect(() => {
+        if (isOpen) {
+            setShowPromptEditor(false);
+            getOllamaPrompt().then(p => setDefaultLocalPrompt(p)).catch(() => setDefaultLocalPrompt(''));
+            getVenicePrompt().then(p => setDefaultCloudPrompt(p)).catch(() => setDefaultCloudPrompt(''));
+            getSetting('showCustomPrompt').then(v => setShowCustomPrompt(v !== 'false')).catch(() => setShowCustomPrompt(true));
+        }
+    }, [isOpen]);
+
+    useEffect(() => {
+        if (handle) {
+            getCustomPrompt(handle).then(([localPrompt, cloudPrompt]) => {
+                setLocalPromptText(localPrompt || '');
+                setCloudPromptText(cloudPrompt || '');
+                setHasCustomPrompt(!!(localPrompt || cloudPrompt));
+            }).catch(() => {
+                setLocalPromptText('');
+                setCloudPromptText('');
+                setHasCustomPrompt(false);
+            });
+        } else {
+            setLocalPromptText('');
+            setCloudPromptText('');
+            setHasCustomPrompt(false);
+        }
+    }, [handle, isLibrary]);
 
     const handleOnSave = useCallback(async () => {
         if (!videoId || !onSave) return;
@@ -165,7 +231,6 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const handleSummarize = useCallback(async () => {
         if (!transcript || showSummary) return;
 
-        // If summary already exists, just show it
         if (hasExistingSummary && summary) {
             setShowSummary(true);
             return;
@@ -174,14 +239,13 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         setLoadingSummary(true);
         setSummaryError(null);
         try {
-            const result = await summarizeTranscript(transcript);
+            const result = await summarizeTranscript(transcript, handle);
             setSummary(result);
             setShowSummary(true);
             setHasExistingSummary(true);
             onSummaryGenerated?.();
             if (videoId && onCacheSummary) onCacheSummary(videoId, result);
 
-            // Save summary to DB if video already exists in DB
             if (videoId && existsInDb) {
                 try {
                     await saveSummary(videoId, result);
@@ -194,7 +258,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         } finally {
             setLoadingSummary(false);
         }
-    }, [transcript, showSummary, hasExistingSummary, summary, videoId, existsInDb, onSummaryGenerated, onCacheSummary]);
+    }, [transcript, showSummary, hasExistingSummary, summary, videoId, existsInDb, onSummaryGenerated, onCacheSummary, handle]);
 
     const handleBackToTranscript = useCallback(() => {
         setShowSummary(false);
@@ -216,7 +280,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
 
             <div
                 id="sidebar-container"
-                className={`fixed inset-y-0 right-0 w-[1100px] max-w-full bg-[#0f0f0f] border-l border-[#303030] transform transition-transform duration-300 ease-in-out z-50 shadow-2xl ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}
+                className={`fixed inset-y-0 right-0 w-[1100px] max-w-full bg-[#0f0f0f] border-l border-[#303030] transform transition-transform duration-300 ease-in-out z-50 ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}
             >
                 <div className="h-full flex flex-col">
                     <div className="p-6 border-b border-[#303030] flex justify-between items-start bg-white/5">
@@ -238,27 +302,136 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                             className="p-6 border-r border-gray-900 bg-black/20 flex flex-col justify-center"
                         >
                             {videoId && isOpen ? (
-                                <div className={`aspect-video w-full bg-black rounded-lg overflow-hidden shadow-2xl border border-gray-800 ${isResizing ? 'pointer-events-none' : ''}`}>
-                                    <iframe
-                                        width="100%"
-                                        height="100%"
-                                        src={`https://www.youtube.com/embed/${videoId}?rel=0&modestbranding=1&playsinline=1`}
-                                        title="YouTube video player"
-                                        frameBorder="0"
-                                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                                        referrerPolicy="strict-origin-when-cross-origin"
-                                        allowFullScreen
-                                    ></iframe>
-                                    <div className="absolute bottom-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                        <button
-                                            onClick={() => openExternalUrl(`https://www.youtube.com/watch?v=${videoId}`)}
-                                            className="bg-black/80 hover:bg-black text-white px-3 py-1.5 rounded-md text-[10px] font-bold flex items-center gap-1.5 shadow-xl border border-white/10 cursor-pointer backdrop-blur-sm"
-                                        >
-                                            <ExternalLink className="w-3 h-3" />
-                                            Open in YouTube
-                                        </button>
+                                <>
+                                    <div className={`aspect-video w-full bg-black rounded-lg overflow-hidden border border-gray-800 relative group ${isResizing ? 'pointer-events-none' : ''}`}>
+                                        <iframe
+                                            width="100%"
+                                            height="100%"
+                                            src={`https://www.youtube.com/embed/${videoId}?rel=0&modestbranding=1&playsinline=1`}
+                                            title="YouTube video player"
+                                            frameBorder="0"
+                                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                            referrerPolicy="strict-origin-when-cross-origin"
+                                            allowFullScreen
+                                        />
+                                        <div className="absolute bottom-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <button
+                                                onClick={() => openExternalUrl(`https://www.youtube.com/watch?v=${videoId}`)}
+                                                className="bg-black/80 hover:bg-black text-white px-3 py-1.5 rounded-md text-[10px] font-bold flex items-center gap-1.5 border border-white/10 cursor-pointer"
+                                            >
+                                                <ExternalLink className="w-3 h-3" />
+                                                Open in YouTube
+                                            </button>
+                                        </div>
                                     </div>
-                                </div>
+
+                                    {existsInDb && (
+                                        <div className="mt-6 p-4 bg-white/5 rounded-xl border border-white/5">
+                                            <div className="flex items-center gap-2 mb-3">
+                                                <Tags className="w-4 h-4 text-[#888888]" />
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-[#888888]">Video Tags</span>
+                                            </div>
+                                            <div className="flex flex-wrap items-center gap-1.5">
+                                                {(() => {
+                                                    const filtered = [...videoTags].filter(tag => glossaryTerms.some(t => t.term === tag)).sort((a, b) => a.localeCompare(b));
+                                                    return (
+                                                        <>
+                                                            {filtered.map((tag) => (
+                                                                <button
+                                                                    key={tag}
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        const term = glossaryTerms.find(t => t.term === tag);
+                                                                        if (term) {
+                                                                            setSelectedTerm(term);
+                                                                        }
+                                                                    }}
+                                                                    className="group flex items-center gap-1 px-2.5 py-1 bg-[#222222] border border-[#383838] rounded-md text-[11px] text-white hover:bg-[#333333] transition-all cursor-pointer"
+                                                                >
+                                                                    {tag}
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            onRemoveTag?.(tag);
+                                                                        }}
+                                                                        className="text-[#666666] hover:text-red-500 transition-colors ml-1"
+                                                                    >
+                                                                        <X className="w-3 h-3" />
+                                                                    </button>
+                                                                </button>
+                                                            ))}
+                                                            
+                                                            {filtered.length === 0 && (
+                                                                <span className="text-[11px] text-[#666666] font-medium italic select-none">
+                                                                    Create a new tag
+                                                                </span>
+                                                            )}
+                                                        </>
+                                                    );
+                                                })()}
+                                                
+                                                <div className="relative tag-dropdown-container">
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setShowTagDropdown(!showTagDropdown);
+                                                        }}
+                                                        className="flex items-center justify-center w-6 h-6 bg-[#222222] border border-[#383838] rounded-md text-[10px] text-[#888888] hover:text-white hover:border-[#555555] transition-all cursor-pointer"
+                                                    >
+                                                        <Plus className="w-3 h-3" />
+                                                    </button>
+                                                    
+                                                    {showTagDropdown && (
+                                                        <div className="absolute bottom-full left-0 mb-2 bg-[#1a1a1a] border border-[#383838] rounded-lg max-h-[300px] overflow-hidden flex flex-col z-50 w-[240px]">
+                                                            <div className="p-3 border-b border-[#303030] bg-white/5">
+                                                                <input
+                                                                    type="text"
+                                                                    placeholder="Filter glossary terms..."
+                                                                    value={tagFilter}
+                                                                    onChange={(e) => setTagFilter(e.target.value)}
+                                                                    className="w-full bg-[#222222] border border-[#383838] rounded-md px-3 py-1.5 text-[11px] text-white placeholder-[#666666] focus:outline-none focus:border-red-500"
+                                                                    autoFocus
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                />
+                                                            </div>
+                                                            <div className="overflow-y-auto max-h-[150px] custom-scrollbar p-1">
+                                                                {glossaryTerms
+                                                                    .filter(t => 
+                                                                        !videoTags.includes(t.term) && 
+                                                                        t.term.toLowerCase().includes(tagFilter.toLowerCase())
+                                                                    )
+                                                                    .length === 0 ? (
+                                                                    <p className="p-4 text-[11px] text-[#666666] text-center italic">
+                                                                        {tagFilter ? "No matching terms" : "No terms available"}
+                                                                    </p>
+                                                                ) : (
+                                                                    glossaryTerms
+                                                                        .filter(t => 
+                                                                            !videoTags.includes(t.term) && 
+                                                                            t.term.toLowerCase().includes(tagFilter.toLowerCase())
+                                                                        )
+                                                                        .map((term) => (
+                                                                            <button
+                                                                                key={term.term}
+                                                                                onClick={() => {
+                                                                                    onAddTag?.(term.term);
+                                                                                    setShowTagDropdown(false);
+                                                                                    setTagFilter("");
+                                                                                }}
+                                                                                className="w-full text-left px-4 py-2 text-[11px] text-white hover:bg-[#2a2a2a] transition-colors cursor-pointer rounded"
+                                                                            >
+                                                                                {term.term}
+                                                                            </button>
+                                                                        ))
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
                             ) : (
                                 <div className="aspect-video w-full bg-gray-900/50 rounded-lg flex items-center justify-center text-gray-700 text-[10px] uppercase tracking-widest font-bold">
                                     No Video ID
@@ -280,7 +453,61 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                             style={{ width: `${100 - splitPercent}%` }}
                             className="overflow-y-auto p-8 text-[#aaaaaa] text-sm leading-relaxed font-sans selection:bg-[#3f3f3f] bg-[#121212]"
                         >
-                            {/* Header with Sparkle button */}
+                            {showCustomPrompt && pluginSummarizeEnabled && (
+                                <div className="mb-4 border-b border-[#333333] pb-4">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#888888]">Custom Prompt</span>
+                                        {(isLibrary || hasCustomPrompt) ? (
+                                            <button
+                                                onClick={() => setShowPromptEditor(!showPromptEditor)}
+                                                className="text-[#666666] hover:text-white transition-colors cursor-pointer text-xs"
+                                            >
+                                                {showPromptEditor ? 'Hide Editor' : 'Show Editor'}
+                                            </button>
+                                        ) : (
+                                            <span className="text-[10px] text-[#666666]">(Save to Library to Edit)</span>
+                                        )}
+                                    </div>
+                                    {showPromptEditor && (
+                                        <div className="mt-3 space-y-3">
+                                            <div>
+                                                <label className="text-[10px] uppercase tracking-wider text-[#666666] font-bold">Local (Ollama)</label>
+                                                <textarea
+                                                    value={localPromptText}
+                                                    onChange={(e) => setLocalPromptText(e.target.value)}
+                                                    placeholder={defaultLocalPrompt || "Enter custom prompt for local model..."}
+                                                    className="w-full mt-1 p-2 bg-[#1a1a1a] border border-[#333333] rounded-md text-xs text-gray-300 placeholder-[#555555] focus:outline-none focus:border-[#555555] resize-none"
+                                                    rows={3}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="text-[10px] uppercase tracking-wider text-[#666666] font-bold">Cloud (Venice)</label>
+                                                <textarea
+                                                    value={cloudPromptText}
+                                                    onChange={(e) => setCloudPromptText(e.target.value)}
+                                                    placeholder={defaultCloudPrompt || "Enter custom prompt for cloud model..."}
+                                                    className="w-full mt-1 p-2 bg-[#1a1a1a] border border-[#333333] rounded-md text-xs text-gray-300 placeholder-[#555555] focus:outline-none focus:border-[#555555] resize-none"
+                                                    rows={3}
+                                                />
+                                            </div>
+                                            <button
+                                                onClick={async () => {
+                                                    if (handle) {
+                                                        await setCustomPrompt(handle, localPromptText || null, cloudPromptText || null);
+                                                        setShowPromptEditor(false);
+                                                    }
+                                                }}
+                                                disabled={!handle}
+                                                className="px-3 py-1 bg-blue-600 text-white rounded-md text-[10px] font-bold hover:bg-blue-500 transition-colors disabled:opacity-30 disabled:cursor-default cursor-pointer"
+                                            >
+                                                Save Prompt
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Header with Summarize button */}
                             <div className="flex justify-between items-center mb-4">
                                 <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#aaaaaa]">
                                     {showSummary ? (
@@ -305,7 +532,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             onClick={handleSummarize}
                                             disabled={loadingSummary || loading || !transcript || transcript.includes("No transcript") || transcript.includes("Failed to load") || checkingSummary}
                                             title={hasExistingSummary ? "View AI Summary from database" : `Generate AI summary with ${summarizeProvider === 'cloud' ? 'Venice' : 'Ollama'}`}
-                                            className="summarize-btn flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg hover:from-purple-500 hover:to-blue-500 transition-all text-[10px] font-bold uppercase tracking-wider disabled:opacity-30 disabled:cursor-default cursor-pointer shadow-lg shadow-purple-900/20"
+                                            className="summarize-btn flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg hover:from-purple-500 hover:to-blue-500 transition-all text-[10px] font-bold uppercase tracking-wider disabled:opacity-30 disabled:cursor-default cursor-pointer"
                                         >
                                             {checkingSummary ? (
                                                 <>
@@ -352,7 +579,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                         {summaryCopied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                                         {summaryCopied ? "Copied" : "Copy Summary"}
                                     </button>
-                                    <div className="text-gray-300 leading-relaxed prose prose-invert prose-sm max-w-none">
+                                    <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none">
                                         <ReactMarkdown
                                             remarkPlugins={[remarkGfm]}
                                             components={{
@@ -365,6 +592,12 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                             if (props.href) openExternalUrl(props.href);
                                                         }}
                                                         className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
+                                                    />
+                                                ),
+                                                img: ({ node, ...props }) => (
+                                                    <img
+                                                        {...props}
+                                                        className="rounded-xl border border-white/10"
                                                     />
                                                 )
                                             }}
@@ -422,7 +655,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                 onClick={onDelete}
                                 disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
                                 title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to delete" : "Delete from Library"}
-                                className={`flex-1 py-2 rounded-lg bg-red-600 text-white transition-all text-sm font-bold disabled:opacity-20 shadow-lg shadow-red-900/10 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
+                                className={`flex-1 py-2 rounded-lg bg-red-600 text-white transition-all text-sm font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                             >
                                 <Trash2 className="w-4 h-4" />
                                 Delete from Library
@@ -432,7 +665,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                 onClick={handleOnSave}
                                 disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
                                 title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to save" : "Save to Library"}
-                                className={`flex-1 py-2 rounded-lg bg-red-600 text-white transition-all text-sm font-bold disabled:opacity-20 shadow-lg shadow-red-900/10 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
+                                className={`flex-1 py-2 rounded-lg bg-red-600 text-white transition-all text-sm font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                             >
                                 <Save className="w-4 h-4" />
                                 Save to Library
@@ -441,6 +674,15 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                     </div>
                 </div>
             </div>
+
+            {/* Term Definition Modal */}
+            {selectedTerm && onSearchInLibrary && (
+                <TermDefinitionModal
+                    term={selectedTerm}
+                    onClose={() => setSelectedTerm(null)}
+                    onSearch={onSearchInLibrary}
+                />
+            )}
         </>
     );
 }

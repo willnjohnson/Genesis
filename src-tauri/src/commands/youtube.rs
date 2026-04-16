@@ -68,7 +68,7 @@ pub async fn fetch_videos(
         }
     }
 
-    Ok(VideoResponse { videos, continuation: None })
+    Ok(VideoResponse { videos, continuation: None, total_count: None })
 }
 
 #[command]
@@ -135,6 +135,7 @@ pub async fn fetch_channel_videos_v3(
                     author: snippet["channelTitle"].as_str().map(|s| decode_html(s)),
                     handle: None, status: None, date_added: None,
                     length_seconds: None, video_type: None, transcript: None,
+                    tags: None,
                 });
             }
         }
@@ -160,7 +161,7 @@ pub async fn fetch_channel_videos_v3(
         }
     }
 
-    Ok(VideoResponse { videos, continuation: next_page_token })
+    Ok(VideoResponse { videos, continuation: next_page_token, total_count: None })
 }
 
 #[command]
@@ -209,7 +210,36 @@ pub async fn fetch_video_info(_app: tauri::AppHandle, video_id: String) -> Resul
         view_count: parse_view_count(details["viewCount"].as_str().unwrap_or("0")).to_string(),
         author, handle, status: None, date_added: None,
         length_seconds: None, video_type: None, transcript: None,
+        tags: None,
     })
+}
+
+#[command]
+pub async fn fetch_video_handle(_app: tauri::AppHandle, video_id: String) -> Result<Option<String>, String> {
+    let client = YouTubeClient::new(ClientType::Web);
+    let player = client.player(&video_id).await?;
+    let details = &player["videoDetails"];
+
+    let mut handle: Option<String> = None;
+    
+    // Try to get handle from author array
+    if let Some(authors) = details["author"].as_array() {
+        if let Some(first) = authors.first() {
+            if let Some(channel_id) = first["channel_id"].as_str() {
+                handle = youtube::extract_handle_from_channel_id(channel_id).await.ok().flatten();
+            }
+        }
+    }
+
+    // Try other methods to get handle
+    for try_handle in [
+        player["microformat"]["playerMicroformatRenderer"]["ownerProfileUrl"].as_str().and_then(extract_handle_from_url),
+        details["author"].as_array().and_then(|a| a.first()).and_then(|f| f["url"].as_str()).and_then(extract_handle_from_url),
+    ] {
+        if handle.is_none() { handle = try_handle; }
+    }
+
+    Ok(handle)
 }
 
 #[command]
@@ -275,6 +305,7 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
             length_seconds: Some(v_data.3),
             video_type: Some(v_data.8),
             transcript: Some(v_data.4),
+            tags: None,
         });
     }
 
@@ -352,6 +383,7 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
         length_seconds: Some(length),
         video_type: Some(video_type.to_string()),
         transcript: Some(transcript),
+        tags: None,
     })
 }
 
@@ -360,7 +392,7 @@ pub async fn fetch_saved_videos(app: tauri::AppHandle, video_type: Option<String
     let db_path = get_db_path(&app);
     db::init_db(&db_path).map_err(|e| e.to_string())?;
     let videos = db::list_videos(&db_path, video_type.as_deref()).map_err(|e| e.to_string())?;
-    Ok(VideoResponse { videos, continuation: None })
+    Ok(VideoResponse { videos, continuation: None, total_count: None })
 }
 
 #[command]
@@ -421,6 +453,9 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
                 let snippet = &item["snippet"];
                 if let Some(vid) = item["id"]["videoId"].as_str() {
                     video_ids.push(vid.to_string());
+                    let channel_title = snippet["channelTitle"].as_str().map(|s| decode_html(s));
+                    // Try to extract handle from channel title (e.g., "MrBeast" -> check if we can get @handle)
+                    // For API results, we don't get @handle directly, so we'll try to look it up when needed
                     videos.push(Video {
                         id: vid.to_string(),
                         title: decode_html(&snippet["title"].as_str().unwrap_or("Unknown").to_string()),
@@ -429,9 +464,10 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
                             .unwrap_or("").to_string(),
                         published_at: snippet["publishedAt"].as_str().unwrap_or("").to_string(),
                         view_count: "0".to_string(),
-                        author: snippet["channelTitle"].as_str().map(|s| decode_html(s)),
+                        author: channel_title,
                         handle: None, status: None, date_added: None,
                         length_seconds: None, video_type: None, transcript: None,
+                        tags: None,
                     });
                 }
             }
@@ -458,7 +494,7 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
             }
         }
 
-        return Ok(VideoResponse { videos, continuation: next_page_token });
+        return Ok(VideoResponse { videos, continuation: next_page_token, total_count: None });
     }
 
     // Fallback to web scraping without pagination
@@ -483,5 +519,5 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
         }
     }
 
-    Ok(VideoResponse { videos, continuation: None })
+    Ok(VideoResponse { videos, continuation: None, total_count: None })
 }

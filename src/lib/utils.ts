@@ -11,3 +11,17 @@ export function decodeHtmlEntities(text: string): string {
     textarea.innerHTML = text;
     return textarea.value;
 }
+
+/**
+ * Normalizes text for searching by converting to lowercase and 
+ * standardizing punctuation characters (smart quotes, dashes, etc.)
+ */
+export function normalizeText(text: string): string {
+    if (!text) return "";
+    return text
+        .toLowerCase()
+        .replace(/[‘’]/g, "'")
+        .replace(/[“”]/g, '"')
+        .replace(/…/g, "...")
+        .replace(/[—–]/g, "-");
+}

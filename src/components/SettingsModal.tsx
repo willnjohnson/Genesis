@@ -116,7 +116,7 @@ export function SettingsModal({
             onClick={onClose}
         >
             <div
-                className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-2xl min-h-[450px] max-h-[85vh] shadow-2xl flex flex-col overflow-hidden"
+                className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-2xl min-h-[450px] max-h-[85vh] flex flex-col overflow-hidden"
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Header */}

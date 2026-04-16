@@ -7,7 +7,7 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.2.2";
+const VERSION: &str = "0.2.4";
 
 fn get_window_title() -> String {
     format!("{} v{}", APP_NAME, VERSION)
@@ -157,6 +157,7 @@ pub fn run() {
             commands::fetch_view_count,
             commands::fetch_video_info,
             commands::fetch_transcript,
+            commands::fetch_video_handle,
             commands::save_video,
             commands::fetch_saved_videos,
             commands::delete_video,
@@ -181,6 +182,7 @@ pub fn run() {
             commands::set_max_chunks,
             commands::summarize_transcript,
             commands::save_summary,
+            commands::save_tags,
             commands::get_summary,
             commands::get_summarized_count,
             commands::get_videos_with_summaries,
@@ -191,6 +193,11 @@ pub fn run() {
             commands::get_venice_prompt,
             commands::set_venice_prompt,
             commands::generate_image,
+            commands::get_custom_prompt,
+            commands::get_all_custom_prompts,
+            commands::set_custom_prompt,
+            commands::delete_custom_prompt,
+            commands::get_unique_handles,
             // History
             commands::add_search_history,
             commands::get_search_history,

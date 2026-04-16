@@ -1,6 +1,6 @@
 import { Save, Trash2, Bookmark, ArrowDown, ArrowUp, Calendar, Users, Sparkles } from 'lucide-react';
 import { type Video } from '../api';
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { format } from 'date-fns';
 
 interface Props {
@@ -15,35 +15,15 @@ interface Props {
     summarizedCount?: number;
     totalCount?: number;
     isLibrary?: boolean;
-    onLoadMore?: () => void;
-    loadingMore?: boolean;
     allowDeletion?: boolean;
 }
 
 type SortField = 'popularity' | 'date' | 'added';
 type SortOrder = 'desc' | 'asc';
 
-export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress, compact = false, onSummarizeAll, summarizeProgress, summarizedCount = 0, totalCount = 0, isLibrary = false, onLoadMore, loadingMore, allowDeletion = true }: Props) {
+export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress, compact = false, onSummarizeAll, summarizeProgress, summarizedCount = 0, totalCount = 0, isLibrary = false, allowDeletion = true }: Props) {
     const [sortField, setSortField] = useState<SortField>('date');
     const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
-    const loadMoreRef = useRef<HTMLDivElement>(null);
-
-    // Infinite scroll - trigger onLoadMore when sentinel comes into view
-    useEffect(() => {
-        if (!onLoadMore || !loadMoreRef.current) return;
-
-        const observer = new IntersectionObserver(
-            (entries) => {
-                if (entries[0].isIntersecting && !loadingMore) {
-                    onLoadMore();
-                }
-            },
-            { threshold: 0.1, rootMargin: '100px' }
-        );
-
-        observer.observe(loadMoreRef.current);
-        return () => observer.disconnect();
-    }, [onLoadMore, loadingMore]);
 
     const sortedVideos = useMemo(() => {
         return [...videos].sort((a, b) => {
@@ -121,7 +101,7 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                         <button
                             onClick={onSummarizeAll}
                             disabled={!!summarizeProgress}
-                            className={`summarize-btn mr-4 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-500 hover:to-blue-500 rounded-lg text-sm font-semibold transition-all disabled:opacity-50 flex items-center gap-2 ${!summarizeProgress ? 'cursor-pointer shadow-lg shadow-purple-900/20' : 'cursor-default'}`}
+                            className={`summarize-btn mr-4 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-500 hover:to-blue-500 rounded-lg text-sm font-semibold transition-all disabled:opacity-50 flex items-center gap-2 ${!summarizeProgress ? 'cursor-pointer' : 'cursor-default'}`}
                         >
                             {summarizeProgress ? (
                                 <>
@@ -137,11 +117,11 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                         </button>
                     )}
 
-                    <div className="flex items-center bg-[#1a1a1a] p-1 rounded-xl border border-[#272727] gap-1 shadow-inner">
+                    <div className="flex items-center bg-[#1a1a1a] p-1 rounded-xl border border-[#272727] gap-1">
                         <div className="flex gap-2">
                             <button
                                 onClick={() => handleSortField('date')}
-                                className={`px-3 py-1.5 rounded-lg text-[13px] font-bold transition-all cursor-pointer flex items-center gap-2 ${sortField === 'date' ? 'bg-white text-black shadow-lg scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
+                                className={`px-3 py-1.5 rounded-lg text-[13px] font-bold transition-all cursor-pointer flex items-center gap-2 ${sortField === 'date' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
                             >
                                 <Calendar className="w-3.5 h-3.5" />
                                 Date Added
@@ -149,7 +129,7 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                             {videos.some(v => v.dateAdded) && (
                                 <button
                                     onClick={() => handleSortField('added')}
-                                    className={`px-3 py-1.5 rounded-lg text-[13px] font-bold transition-all cursor-pointer flex items-center gap-2 ${sortField === 'added' ? 'bg-white text-black shadow-lg scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
+                                    className={`px-3 py-1.5 rounded-lg text-[13px] font-bold transition-all cursor-pointer flex items-center gap-2 ${sortField === 'added' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
                                 >
                                     <Bookmark className="w-3.5 h-3.5" />
                                     Date Bookmarked
@@ -157,7 +137,7 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                             )}
                             <button
                                 onClick={() => handleSortField('popularity')}
-                                className={`px-3 py-1.5 rounded-lg text-[13px] font-bold transition-all cursor-pointer flex items-center gap-2 ${sortField === 'popularity' ? 'bg-white text-black shadow-lg scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
+                                className={`px-3 py-1.5 rounded-lg text-[13px] font-bold transition-all cursor-pointer flex items-center gap-2 ${sortField === 'popularity' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
                             >
                                 <Users className="w-3.5 h-3.5" />
                                 Views
@@ -188,7 +168,6 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                         className="group flex flex-col gap-2 cursor-pointer"
                         onClick={() => onSelect(video)}
                     >
-                        {/* Thumbnail */}
                         <div className={`${compact ? 'aspect-[16/9]' : 'aspect-video'} w-full rounded-lg overflow-hidden bg-[#272727] relative`}>
                             <img
                                 src={video.thumbnail}
@@ -198,7 +177,6 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                             />
                         </div>
 
-                        {/* Details */}
                         <div className="flex gap-2">
                             <div className="flex flex-col flex-1 overflow-hidden">
                                 <h3 className={`${compact ? 'text-xs' : 'text-sm'} font-bold text-white line-clamp-2 leading-tight group-hover:text-white`}>
@@ -250,18 +228,6 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                     </div>
                 ))}
             </div>
-
-            {/* Sentinel for infinite scroll */}
-            {onLoadMore && (
-                <div ref={loadMoreRef} className="py-8 flex items-center justify-center">
-                    {loadingMore && (
-                        <div className="flex flex-col items-center gap-2">
-                            <div className="w-8 h-8 border-4 border-[#303030] border-t-red-600 rounded-full animate-spin" />
-                            <p className="font-medium text-sm text-gray-400">Loading more...</p>
-                        </div>
-                    )}
-                </div>
-            )}
         </div>
     );
 }
@@ -299,4 +265,3 @@ function formatViewCount(count: string): string {
     if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
     return n.toLocaleString();
 }
-

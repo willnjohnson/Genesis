@@ -13,7 +13,7 @@ export function ConfirmDialog({ message, onConfirm, onCancel }: ConfirmDialogPro
             onClick={onCancel}
         >
             <div
-                className="bg-[#0f0f0f] border border-[#303030] rounded-lg p-6 max-w-md mx-4 shadow-2xl animate-in zoom-in-95 duration-200"
+                className="bg-[#0f0f0f] border border-[#303030] rounded-lg p-6 max-w-md mx-4 animate-in zoom-in-95 duration-200"
                 onClick={(e) => e.stopPropagation()}
             >
                 <div className="flex items-start justify-between mb-4">
@@ -37,7 +37,7 @@ export function ConfirmDialog({ message, onConfirm, onCancel }: ConfirmDialogPro
                     </button>
                     <button
                         onClick={onConfirm}
-                        className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 cursor-pointer text-white text-sm font-semibold transition-colors shadow-lg shadow-red-900/10"
+                        className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 cursor-pointer text-white text-sm font-semibold transition-colors"
                     >
                         Delete
                     </button>

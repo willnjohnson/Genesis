@@ -1,11 +1,11 @@
 import { useEffect, useState, useMemo } from 'react';
-import { getGlossaryTerms, addGlossaryTerm, deleteGlossaryTerm, openExternalUrl, type GlossaryTerm } from '../api';
-import { Plus, X, Pencil, FileText } from 'lucide-react';
+import { getGlossaryTerms, addGlossaryTerm, deleteGlossaryTerm, type GlossaryTerm } from '../api';
+import { Plus, X, Pencil } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { TermDefinitionModal } from './TermDefinitionModal';
+import { normalizeText } from '../lib/utils';
 
-export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'title' | 'transcript') => void, allowModification?: boolean }) {
+export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'title' | 'transcript' | 'tag') => void, allowModification?: boolean, onChange?: () => void }) {
     const [terms, setTerms] = useState<GlossaryTerm[]>([]);
     const [loading, setLoading] = useState(true);
     const [showAddModal, setShowAddModal] = useState(false);
@@ -36,6 +36,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
         setNewDefinition("");
         setShowAddModal(false);
         loadTerms();
+        onChange?.();
     };
 
     const handleDelete = async () => {
@@ -44,6 +45,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
         setTermToDelete(null);
         if (selectedTerm?.term === termToDelete.term) setSelectedTerm(null);
         loadTerms();
+        onChange?.();
     };
 
     const handleEditSave = async (e: React.FormEvent) => {
@@ -59,15 +61,16 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
             setSelectedTerm({ term: termToEdit.term.trim(), definition: termToEdit.definition.trim() });
         }
         loadTerms();
+        onChange?.();
     };
 
     const filteredTerms = useMemo(() => {
         const isDef = searchQuery.includes("definition_search:");
-        const q = searchQuery.toLowerCase().trim().replace(/term_search:/g, '').replace(/definition_search:/g, '').replace(/"/g, '').trim();
+        const q = normalizeText(searchQuery.replace(/term_search:/g, '').replace(/definition_search:/g, '').replace(/"/g, '').trim());
         if (!q) return terms;
         return terms.filter(t => {
-            if (isDef) return t.definition.toLowerCase().includes(q);
-            return t.term.toLowerCase().includes(q);
+            if (isDef) return normalizeText(t.definition).includes(q);
+            return normalizeText(t.term).includes(q);
         });
     }, [terms, searchQuery]);
 
@@ -97,7 +100,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                 {allowModification && (
                     <button
                         onClick={() => setShowAddModal(true)}
-                        className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-colors text-sm font-semibold cursor-pointer shadow-lg"
+                        className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-colors text-sm font-semibold cursor-pointer"
                     >
                         <Plus className="w-4 h-4" /> Add Term
                     </button>
@@ -169,7 +172,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                     <form
                         onSubmit={handleAdd}
                         onClick={e => e.stopPropagation()}
-                        className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-md shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"
+                        className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-md flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"
                     >
                         {/* Header */}
                         <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
@@ -220,7 +223,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                             </button>
                             <button
                                 type="submit"
-                                className="px-6 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white transition-all text-sm font-bold cursor-pointer shadow-lg shadow-red-900/10"
+                                className="px-6 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white transition-all text-sm font-bold cursor-pointer"
                             >
                                 Save Term
                             </button>
@@ -238,7 +241,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                     <form
                         onSubmit={handleEditSave}
                         onClick={e => e.stopPropagation()}
-                        className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-md shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"
+                        className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-md flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"
                     >
                         {/* Header */}
                         <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
@@ -286,7 +289,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                             </button>
                             <button
                                 type="submit"
-                                className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-all text-sm font-bold cursor-pointer shadow-lg shadow-blue-900/10"
+                                className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-all text-sm font-bold cursor-pointer"
                             >
                                 Save Changes
                             </button>
@@ -297,68 +300,11 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
 
             {/* View Definition Modal */}
             {selectedTerm && (
-                <div
-                    className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200"
-                    onClick={() => setSelectedTerm(null)}
-                >
-                    <div
-                        onClick={e => e.stopPropagation()}
-                        className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-7xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 h-[90vh]"
-                    >
-                        {/* Header */}
-                        <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
-                            <div className="flex items-center gap-3 pr-4 overflow-hidden">
-                                <FileText className="w-5 h-5 text-gray-400 shrink-0" />
-                                <h2 className="text-xl font-bold text-white truncate">{selectedTerm.term}</h2>
-                            </div>
-                            <button onClick={() => setSelectedTerm(null)} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
-                                <X className="w-5 h-5" />
-                            </button>
-                        </div>
-
-                        {/* Content */}
-                        <div className="p-8 bg-[#0f0f0f] overflow-y-auto flex-1">
-                            <div className="text-gray-300 leading-relaxed prose prose-invert prose-lg max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
-                                <ReactMarkdown
-                                    remarkPlugins={[remarkGfm]}
-                                    components={{
-                                        a: ({ node, ...props }) => (
-                                            <a
-                                                {...props}
-                                                href="#"
-                                                onClick={(e) => {
-                                                    e.preventDefault();
-                                                    if (props.href) openExternalUrl(props.href);
-                                                }}
-                                                className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
-                                            />
-                                        )
-                                    }}
-                                >
-                                    {selectedTerm.definition}
-                                </ReactMarkdown>
-                            </div>
-                        </div>
-
-                        {/* Footer */}
-                        <div className="px-6 py-4 border-t border-[#303030] flex justify-start items-center bg-[#141414]">
-                            <div className="flex gap-3">
-                                <button
-                                    onClick={() => onSearchInLibrary(selectedTerm.term, 'title')}
-                                    className="px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
-                                >
-                                    Search Term in Title
-                                </button>
-                                <button
-                                    onClick={() => onSearchInLibrary(selectedTerm.term, 'transcript')}
-                                    className="px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
-                                >
-                                    Search Term in Transcript
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                <TermDefinitionModal
+                    term={selectedTerm}
+                    onClose={() => setSelectedTerm(null)}
+                    onSearch={onSearchInLibrary}
+                />
             )}
 
             {/* Confirm Delete Modal */}

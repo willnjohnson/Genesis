@@ -6,7 +6,7 @@ pub fn parse_view_count(view_count_str: &str) -> i64 {
         .replace(" views", "")
         .replace(" view", "")
         .replace(",", "");
-    
+
     let multiplier: i64 = if cleaned.ends_with('M') || cleaned.ends_with('m') {
         1_000_000
     } else if cleaned.ends_with('K') || cleaned.ends_with('k') {
@@ -14,9 +14,9 @@ pub fn parse_view_count(view_count_str: &str) -> i64 {
     } else {
         1
     };
-    
+
     let num_str = cleaned.trim_end_matches(|c| c == 'M' || c == 'm' || c == 'K' || c == 'k');
-    
+
     num_str.parse::<i64>().unwrap_or(0) * multiplier
 }
 
@@ -63,6 +63,7 @@ pub struct Video {
     #[serde(rename = "videoType")]
     pub video_type: Option<String>,
     pub transcript: Option<String>,
+    pub tags: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,6 +78,8 @@ pub struct ChannelInfo {
 pub struct VideoResponse {
     pub videos: Vec<Video>,
     pub continuation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_count: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -37,7 +37,7 @@ function PromptEditor({
                 {dirty && (
                     <button
                         onClick={onSave}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-[10px] font-bold transition-colors cursor-pointer shadow-lg shadow-blue-900/10"
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-[10px] font-bold transition-colors cursor-pointer"
                     >
                         <Save className="w-3 h-3" />
                         Save
@@ -146,7 +146,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
                             <button
                                 onClick={handleInstallOrPull}
                                 disabled={loading}
-                                className="px-3 py-1.5 bg-red-600 text-white hover:bg-red-500 rounded-md text-[10px] font-bold transition-all cursor-pointer disabled:opacity-50 shadow-lg shadow-red-900/10"
+                                className="px-3 py-1.5 bg-red-600 text-white hover:bg-red-500 rounded-md text-[10px] font-bold transition-all cursor-pointer disabled:opacity-50"
                             >
                                 Pull Model
                             </button>
@@ -154,7 +154,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
                             <button
                                 onClick={handleRemoveModel}
                                 disabled={loading}
-                                className="px-3 py-1.5 bg-red-600 text-white hover:bg-red-500 rounded-md text-[10px] font-bold transition-all cursor-pointer shadow-lg shadow-red-900/10 disabled:opacity-50"
+                                className="px-3 py-1.5 bg-red-600 text-white hover:bg-red-500 rounded-md text-[10px] font-bold transition-all cursor-pointer disabled:opacity-50"
                             >
                                 Remove Model
                             </button>
@@ -184,7 +184,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
 
             {/* Prompt */}
             <PromptEditor
-                label="Local Prompt Template"
+                label="Local Prompt Template (Default)"
                 value={prompt}
                 onChange={(v) => { setPrompt(v); setDirty(true); }}
                 onSave={handleSavePrompt}
@@ -283,7 +283,7 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
                             <button
                                 onClick={handleSaveKey}
                                 disabled={loading || !keyInput.trim()}
-                                className="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-md font-bold text-[10px] transition-colors cursor-pointer disabled:opacity-50 shadow-lg shadow-red-900/10"
+                                className="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-md font-bold text-[10px] transition-colors cursor-pointer disabled:opacity-50"
                             >
                                 Activate
                             </button>
@@ -305,7 +305,7 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
 
             {/* Prompt */}
             <PromptEditor
-                label="Cloud Prompt Template"
+                label="Cloud Prompt Template (Default)"
                 value={prompt}
                 onChange={(v) => { setPrompt(v); setPromptDirty(true); }}
                 onSave={handleSavePrompt}
@@ -333,10 +333,12 @@ interface Props {
 export function PluginsTab({ plugins, onTogglePlugin, loading }: Props) {
     const [summarizeTab, setSummarizeTab] = useState<'local' | 'cloud'>('local');
     const [summarizeProvider, setSummarizeProvider] = useState<string>('local');
+    const [showCustomPrompt, setShowCustomPrompt] = useState(true);
 
     useEffect(() => {
         import("../../api").then(({ getSetting }) => {
             getSetting('summarize_provider').then(p => setSummarizeProvider(p || 'local'));
+            getSetting('showCustomPrompt').then(v => setShowCustomPrompt(v !== 'false'));
         });
     }, []);
 
@@ -367,7 +369,7 @@ export function PluginsTab({ plugins, onTogglePlugin, loading }: Props) {
                                     <button
                                         onClick={() => onTogglePlugin(plugin.id, !plugin.enabled)}
                                         disabled={loading}
-                                        className={`px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer disabled:opacity-50 ${plugin.enabled ? 'bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white font-semibold' : 'bg-red-600 text-white hover:bg-red-500 shadow-lg shadow-red-900/10'}`}
+                                        className={`px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer disabled:opacity-50 ${plugin.enabled ? 'bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white font-semibold' : 'bg-red-600 text-white hover:bg-red-500'}`}
                                     >
                                         {plugin.enabled ? 'Disable' : 'Enable'}
                                     </button>
@@ -377,6 +379,21 @@ export function PluginsTab({ plugins, onTogglePlugin, loading }: Props) {
                             {/* Summarize plugin settings */}
                             {plugin.id === 'summarize' && plugin.enabled && (
                                 <div className="mt-6 pt-6 border-t border-[#303030]">
+                                    {/* Show Custom Prompt Toggle */}
+                                    <div className="flex items-center justify-between mb-4">
+                                        <span className="text-xs font-bold text-white">Show Custom Prompt in Sidebar</span>
+                                        <button
+                                            onClick={async () => {
+                                                const newValue = !showCustomPrompt;
+                                                setShowCustomPrompt(newValue);
+                                                await setSetting('showCustomPrompt', newValue.toString());
+                                            }}
+                                            className={`w-10 h-5 rounded-full transition-colors cursor-pointer ${showCustomPrompt ? 'bg-blue-600' : 'bg-[#333333]'}`}
+                                        >
+                                            <div className={`w-4 h-4 bg-white rounded-full transition-transform ${showCustomPrompt ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                                        </button>
+                                    </div>
+
                                     {/* Sub-tabs */}
                                     <div className="flex gap-4 mb-4 border-b border-[#303030]">
                                         {(['local', 'cloud'] as const).map(t => (

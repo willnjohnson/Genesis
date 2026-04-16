@@ -105,16 +105,16 @@ pub fn set_max_chunks(app: tauri::AppHandle, max: usize) -> Result<(), String> {
 // ─── Summarize commands ───────────────────────────────────────────────────────
 
 #[command]
-pub async fn summarize_transcript(app: tauri::AppHandle, transcript: String) -> Result<String, String> {
+pub async fn summarize_transcript(app: tauri::AppHandle, transcript: String, handle: Option<String>) -> Result<String, String> {
     let db_path = get_db_path(&app);
     let provider = db::get_setting(&db_path, "summarize_provider")
         .unwrap_or(None)
         .unwrap_or_else(|| "local".to_string());
 
     if provider == "cloud" {
-        venice::summarize_transcript(app, transcript).await
+        venice::summarize_transcript(app, transcript, handle).await
     } else {
-        ollama::summarize_transcript(app, transcript).await
+        ollama::summarize_transcript(app, transcript, handle).await
     }
 }
 
@@ -122,6 +122,12 @@ pub async fn summarize_transcript(app: tauri::AppHandle, transcript: String) -> 
 pub async fn save_summary(app: tauri::AppHandle, video_id: String, summary: String) -> Result<(), String> {
     let db_path = get_db_path(&app);
     db::save_summary(&db_path, &video_id, &summary).map_err(|e| e.to_string())
+}
+
+#[command]
+pub async fn save_tags(app: tauri::AppHandle, video_id: String, tags: String) -> Result<(), String> {
+    let db_path = get_db_path(&app);
+    db::save_tags(&db_path, &video_id, &tags).map_err(|e| e.to_string())
 }
 
 #[command]
@@ -146,15 +152,19 @@ pub async fn get_videos_with_summaries(app: tauri::AppHandle) -> Result<Vec<Stri
 pub async fn summarize_all_videos(app: tauri::AppHandle) -> Result<i32, String> {
     let db_path = get_db_path(&app);
 
-    let videos_without_summary: Vec<(String, String)> = {
+    let videos_without_summary: Vec<(String, String, Option<String>)> = {
         let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-            "SELECT video_id, transcript FROM videos WHERE (summary IS NULL OR summary = '') AND transcript IS NOT NULL AND transcript != ''"
+            "SELECT video_id, transcript, handle FROM videos WHERE (summary IS NULL OR summary = '') AND transcript IS NOT NULL AND transcript != ''"
         ).map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         let mut result = Vec::new();
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            result.push((row.get(0).map_err(|e| e.to_string())?, row.get(1).map_err(|e| e.to_string())?));
+            result.push((
+                row.get(0).map_err(|e| e.to_string())?,
+                row.get(1).map_err(|e| e.to_string())?,
+                row.get(2).unwrap_or(None)
+            ));
         }
         result
     };
@@ -172,11 +182,11 @@ pub async fn summarize_all_videos(app: tauri::AppHandle) -> Result<i32, String> 
     }
 
     let mut count = 0;
-    for (video_id, transcript) in videos_without_summary {
+    for (video_id, transcript, handle) in videos_without_summary {
         let result = if provider == "cloud" {
-            venice::summarize_transcript(app.clone(), transcript).await
+            venice::summarize_transcript(app.clone(), transcript, handle).await
         } else {
-            ollama::summarize_transcript(app.clone(), transcript).await
+            ollama::summarize_transcript(app.clone(), transcript, handle).await
         };
         match result {
             Ok(summary) => {
@@ -222,4 +232,34 @@ pub fn get_venice_prompt(app: tauri::AppHandle) -> Result<String, String> {
 pub fn set_venice_prompt(app: tauri::AppHandle, prompt: String) -> Result<(), String> {
     let db_path = get_db_path(&app);
     db::set_setting(&db_path, "venice_prompt", &prompt).map_err(|e| e.to_string())
+}
+
+#[command]
+pub fn get_custom_prompt(app: tauri::AppHandle, handle: String) -> Result<Option<(Option<String>, Option<String>)>, String> {
+    let db_path = get_db_path(&app);
+    db::get_custom_prompt(&db_path, &handle).map_err(|e| e.to_string())
+}
+
+#[command]
+pub fn get_all_custom_prompts(app: tauri::AppHandle) -> Result<Vec<(String, Option<String>, Option<String>)>, String> {
+    let db_path = get_db_path(&app);
+    db::get_all_custom_prompts(&db_path).map_err(|e| e.to_string())
+}
+
+#[command]
+pub fn set_custom_prompt(app: tauri::AppHandle, handle: String, local_prompt_text: Option<String>, cloud_prompt_text: Option<String>) -> Result<(), String> {
+    let db_path = get_db_path(&app);
+    db::set_custom_prompt(&db_path, &handle, local_prompt_text.as_deref(), cloud_prompt_text.as_deref()).map_err(|e| e.to_string())
+}
+
+#[command]
+pub fn delete_custom_prompt(app: tauri::AppHandle, handle: String) -> Result<(), String> {
+    let db_path = get_db_path(&app);
+    db::delete_custom_prompt(&db_path, &handle).map_err(|e| e.to_string())
+}
+
+#[command]
+pub fn get_unique_handles(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let db_path = get_db_path(&app);
+    db::get_unique_handles(&db_path).map_err(|e| e.to_string())
 }

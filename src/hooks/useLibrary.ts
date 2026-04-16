@@ -54,7 +54,7 @@ export function useLibrary(
                 });
             }
         } catch (e: any) {
-            setNotification({ message: `Failed to save: ${e.message}`, type: "error" });
+            setNotification({ message: `Failed to save: ${e.message || e || "Unknown error"}`, type: "error" });
             throw e;
         }
     }, [setNotification]);

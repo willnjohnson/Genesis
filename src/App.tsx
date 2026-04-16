@@ -1,9 +1,10 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import {
-    getTranscript, getDisplaySettings, setDisplaySettings,
+    getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
     getApiKey, getSetting, setDbPath, openExternalUrl,
-    type Video
+    type Video, type GlossaryTerm, saveTags, getGlossaryTerms
 } from "./api";
+import { normalizeText } from "./lib/utils";
 import { SearchBar, type Facet } from "./components/SearchBar";
 import { VideoList } from "./components/VideoList";
 import { Sidebar } from "./components/Sidebar";
@@ -18,14 +19,54 @@ import { useLibrary } from "./hooks/useLibrary";
 
 type ViewMode = 'search' | 'library' | 'glossary';
 
+const VALID_FACETS = ['handle', 'playlist', 'video', 'title_search', 'transcript_search', 'term_search', 'definition_search', 'tag_search'];
 const DEFAULT_FILTER_FACET = [{ type: 'title_search', value: '' }] as Facet[];
 const DEFAULT_GLOSSARY_FACET = [{ type: 'term_search', value: '' }] as Facet[];
+
+function getLibraryFacets(q: string, viewMode: ViewMode): Facet[] {
+    if (!q) return [];
+    const whitelist = viewMode === 'glossary'
+        ? ['term_search', 'definition_search']
+        : ['title_search', 'transcript_search', 'tag_search', 'video', 'handle', 'playlist'];
+
+    const FACET_RE = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
+    const facets: Facet[] = [];
+    let m;
+    while ((m = FACET_RE.exec(q)) !== null) {
+        facets.push({ type: m[1] as any, value: "" });
+    }
+    return facets;
+}
+
+function getLibraryQuery(q: string, viewMode: ViewMode): string {
+    if (!q) return '';
+    const whitelist = viewMode === 'glossary'
+        ? ['term_search', 'definition_search']
+        : ['title_search', 'transcript_search', 'tag_search', 'video', 'handle', 'playlist'];
+
+    // Check if q starts with a facet prefix and has exactly one colon
+    const colonIndex = q.indexOf(':');
+    const firstSpaceIndex = q.indexOf(' ');
+
+    if (colonIndex !== -1 && (firstSpaceIndex === -1 || firstSpaceIndex > colonIndex)) {
+        const rest = q.slice(colonIndex + 1);
+        const whitelistPattern = `(${whitelist.join('|')})`;
+        if (!new RegExp(`${whitelistPattern}:`).test(rest)) {
+            let val = rest;
+            if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+            return val;
+        }
+    }
+
+    const FACET_RE = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
+    return q.replace(FACET_RE, '');
+}
 
 function App() {
     // ── App-level state ─────────────────────────────────────────────────────
     const [viewMode, setViewMode] = useState<ViewMode>('search');
     const [showGlossaryMenu, setShowGlossaryMenu] = useState(false);
-    const [glossarySearchQuery, setGlossarySearchQuery] = useState("");
+    const [glossarySearchQuery, setGlossarySearchQuery] = useState("term_search:");
     const [initialLibrarySearch, setInitialLibrarySearch] = useState("");
     const [initialLibraryFacets, setInitialLibraryFacets] = useState<Facet[]>(DEFAULT_FILTER_FACET);
     const [notification, setNotification] = useState<{ message: string; type: NotificationType } | null>(null);
@@ -44,6 +85,8 @@ function App() {
     const [loadingTranscript, setLoadingTranscript] = useState(false);
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [cachedSummaries, setCachedSummaries] = useState<Record<string, string>>({});
+    const [videoTags, setVideoTags] = useState<string[]>([]);
+    const [glossaryTerms, setGlossaryTerms] = useState<string[]>([]);
 
     // ── Hooks ────────────────────────────────────────────────────────────────
     const search = useSearch(hasApiKey);
@@ -54,8 +97,15 @@ function App() {
         setNotification,
     );
 
+    // ── Load glossary terms ────────────────────────────────────────────────
+    useEffect(() => {
+        getGlossaryTerms().then(terms => {
+            setGlossaryTerms(terms.map(t => t[0]));
+        }).catch(() => { });
+    }, []);
+
     // ── Computed: which videos to show in VideoList ──────────────────────────
-    const displayedVideos = (() => {
+    const displayedVideos = useMemo(() => {
         if (viewMode === 'library') {
             const q = library.librarySearch;
             if (!q) return library.libraryVideos;
@@ -64,49 +114,73 @@ function App() {
             const facets: { type: string; value: string }[] = [];
             let m;
             while ((m = FACET_RE.exec(q)) !== null) {
-                facets.push({ type: m[1] as any, value: (m[2] ?? m[3] ?? "").toLowerCase() });
+                facets.push({ type: m[1] as any, value: normalizeText(m[2] ?? m[3] ?? "") });
             }
 
-            const textParts = q.replace(FACET_RE, '').trim().toLowerCase().split(' ').filter(Boolean);
+            const textParts = q.replace(FACET_RE, '').trim().split(' ').filter(Boolean).map(t => normalizeText(t));
 
             return library.libraryVideos.filter(v => {
                 // Check facets
                 for (const f of facets) {
                     if (f.value === "") continue; // Skip empty facets
                     if (f.type === 'handle') {
-                        if (!v.handle?.toLowerCase().includes(f.value)) return false;
+                        if (!normalizeText(v.handle || "").includes(f.value)) return false;
                     } else if (f.type === 'video') {
-                        if (!v.id.toLowerCase().includes(f.value)) return false;
+                        if (!normalizeText(v.id).includes(f.value)) return false;
                     } else if (f.type === 'title_search') {
                         const terms = f.value.split(' ').filter(Boolean);
                         if (!terms.every(t =>
-                            v.title.toLowerCase().includes(t) ||
-                            v.author?.toLowerCase().includes(t)
+                            normalizeText(v.title).includes(t) ||
+                            normalizeText(v.author || "").includes(t)
                         )) return false;
                     } else if (f.type === 'transcript_search') {
-                        if (!v.transcript?.toLowerCase().includes(f.value)) return false;
+                        if (!normalizeText(v.transcript || "").includes(f.value)) return false;
+                    } else if (f.type === 'tag_search') {
+                        const tagValue = (f.value || "").trim();
+                        if (!tagValue) continue;
+                        if (!v.tags) return false;
+                        const isExactMatch = tagValue.endsWith('#');
+                        let tagQuery = isExactMatch ? tagValue.slice(0, -1) : tagValue;
+                        if (tagQuery.startsWith('#')) tagQuery = tagQuery.substring(1);
+
+                        const videoTags = v.tags.split(',').map(t => normalizeText(t.trim()));
+
+                        // User wants to keep glossary restriction
+                        const glossaryLower = glossaryTerms.map(t => normalizeText(t));
+                        const validTags = glossaryTerms.length > 0
+                            ? videoTags.filter(tag => glossaryLower.includes(tag))
+                            : videoTags;
+
+                        if (validTags.length === 0) return false;
+
+                        if (isExactMatch) {
+                            if (!validTags.includes(tagQuery)) return false;
+                        } else {
+                            const searchTerms = tagQuery.split(' ').filter(Boolean);
+                            if (!searchTerms.every(term => validTags.some(tag => tag.includes(term)))) return false;
+                        }
                     }
                 }
                 // Check remaining text
                 if (textParts.length > 0) {
                     if (!textParts.every(t =>
-                        v.title.toLowerCase().includes(t) ||
-                        v.author?.toLowerCase().includes(t)
+                        normalizeText(v.title).includes(t) ||
+                        normalizeText(v.author || "").includes(t)
                     )) return false;
                 }
                 return true;
             });
         }
         return search.filteredVideos;
-    })();
+    }, [viewMode, library.librarySearch, library.libraryVideos, search.filteredVideos]);
 
     // ── Init ─────────────────────────────────────────────────────────────────
     useEffect(() => {
         const handleLinkClick = async (e: MouseEvent) => {
             const target = e.target as HTMLElement;
             const anchor = target.closest('a');
-            if (anchor && anchor.href && 
-                !anchor.href.startsWith(window.location.origin) && 
+            if (anchor && anchor.href &&
+                !anchor.href.startsWith(window.location.origin) &&
                 !anchor.href.startsWith('blob:') &&
                 anchor.getAttribute('href') !== '#' &&
                 !anchor.href.startsWith('javascript:')) {
@@ -129,12 +203,12 @@ function App() {
             }
             getApiKey().then(k => setHasApiKey(!!k));
             getSetting('plugin_summarize_enabled').then(v => setPluginSummarizeEnabled(v === 'true'));
-            
+
             // Load DB flags
             const sSearch = await getSetting('showSearch');
             const sDelete = await getSetting('allowDeletionLibrary');
             const sGlossary = await getSetting('allowModificationGlossary');
-            
+
             const showSearchVal = sSearch !== 'false';
             setShowSearch(showSearchVal);
             setAllowDeletionLibrary(sDelete !== 'false');
@@ -179,17 +253,25 @@ function App() {
     // ── Handlers ─────────────────────────────────────────────────────────────
     const handleSelectVideo = useCallback(async (video: Video) => {
         setSelectedVideo(video);
+        setVideoTags(video.tags ? video.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : []);
         setSidebarOpen(true);
         setTranscript("");
         setLoadingTranscript(true);
-        try {
-            const text = await getTranscript(video.id);
-            setTranscript(text === "API_KEY_MISSING" ? "No transcript available. API key missing." : text);
-        } catch (e: any) {
-            setTranscript(`Failed to load transcript: ${e.message || String(e)}`);
-        } finally {
-            setLoadingTranscript(false);
+
+        // Fetch transcript and handle in parallel
+        const [text, fetchedHandle] = await Promise.all([
+            getTranscript(video.id).catch(e => `Failed to load transcript: ${e.message || String(e)}`),
+            getVideoHandle(video.id).catch(() => null)
+        ]);
+
+        setTranscript(text === "API_KEY_MISSING" ? "No transcript available. API key missing." : text);
+
+        // If video doesn't have handle, use fetched one
+        if (!video.handle && fetchedHandle) {
+            setSelectedVideo(prev => prev ? { ...prev, handle: fetchedHandle } : null);
         }
+
+        setLoadingTranscript(false);
     }, []);
 
     const handleSearch = useCallback(async (query: string) => {
@@ -211,11 +293,54 @@ function App() {
         } catch { /* ignore */ }
     };
 
-    const handleSearchInLibrary = (term: string, mode: 'title' | 'transcript') => {
-        setInitialLibrarySearch(term);
-        setInitialLibraryFacets([{ type: mode === 'title' ? 'title_search' : 'transcript_search', value: '' }]);
+    const handleSearchInLibrary = (term: string, mode: 'title' | 'transcript' | 'tag') => {
+        // First switch to library to ensure fresh mount
         setViewMode('library');
-        library.setLibrarySearch(`${mode === 'title' ? 'title_search' : 'transcript_search'}:"${term}"`);
+        // Close sidebar if open
+        setSidebarOpen(false);
+        // Then set query - will be picked up on next render
+        const query = mode === 'title' ? `title_search:${term}`
+            : mode === 'transcript' ? `transcript_search:${term}`
+                : `tag_search:${term}`;
+        library.setLibrarySearch(query);
+    };
+
+    const handleTagClick = (term: GlossaryTerm) => {
+        // Open term definition in sidebar - same as clicking in Glossary
+    };
+
+    const handleAddTag = async (term: string) => {
+        if (!videoTags.includes(term)) {
+            const newTags = [...videoTags, term];
+            setVideoTags(newTags);
+            if (selectedVideo) {
+                try {
+                    await saveTags(selectedVideo.id, newTags.join(','));
+                    setSelectedVideo(prev => prev ? { ...prev, tags: newTags.join(',') } : null);
+                    library.libraryVideos.forEach(v => {
+                        if (v.id === selectedVideo.id) v.tags = newTags.join(',');
+                    });
+                } catch (e) {
+                    console.error('Failed to save tag:', e);
+                }
+            }
+        }
+    };
+
+    const handleRemoveTag = async (term: string) => {
+        const newTags = videoTags.filter(t => t !== term);
+        setVideoTags(newTags);
+        if (selectedVideo) {
+            try {
+                await saveTags(selectedVideo.id, newTags.join(','));
+                setSelectedVideo(prev => prev ? { ...prev, tags: newTags.join(',') } : null);
+                library.libraryVideos.forEach(v => {
+                    if (v.id === selectedVideo.id) v.tags = newTags.join(',');
+                });
+            } catch (e) {
+                console.error('Failed to remove tag:', e);
+            }
+        }
     };
 
     return (
@@ -242,9 +367,8 @@ function App() {
                                         key={mode}
                                         onClick={() => {
                                             if (mode === 'library') {
-                                                setInitialLibrarySearch("");
-                                                setInitialLibraryFacets(DEFAULT_FILTER_FACET);
-                                                library.setLibrarySearch("title_search:");
+                                                setViewMode('library');
+                                                library.setLibrarySearch("");
                                             }
                                             setViewMode(mode);
                                         }}
@@ -293,25 +417,25 @@ function App() {
 
                     <SearchBar
                         key={viewMode}
-                        onSearch={viewMode === 'glossary' ? setGlossarySearchQuery : handleSearch}
-                        onLiveFilter={viewMode === 'search' ? search.setSearchQuery : (viewMode === 'glossary' ? setGlossarySearchQuery : undefined)}
+                        onSearch={viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : handleSearch)}
+                        onLiveFilter={
+                            viewMode === 'search' 
+                                ? (search.videos.length > 0 ? search.handleInput : undefined)
+                                : (viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : undefined))
+                        }
                         loading={search.loading || library.loading}
                         viewMode={viewMode}
                         initialFacets={
                             viewMode === 'glossary'
-                                ? DEFAULT_GLOSSARY_FACET
-                                : viewMode === 'library'
-                                    ? initialLibraryFacets
-                                    : (search.activeFacets as Facet[])
+                                ? getLibraryFacets(glossarySearchQuery, 'glossary')
+                                : (viewMode === 'library' ? (library.librarySearch ? getLibraryFacets(library.librarySearch, 'library') : []) : search.activeFacets as Facet[])
                         }
                         initialQuery={
                             viewMode === 'glossary'
-                                ? glossarySearchQuery.replace(/term_search:/g, '').replace(/definition_search:/g, '').replace(/^"|"$/g, '')
-                                : viewMode === 'library'
-                                    ? initialLibrarySearch
-                                    : search.activeText
+                                ? getLibraryQuery(glossarySearchQuery, 'glossary')
+                                : (viewMode === 'library' ? getLibraryQuery(library.librarySearch, 'library') : search.activeText)
                         }
-                        placeholder={viewMode === 'glossary' ? "Search Glossary" : (viewMode === 'library' ? "Search your library" : "Search YouTube")}
+                        placeholder={viewMode === 'glossary' ? "Look up Glossary Terms" : (viewMode === 'library' ? "Look up Videos and Transcripts" : "Search YouTube handle, playlist URL, or video URL")}
                     />
                 </header>
 
@@ -329,6 +453,11 @@ function App() {
                             searchQuery={glossarySearchQuery}
                             onSearchInLibrary={handleSearchInLibrary}
                             allowModification={allowModificationGlossary}
+                            onChange={() => {
+                                getGlossaryTerms().then(terms => {
+                                    setGlossaryTerms(terms.map(t => t[0]));
+                                }).catch(() => { });
+                            }}
                         />
                     ) : viewMode === 'search' ? (
                         <>
@@ -401,6 +530,7 @@ function App() {
                 loading={loadingTranscript}
                 title={selectedVideo?.title || ""}
                 videoId={selectedVideo?.id}
+                handle={selectedVideo?.handle}
                 onSave={selectedVideo ? (summary) => library.handleSaveVideo(selectedVideo, summary) : undefined}
                 onDelete={() => library.handleDeleteFromSidebar(selectedVideo)}
                 onRefetch={selectedVideo ? () => handleSelectVideo(selectedVideo) : undefined}
@@ -410,6 +540,12 @@ function App() {
                 cachedSummaries={cachedSummaries}
                 onCacheSummary={(id, s) => setCachedSummaries(prev => ({ ...prev, [id]: s }))}
                 allowDeletion={allowDeletionLibrary}
+                isLibrary={viewMode === 'library'}
+                videoTags={videoTags}
+                onTagClick={handleTagClick}
+                onAddTag={handleAddTag}
+                onRemoveTag={handleRemoveTag}
+                onSearchInLibrary={handleSearchInLibrary}
             />
 
             <SettingsModal

@@ -60,8 +60,6 @@ fn chunk_transcript(transcript: &str, config: &ChunkConfig) -> Vec<String> {
             if !current_chunk.is_empty() {
                 chunks.push(current_chunk.clone());
                 current_chunk.clear();
-                word_count = 0;
-                chunk_start_word = idx;
             }
             
             // Split this long line into sub-chunks
@@ -729,7 +727,7 @@ pub async fn install_ollama(app: AppHandle) -> Result<(), String> {
 }
 
 /// Summarize a transcript using Ollama
-pub async fn summarize_transcript(app: AppHandle, transcript: String) -> Result<String, String> {
+pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Option<String>) -> Result<String, String> {
     ensure_ollama_running().await?;
     
     // Get settings from database
@@ -737,9 +735,21 @@ pub async fn summarize_transcript(app: AppHandle, transcript: String) -> Result<
     let model_setting = db::get_setting(&db_path, "ollama_model")
         .map_err(|e| e.to_string())?
         .unwrap_or_else(|| "llama3.2".to_string());
-    let prompt_template = db::get_setting(&db_path, "ollama_prompt")
-        .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| DEFAULT_PROMPT_TEMPLATE.to_string());
+        
+    let mut prompt_template_opt = None;
+    if let Some(ref h) = handle {
+        if let Ok(Some((Some(local_prompt), _))) = db::get_custom_prompt(&db_path, h) {
+            if !local_prompt.trim().is_empty() {
+                prompt_template_opt = Some(local_prompt);
+            }
+        }
+    }
+    
+    let prompt_template = prompt_template_opt.unwrap_or_else(|| {
+        db::get_setting(&db_path, "ollama_prompt")
+            .unwrap_or(None)
+            .unwrap_or_else(|| DEFAULT_PROMPT_TEMPLATE.to_string())
+    });
     
     // Get chunking settings
     let chunk_enabled = db::get_setting(&db_path, "chunk_enabled")

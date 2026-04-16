@@ -1,4 +1,4 @@
-import { Search, AtSign, Youtube, ListVideo, Filter, X, Lightbulb, History, Clock } from 'lucide-react';
+import { Search, AtSign, Youtube, ListVideo, Filter, X, Lightbulb, History, Clock, Type, FileText } from 'lucide-react';
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { addSearchHistory, getSearchHistory, type HistoryEntry } from '../api';
 import { decodeHtmlEntities } from '../lib/utils';
@@ -18,18 +18,14 @@ interface Props {
     initialQuery?: string;
 }
 
-export type SearchFacet = 'handle' | 'playlist' | 'video' | 'title_search' | 'transcript_search' | 'term_search' | 'definition_search';
+export type SearchFacet = 'handle' | 'playlist' | 'video' | 'title_search' | 'transcript_search' | 'term_search' | 'definition_search' | 'tag_search';
 
-export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search', initialFacets = [], initialQuery = '' }: Props) {
+export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search', initialFacets = [], initialQuery = '', placeholder }: Props) {
     const [query, setQuery] = useState(initialQuery);
-    const [facets, setFacets] = useState<Facet[]>(() => {
-        if (initialFacets.length > 0) return initialFacets;
-        if (viewMode === 'library') return [{ type: 'title_search', value: '' }];
-        if (viewMode === 'glossary') return [{ type: 'term_search', value: '' }];
-        return [];
-    });
+    const [facets, setFacets] = useState<Facet[]>(initialFacets);
     const [showHistory, setShowHistory] = useState(false);
     const [history, setHistory] = useState<HistoryEntry[]>([]);
+    const userActionRef = useRef(false);
     const inputRef = useRef<HTMLInputElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
 
@@ -38,25 +34,51 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     const isLibraryOrGlossary = isLibrary || isGlossary;
     const isFilterSearchActive = facets.some(f => f.type === 'title_search' || f.type === 'transcript_search' || f.type === 'term_search' || f.type === 'definition_search');
 
+    // Reset when view mode changes
     useEffect(() => {
-        if (initialFacets.length > 0) {
-            setFacets(initialFacets);
-        }
-    }, [initialFacets]);
-
-    useEffect(() => {
+        userActionRef.current = false;
+        setFacets(initialFacets);
         setQuery(initialQuery);
-    }, [initialQuery]);
+    }, [viewMode]);
+
+    // Sync with external updates
+    useEffect(() => {
+        let changed = false;
+        const isFocused = document.activeElement === inputRef.current;
+
+        if (!isFocused && initialQuery !== query && initialQuery.trim() !== query.trim()) {
+            userActionRef.current = false;
+            setQuery(initialQuery);
+            changed = true;
+        }
+
+        const facetsDiffer = initialFacets.length !== facets.length ||
+            initialFacets.some((f, idx) => f.type !== facets[idx]?.type);
+
+        if (facetsDiffer && !isFocused) {
+            userActionRef.current = false;
+            setFacets(initialFacets);
+            changed = true;
+        }
+    }, [initialQuery, initialFacets]);
 
     useEffect(() => {
+        if (!userActionRef.current) return;
+
         const fullQuery = facets.map(f => {
             const val = f.value || query;
-            const escapedValue = val.includes(' ') ? `"${val}"` : val;
+            const escapedValue = (val.includes(' ') && !val.startsWith('"')) ? `"${val}"` : val;
             return `${f.type}:${escapedValue}`;
         }).join(' ') + (facets.length === 0 ? query : "");
 
-        if (onLiveFilter) onLiveFilter(fullQuery);
-        if (isLibrary) onSearch(fullQuery);
+        if (isLibrary) {
+            onSearch(fullQuery);
+        } else if (onLiveFilter) {
+            onLiveFilter(fullQuery);
+        }
+        
+        // After sending, we can reset if we want, but it's safer to leave as true 
+        // until next sync or next input. Actually, we must keep it true until the end of this cycle.
     }, [facets, query, isLibrary, onLiveFilter, onSearch]);
 
     const loadHistory = useCallback(async () => {
@@ -81,16 +103,17 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         return () => document.removeEventListener('mousedown', handler);
     }, []);
 
-    const getFacetIcon = (type: SearchFacet) => {
+    const getFacetIcon = (type: string) => {
         switch (type) {
             case 'handle': return <AtSign className="w-3 h-3" />;
-            case 'video': return <Youtube className="w-3 h-3" />;
             case 'playlist': return <ListVideo className="w-3 h-3" />;
-            case 'title_search': 
-            case 'transcript_search': 
-            case 'term_search':
-            case 'definition_search': return <Filter className="w-3 h-3" />;
-            default: return null;
+            case 'video': return <span className="text-xs font-bold">{'>'}</span>;
+            case 'transcript_search':
+            case 'definition_search': return <FileText className="w-3 h-3" />;
+            case 'title_search':
+            case 'term_search': return <Type className="w-3 h-3" />;
+            case 'tag_search': return <span className="text-xs font-bold">#</span>;
+            default: return <Filter className="w-3 h-3" />;
         }
     };
 
@@ -103,6 +126,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             patterns['title_search:'] = 'title_search';
             if (isLibrary) {
                 patterns['transcript_search:'] = 'transcript_search';
+                patterns['tag_search:'] = 'tag_search';
             }
             patterns['handle:'] = 'handle';
             patterns['video:'] = 'video';
@@ -136,34 +160,36 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     };
 
     const handleInput = (val: string) => {
+        userActionRef.current = true;
         let currentVal = val;
+        const lowerVal = val.toLowerCase();
 
         for (const [prefix, type] of Object.entries(facetPatterns)) {
-            const lowVal = currentVal.toLowerCase();
-            const prefixIndex = lowVal.indexOf(prefix);
+            const prefixIndex = lowerVal.indexOf(prefix);
             if (prefixIndex !== -1) {
-                const afterPrefix = currentVal.slice(prefixIndex + prefix.length);
-                const parts = afterPrefix.trimStart().split(' ');
-                const rawValue = parts[0];
-                const remaining = parts.slice(1).join(' ');
-
-                let actualValue = rawValue;
-                if (type === 'video') actualValue = extractVideoId(rawValue) || rawValue;
-                if (type === 'playlist') actualValue = extractPlaylistId(rawValue) || rawValue;
-                if (type === 'handle') actualValue = extractHandle(rawValue) || rawValue;
+                let afterPrefix = currentVal.slice(prefixIndex + prefix.length);
+                
+                if (type === 'video') afterPrefix = extractVideoId(afterPrefix) || afterPrefix;
+                else if (type === 'playlist') afterPrefix = extractPlaylistId(afterPrefix) || afterPrefix;
+                else if (type === 'handle') afterPrefix = extractHandle(afterPrefix) || afterPrefix;
 
                 setFacets([{ type, value: "" }]);
-                setQuery(actualValue + (remaining ? " " + remaining : ""));
+                setQuery(afterPrefix);
                 return;
             }
         }
 
-        if (!isGlossary && (facets.length === 0 || (isLibrary && facets.length === 1 && (facets[0].type === 'title_search' || facets[0].type === 'transcript_search')))) {
+        if (!isGlossary && (facets.length === 0 || (isLibrary && facets.length === 1 && (facets[0].type === 'title_search' || facets[0].type === 'transcript_search' || facets[0].type === 'tag_search')))) {
             const handle = extractHandle(val);
             const videoId = extractVideoId(val);
             const playlistId = !isLibrary ? extractPlaylistId(val) : null;
+            const tagMatch = val.match(/^#(.+?)#?$/);
 
-            if (handle && (val.includes('youtube.com') || val.startsWith('@'))) {
+            if (tagMatch && isLibrary) {
+                setFacets([{ type: 'tag_search', value: '' }]);
+                setQuery(tagMatch[1]);
+                return;
+            } else if (handle && (val.includes('youtube.com') || (val.startsWith('@') && val.length > 3))) {
                 setFacets([{ type: 'handle', value: "" }]);
                 setQuery(handle);
                 return;
@@ -182,6 +208,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
         if (e.key === 'Backspace' && query === '' && facets.length > 0 && e.currentTarget.selectionStart === 0) {
+            userActionRef.current = true;
             const lastFacet = facets[facets.length - 1];
             setFacets(facets.slice(0, -1));
             setQuery(lastFacet.type + ':');
@@ -193,23 +220,29 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     };
 
     const removeFacet = (index: number) => {
+        userActionRef.current = true;
         setFacets(facets.filter((_, i) => i !== index));
         if (facets.length === 1) setQuery("");
     };
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (isFilterSearchActive && !isLibraryOrGlossary) return;
+        const isYouTubeMode = !isLibraryOrGlossary && facets.some(f => f.type === 'handle' || f.type === 'video' || f.type === 'playlist');
+        if (isFilterSearchActive && !isLibraryOrGlossary && !isYouTubeMode) return;
         const fullQuery = facets.map(f => `${f.type}:${query}`).join(' ') + (facets.length === 0 ? query : "");
         const trimmed = fullQuery.trim();
         if (trimmed) {
             onSearch(trimmed);
-            addSearchHistory(trimmed);
+            const hasOnlyTagSearch = facets.length > 0 && facets.every(f => f.type === 'tag_search');
+            if (!hasOnlyTagSearch) {
+                addSearchHistory(trimmed);
+            }
             setShowHistory(false);
         }
     };
 
     const handleHistorySelect = (entry: HistoryEntry) => {
+        userActionRef.current = true;
         setFacets([]);
         handleInput(entry.search_query);
         setShowHistory(false);
@@ -226,15 +259,70 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         }
     };
 
+    const [facetMenuIndex, setFacetMenuIndex] = useState<number | null>(null);
+
+    const availableFacets = useMemo(() => {
+        if (viewMode === 'glossary') {
+            return [
+                { type: 'term_search' as const, label: 'Term' },
+                { type: 'definition_search' as const, label: 'Definition' },
+            ];
+        }
+        if (viewMode === 'search') {
+            return [
+                { type: 'title_search' as const, label: 'Title' },
+                { type: 'handle' as const, label: 'Channel (@)' },
+                { type: 'playlist' as const, label: 'Playlist' },
+                { type: 'video' as const, label: 'Video ID (>)' },
+            ];
+        }
+        // Library mode
+        return [
+            { type: 'title_search' as const, label: 'Title' },
+            { type: 'transcript_search' as const, label: 'Transcript' },
+            { type: 'tag_search' as const, label: 'Tag' },
+            { type: 'handle' as const, label: 'Channel (@)' },
+            { type: 'video' as const, label: 'Video ID (>)' },
+        ];
+    }, [viewMode]);
+
+    const handleFacetChange = (index: number, newType: SearchFacet) => {
+        userActionRef.current = true;
+        const newFacets = [...facets];
+        newFacets[index] = { ...newFacets[index], type: newType };
+        setFacets(newFacets);
+        setFacetMenuIndex(null);
+    };
+
+    // Outside click for facet menu
+    useEffect(() => {
+        if (facetMenuIndex !== null) {
+            const handleClick = (e: MouseEvent) => {
+                const target = e.target as HTMLElement;
+                if (!target.closest('.facet-menu-container')) {
+                    setFacetMenuIndex(null);
+                }
+            };
+            document.addEventListener('click', handleClick);
+            return () => document.removeEventListener('click', handleClick);
+        }
+    }, [facetMenuIndex]);
+
     return (
         <form onSubmit={handleSubmit} className="w-full max-w-2xl mx-auto mb-10 px-4">
             <div className={`flex items-stretch justify-center transition-all ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
                 <div ref={containerRef} className="relative flex-1">
                     <div className={`flex flex-wrap items-center bg-[#121212] border border-[#404040] ${isLibraryOrGlossary ? 'rounded-full' : 'rounded-l-full'} focus-within:ring-1 focus-within:ring-[red] transition-all min-h-11 py-1 px-3 gap-2`}>
                         {facets.map((f, i) => (
-                            <div key={`${f.type}-${i}`} className="flex items-center gap-1.5 bg-[#272727] border border-[#444444] text-[#aaaaaa] rounded-full px-3 py-0.5 animate-in zoom-in-95 duration-200 shadow-sm shrink-0 select-none">
-                                {getFacetIcon(f.type)}
-                                <span className="text-[11px] font-bold uppercase tracking-wider">{f.type.replace(/_/g, ' ')}</span>
+                            <div key={`${f.type}-${i}`} className="relative flex items-center gap-1.5 bg-[#272727] border border-[#444444] text-[#aaaaaa] rounded-full px-3 py-0.5 animate-in zoom-in-95 duration-200 shrink-0 select-none facet-menu-container">
+                                <button
+                                    type="button"
+                                    onClick={() => setFacetMenuIndex(facetMenuIndex === i ? null : i)}
+                                    className="flex items-center gap-1.5 hover:text-white transition-colors cursor-pointer group"
+                                >
+                                    {getFacetIcon(f.type)}
+                                    <span className="text-[11px] font-bold uppercase tracking-wider group-hover:underline decoration-dotted transition-all underline-offset-2">{f.type.replace(/_/g, ' ')}</span>
+                                </button>
                                 <button
                                     type="button"
                                     onClick={() => removeFacet(i)}
@@ -242,8 +330,33 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                 >
                                     <X className="w-3 h-3" />
                                 </button>
+
+                                {facetMenuIndex === i && (
+                                    <div className="absolute top-full left-0 mt-2 w-48 bg-[#1a1a1a] border border-[#333] rounded-xl overflow-hidden z-[100] animate-in fade-in slide-in-from-top-1 duration-200">
+                                        <div className="p-2 border-b border-[#333] bg-[#222]">
+                                            <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-2">Change Filter</span>
+                                        </div>
+                                        <div className="max-h-60 overflow-y-auto">
+                                            {availableFacets.map((af) => (
+                                                <button
+                                                    key={af.type}
+                                                    type="button"
+                                                    onClick={() => handleFacetChange(i, af.type)}
+                                                    className={`w-full text-left px-3 py-2 text-[11px] font-semibold transition-colors flex items-center justify-between group ${f.type === af.type ? 'text-red-500 bg-red-400/5 cursor-default' : 'text-gray-400 hover:text-white hover:bg-[#2a2a2a] cursor-pointer'}`}
+                                                >
+                                                    <div className="flex items-center gap-2">
+                                                        {getFacetIcon(af.type)}
+                                                        {af.label}
+                                                    </div>
+                                                    {f.type === af.type && <div className="w-1.5 h-1.5 rounded-full bg-red-500" />}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         ))}
+
                         <input
                             ref={inputRef}
                             type="text"
@@ -251,7 +364,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                             onChange={(e) => handleInput(e.target.value)}
                             onKeyDown={handleKeyDown}
                             onFocus={handleFocus}
-                            placeholder={isLibraryOrGlossary ? "" : facets.length > 0 ? "" : "Search YouTube handle, playlist URL, or video URL"}
+                            placeholder={(query || facets.length > 0) ? "" : (placeholder || "Search YouTube handle, playlist URL, or video URL")}
                             className="flex-1 min-w-[120px] bg-transparent text-white px-2 focus:outline-none placeholder-gray-500 text-[16px] h-full"
                             disabled={loading}
                         />
@@ -260,7 +373,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                         <div className="group/hint relative flex items-center pr-1">
                             <Lightbulb className="w-4 h-4 text-gray-500 hover:text-yellow-400 transition-colors cursor-help" />
 
-                            <div className="absolute top-full right-0 mt-3 w-80 bg-[#1a1a1a] border border-[#333] rounded-xl p-4 shadow-2xl opacity-0 translate-y-2 pointer-events-none group-hover/hint:opacity-100 group-hover/hint:translate-y-0 transition-all duration-200 z-100">
+                            <div className="absolute top-full right-0 mt-3 w-80 bg-[#1a1a1a] border border-[#333] rounded-xl p-4 opacity-0 translate-y-2 pointer-events-none group-hover/hint:opacity-100 group-hover/hint:translate-y-0 transition-all duration-200 z-100">
                                 <h4 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 border-b border-[#333] pb-2">Search Tips</h4>
                                 <div className="space-y-4">
                                     <div className="flex flex-col gap-1">
@@ -290,10 +403,16 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                                         <span className="text-gray-500 group-hover/code:text-gray-300">Title Filter</span>
                                                     </code>
                                                     {isLibrary && (
-                                                        <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                                            <span>transcript_search:</span>
-                                                            <span className="text-gray-500 group-hover/code:text-gray-300">Transcript Filter</span>
-                                                        </code>
+                                                        <>
+                                                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                                <span>transcript_search:</span>
+                                                                <span className="text-gray-500 group-hover/code:text-gray-300">Transcript Filter</span>
+                                                            </code>
+                                                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                                <span>tag_search:</span>
+                                                                <span className="text-gray-500 group-hover/code:text-gray-300"># / Tags</span>
+                                                            </code>
+                                                        </>
                                                     )}
                                                 </>
                                             )}
@@ -324,7 +443,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
 
                     {/* Search History Dropdown */}
                     {showHistory && !isLibraryOrGlossary && filteredHistory.length > 0 && (
-                        <div className="absolute top-full left-0 right-0 mt-1.5 bg-white dark:bg-[#141414] border border-gray-200 dark:border-[#303030] rounded-xl shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
+                        <div className="absolute top-full left-0 right-0 mt-1.5 bg-white dark:bg-[#141414] border border-gray-200 dark:border-[#303030] rounded-xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
                             <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 dark:border-[#272727]">
                                 <History className="w-3.5 h-3.5 text-gray-400 dark:text-[#666]" />
                                 <span className="text-[11px] font-bold text-gray-400 dark:text-[#555] uppercase tracking-widest">Recent Searches</span>
@@ -367,12 +486,11 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                 {!isLibraryOrGlossary && (
                     <button
                         type="submit"
-                        disabled={loading || (query.trim() === '' && facets.length === 0) || isFilterSearchActive}
-                        className={`flex items-center justify-center px-6 bg-[#222222] border border-[#404040] border-l-0 rounded-r-full transition-colors disabled:opacity-50 group h-auto min-h-11 ${isFilterSearchActive ? 'cursor-default' : 'hover:bg-[#444444] hover:border-[#505050] cursor-pointer'
-                            }`}
-                        title={isFilterSearchActive ? "In Filter Mode" : "Search"}
+                        disabled={loading || (query.trim() === '' && facets.length === 0)}
+                        className="flex items-center justify-center px-6 bg-[#222222] border border-[#404040] border-l-0 rounded-r-full transition-colors disabled:opacity-50 group h-auto min-h-11 hover:bg-[#444444] hover:border-[#505050] cursor-pointer"
+                        title="Search"
                     >
-                        <Search className={`w-5 h-5 text-[#aaaaaa] ${!isFilterSearchActive && 'group-hover:text-white'}`} />
+                        <Search className="w-5 h-5 text-[#aaaaaa] group-hover:text-white" />
                     </button>
                 )}
             </div>

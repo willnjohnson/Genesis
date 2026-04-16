@@ -76,7 +76,7 @@ export function DisplayTab({ settings, currentVideoListMode, onUpdate }: Props) 
                             onClick={toggleTheme}
                             className={`w-14 h-7 rounded-full transition-colors relative cursor-pointer flex items-center px-0.5 ${isDark ? 'bg-purple-600' : 'bg-yellow-400'}`}
                         >
-                            <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full transition-all flex items-center justify-center shadow-md ${isDark ? 'left-0.5' : 'left-7'}`}>
+                            <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full transition-all flex items-center justify-center ${isDark ? 'left-0.5' : 'left-7'}`}>
                                 {isDark
                                     ? <Moon className="w-3.5 h-3.5 text-purple-800" />
                                     : <Sun className="w-3.5 h-3.5 text-yellow-600" />
@@ -94,14 +94,14 @@ export function DisplayTab({ settings, currentVideoListMode, onUpdate }: Props) 
                         <div className="flex gap-2 bg-[#121212] border border-[#303030] rounded-md p-0.5">
                             <button
                                 onClick={() => onUpdate({ videoListMode: 'grid' })}
-                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentVideoListMode === 'grid' ? 'bg-white text-black shadow-lg scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentVideoListMode === 'grid' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
                             >
                                 <LayoutGrid className="w-3.5 h-3.5" />
                                 Grid
                             </button>
                             <button
                                 onClick={() => onUpdate({ videoListMode: 'compact' })}
-                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentVideoListMode === 'compact' ? 'bg-white text-black shadow-lg scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentVideoListMode === 'compact' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
                             >
                                 <List className="w-3.5 h-3.5" />
                                 Compact
