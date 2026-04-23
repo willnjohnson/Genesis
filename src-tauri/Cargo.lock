@@ -2197,6 +2197,7 @@ dependencies = [
 name = "kinesis"
 version = "0.2.4"
 dependencies = [
+ "base64 0.21.7",
  "futures",
  "html-escape",
  "log",
@@ -2210,11 +2211,11 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tauri-plugin-localhost",
  "tauri-plugin-log",
  "tauri-plugin-opener",
  "tauri-plugin-openurl",
  "tauri-plugin-shell",
- "tiny_http",
  "tokio",
  "urlencoding",
 ]
@@ -4573,6 +4574,21 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 0.9.11+spec-1.1.0",
  "url",
+]
+
+[[package]]
+name = "tauri-plugin-localhost"
+version = "2.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c8d72c024121b1a3d9268293d49a56baf01a8c785561c85d17872588b839e55"
+dependencies = [
+ "http",
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "thiserror 2.0.18",
+ "tiny_http",
 ]
 
 [[package]]

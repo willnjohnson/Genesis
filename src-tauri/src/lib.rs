@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 use tauri::Manager;
+use tauri::webview::WebviewWindowBuilder;
+use tauri::WebviewUrl;
 use std::sync::Mutex;
 
 #[cfg(feature = "genesis")]
@@ -20,8 +22,6 @@ mod types;
 mod ollama;
 mod venice;
 mod commands;
-#[cfg(not(debug_assertions))]
-mod http_server;
 
 pub use types::{Video, ChannelInfo, VideoResponse, DisplaySettings, DbDetails};
 pub use types::{parse_view_count, extract_handle_from_url};
@@ -127,16 +127,15 @@ fn get_app_info() -> serde_json::Value {
 // ─── App entry point ──────────────────────────────────────────────────────────
 
 pub fn run() {
-    // We'll start the HTTP server from the setup() closure where we can access
-    // the app's resource directory. This ensures the server finds the bundled
-    // `dist/index.html` at runtime instead of guessing paths before the app
-    // context exists.
+    use tauri::webview::WebviewWindowBuilder;
+    use tauri::WebviewUrl;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_openurl::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_localhost::Builder::new(1430).build())
         .invoke_handler(tauri::generate_handler![
             // Settings
             commands::get_api_key,
@@ -214,100 +213,39 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle();
             let db_path = get_db_path(app_handle);
-                // Start the HTTP server here where we can discover the real resource
-                // directory for the packaged app. Prefer the app's resource_dir, but
-                // fall back to common relative locations.
-                let port_opt: Option<u16> = {
-                    #[cfg(not(debug_assertions))]
-                    {
-                        // Always use HTTP server to serve frontend assets
-                        // This works cross-platform and avoids asset loading issues
-                        let resource_dir = app_handle.path().resource_dir().ok();
-                        let mut candidates = vec![];
-
-                        if let Some(ref p) = resource_dir {
-                            // 1. Directly in resources/
-                            candidates.push(p.clone());
-                            // 2. In resources/dist/
-                            candidates.push(p.join("dist"));
-                            // 3. Scan all subdirectories in resources/
-                            if let Ok(entries) = p.read_dir() {
-                                for entry in entries.filter_map(|e| e.ok()) {
-                                    if entry.path().is_dir() {
-                                        candidates.push(entry.path());
-                                    }
-                                }
-                            }
-                        }
-                        
-                        // Local paths for development/testing
-                        candidates.push(std::path::PathBuf::from("./dist"));
-                        candidates.push(std::path::PathBuf::from("../dist"));
-                        candidates.push(std::path::PathBuf::from("dist"));
-                        candidates.push(std::path::PathBuf::from("resources/dist"));
-                        
-                        // Relative to executable (bundled app)
-                        if let Ok(exe_path) = std::env::current_exe() {
-                            if let Some(parent) = exe_path.parent() {
-                                candidates.push(parent.join("resources").join("dist"));
-                                candidates.push(parent.join("dist"));
-                            }
-                        }
-
-                        // Debug: print all candidates
-                        eprintln!("Looking for dist folder...");
-                        for (i, c) in candidates.iter().enumerate() {
-                            let exists = c.join("index.html").exists();
-                            eprintln!("  Candidate {}: {} -> {}", i, c.display(), if exists { "FOUND" } else { "not found" });
-                        }
-
-                        let chosen = candidates.into_iter().find(|p| p.join("index.html").exists()).unwrap_or_else(|| {
-                            eprintln!("⚠️  dist folder not found in standard locations, using ./dist (this may fail if dist isn't bundled)");
-                            std::path::PathBuf::from("./dist")
-                        });
-
-                        match http_server::start_server(chosen) {
-                            Ok(port) => {
-                                eprintln!("✓ HTTP server started successfully on port {}", port);
-                                // short pause to allow server threads to accept connections
-                                std::thread::sleep(std::time::Duration::from_millis(300));
-                                Some(port)
-                            }
-                            Err(e) => {
-                                eprintln!("❌ Failed to start HTTP server: {}", e);
-                                None
-                            }
-                        }
-                    }
-                    #[cfg(debug_assertions)]
-                    {
-                        // In dev mode we don't start the local file server; Vite dev server serves assets
-                        None
-                    }
-                };
-
-                // If we successfully started an HTTP server, navigate the main window to it
-                if let Some(port) = port_opt {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let url = format!("http://127.0.0.1:{}", port);
-                        // Replace location after the webview is created
-                        let _ = window.eval(&format!("window.location.replace('{}');", url));
-                        eprintln!("➡️ Navigated main window to {}", url);
-                    }
-                    }
+            
+            // Get saved window settings
             let resolution = db::get_setting(&db_path, "resolution").unwrap_or(None).unwrap_or_else(|| "1440x900".to_string());
             let fullscreen = db::get_setting(&db_path, "fullscreen").unwrap_or(None).map(|s| s == "true").unwrap_or(false);
-
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_title(&get_window_title());
+            
+            // Parse resolution
+            let (width, height) = {
                 let parts: Vec<&str> = resolution.split('x').collect();
                 if parts.len() == 2 {
                     if let (Ok(w), Ok(h)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-                        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(w, h)));
+                        (w, h)
+                    } else {
+                        (1440.0, 900.0)
                     }
+                } else {
+                    (1440.0, 900.0)
                 }
-                let _ = window.set_fullscreen(fullscreen);
-            }
+            };
+            
+            // Determine URL based on build mode
+            #[cfg(debug_assertions)]
+            let url = WebviewUrl::App("index.html".into());
+            
+            #[cfg(not(debug_assertions))]
+            let url = WebviewUrl::External("http://localhost:1430".parse().unwrap());
+            
+            // Create the main window
+            WebviewWindowBuilder::new(app_handle, "main", url)
+                .title(&get_window_title())
+                .inner_size(width, height)
+                .fullscreen(fullscreen)
+                .build()?;
+            
             Ok(())
         })
         .build(tauri::generate_context!())

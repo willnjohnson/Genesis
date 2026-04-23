@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=
+Comment=A desktop application for saving and organizing YouTube video transcripts.
+Exec=kinesis
+StartupWMClass=kinesis
+Icon=kinesis
+Name=Kinesis
+Terminal=false
+Type=Application

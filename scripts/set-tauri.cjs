@@ -68,11 +68,9 @@ config.bundle.icon = [
 if (branding === 'genesis') {
   config.productName = 'Genesis';
   config.identifier = 'genesisapp';
-  config.app.windows[0].title = `Genesis v${currentVersion}`;
 } else {
   config.productName = 'Kinesis';
   config.identifier = 'kinesisapp';
-  config.app.windows[0].title = `Kinesis v${currentVersion}`;
 }
 
 // Write back to config file

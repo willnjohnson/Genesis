@@ -10,18 +10,9 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "Kinesis v0.2.4",
-        "width": 800,
-        "height": 600,
-        "resizable": true,
-        "fullscreen": false
-      }
-    ],
+    "windows": [],
     "security": {
-      "csp": "default-src 'self' http://localhost:*; script-src 'self' 'unsafe-inline' http://localhost:* https://www.youtube.com https://www.youtube-nocookie.com https://www.google.com https://youtube.com; style-src 'self' 'unsafe-inline'; font-src 'self' https:; frame-src 'self' http://localhost:* https://www.youtube.com https://www.youtube-nocookie.com https://youtube.com; img-src 'self' data: https: blob:; media-src 'self' https: blob:; connect-src 'self' https: wss: http://localhost:*"
+      "csp": "default-src 'self' http://localhost:* https://localhost:*; script-src 'self' 'unsafe-inline' http://localhost:* https://localhost:* https://www.youtube.com https://www.youtube-nocookie.com https://www.google.com https://youtube.com; style-src 'self' 'unsafe-inline'; font-src 'self' https:; frame-src 'self' http://localhost:* https://localhost:* https://www.youtube.com https://www.youtube-nocookie.com https://youtube.com; img-src 'self' data: https: blob:; media-src 'self' https: blob:; connect-src 'self' https: wss: http://localhost:* https://localhost:*"
     }
   },
   "bundle": {
