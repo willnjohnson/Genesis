@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use tauri::Manager;
-use tauri::webview::WebviewWindowBuilder;
 use tauri::WebviewUrl;
 use std::sync::Mutex;
 
@@ -246,12 +245,8 @@ pub fn run() {
                 }
             };
             
-            // Determine URL based on build mode
-            #[cfg(debug_assertions)]
+            // Load from bundled index.html
             let url = WebviewUrl::App("index.html".into());
-            
-            #[cfg(not(debug_assertions))]
-            let url = WebviewUrl::External("http://localhost:1430".parse().unwrap());
             
             // Create the main window
             WebviewWindowBuilder::new(app_handle, "main", url)

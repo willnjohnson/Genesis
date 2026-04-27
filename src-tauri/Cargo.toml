@@ -6,13 +6,17 @@ authors = ["William N. Johnson"]
 license = "MIT"
 repository = "https://github.com/willnjohnson/Kinesis"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
 name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib", "cdylib"]
+
+[profile.release]
+opt-level = 2
+lto = "off"
 
 [features]
 default = ["kinesis"]
