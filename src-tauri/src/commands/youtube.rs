@@ -135,7 +135,7 @@ pub async fn fetch_channel_videos_v3(
                     author: snippet["channelTitle"].as_str().map(|s| decode_html(s)),
                     handle: None, status: None, date_added: None,
                     length_seconds: None, video_type: None, transcript: None,
-                    tags: None,
+                    summary: None, tags: None, has_transcript: None, has_summary: None,
                 });
             }
         }
@@ -210,7 +210,7 @@ pub async fn fetch_video_info(_app: tauri::AppHandle, video_id: String) -> Resul
         view_count: parse_view_count(details["viewCount"].as_str().unwrap_or("0")).to_string(),
         author, handle, status: None, date_added: None,
         length_seconds: None, video_type: None, transcript: None,
-        tags: None,
+        summary: None, tags: None, has_transcript: None, has_summary: None,
     })
 }
 
@@ -282,6 +282,12 @@ pub async fn fetch_transcript(app: tauri::AppHandle, video_id: String) -> Result
 }
 
 #[command]
+pub async fn save_transcript(app: tauri::AppHandle, video_id: String, transcript: String) -> Result<(), String> {
+    let db_path = get_db_path(&app);
+    db::save_transcript(&db_path, &video_id, &transcript).map_err(|e| e.to_string())
+}
+
+#[command]
 pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option<String>) -> Result<Video, String> {
     use crate::types::{parse_view_count, extract_handle_from_url};
     let db_path = get_db_path(&app);
@@ -292,6 +298,8 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
             let _ = db::save_summary(&db_path, &video_id, s);
         }
 
+        let has_transcript = !v_data.4.trim().is_empty();
+        let has_summary = !v_data.10.trim().is_empty();
         return Ok(Video {
             id: v_data.0,
             title: v_data.1,
@@ -305,7 +313,10 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
             length_seconds: Some(v_data.3),
             video_type: Some(v_data.8),
             transcript: Some(v_data.4),
-            tags: None,
+            summary: Some(v_data.10),
+            tags: Some(v_data.11),
+            has_transcript: Some(has_transcript),
+            has_summary: Some(has_summary),
         });
     }
 
@@ -313,6 +324,11 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
     let client_android = YouTubeClient::new(ClientType::Android);
     let player_web = client_web.player(&video_id).await?;
     let details = &player_web["videoDetails"];
+
+    // Fail fast if YouTube returned an empty/bot-check response
+    if details.is_null() || details["title"].as_str().map(|t| t.is_empty()).unwrap_or(true) {
+        return Err(format!("YouTube returned incomplete data for video '{}'. It may be unavailable, private, or geo-restricted.", video_id));
+    }
 
     let mut handle: Option<String> = None;
     if let Some(authors) = details["author"].as_array() {
@@ -341,12 +357,32 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
         return Err("Cannot save video without transcript.".to_string());
     }
 
+    // Final guard: reject transcript if it contains YouTube's bot-detection / rate-limit text.
+    // This catches cases where the error slipped through XML parsing as text nodes.
+    let transcript_lower = transcript.to_lowercase();
+    let bot_phrases = [
+        "but your computer or network may be sending automated queries",
+        "our systems have detected unusual traffic",
+        "to protect our users, we can't process your request right now",
+        "please solve this captcha",
+        "unusual traffic from your computer network",
+    ];
+    if bot_phrases.iter().any(|phrase| transcript_lower.contains(phrase)) {
+        return Err("YouTube returned a bot-detection page instead of a transcript. Please wait a moment and try again.".to_string());
+    }
+
     let title = decode_html(details["title"].as_str().unwrap_or("Unknown"));
     let author = if let Some(authors) = details["author"].as_array() {
         decode_html(authors.first().and_then(|a| a["name"].as_str()).unwrap_or("Unknown"))
     } else {
         decode_html(details["author"].as_str().unwrap_or("Unknown"))
     };
+
+    // Guard: reject records with placeholder/failed metadata from YouTube
+    // These indicate a bot-check, geo-block, or API parse failure
+    if title == "Unknown" || title.trim().is_empty() {
+        return Err("Failed to fetch video metadata: title could not be retrieved from YouTube. The video may be unavailable, region-locked, or YouTube returned an unexpected response.".to_string());
+    }
 
     for try_handle in [
         player_web["microformat"]["playerMicroformatRenderer"]["ownerProfileUrl"].as_str().and_then(extract_handle_from_url),
@@ -359,9 +395,16 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
     let view_count = parse_view_count(details["viewCount"].as_str().unwrap_or("0"));
     let published_at = player_web["microformat"]["playerMicroformatRenderer"]["publishDate"].as_str().unwrap_or("");
     let video_type = if length > 0 && length <= 60 { "short" } else { "standard" };
+    let has_summary = summary
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
 
     db::save_video(&db_path, &video_id, &title, &author, length, &transcript, view_count, published_at, handle.as_deref().unwrap_or(""), video_type, summary.as_deref())
         .map_err(|e| e.to_string())?;
+    if let Some(ref h) = handle {
+        let _ = db::upsert_biography_from_video(&db_path, h, &author);
+    }
 
     let date_added = {
         let conn = rusqlite::Connection::open(&db_path).ok();
@@ -383,15 +426,23 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
         length_seconds: Some(length),
         video_type: Some(video_type.to_string()),
         transcript: Some(transcript),
+        summary: summary,
         tags: None,
+        has_transcript: Some(true),
+        has_summary: Some(has_summary),
     })
 }
 
 #[command]
-pub async fn fetch_saved_videos(app: tauri::AppHandle, video_type: Option<String>) -> Result<VideoResponse, String> {
+pub async fn fetch_saved_videos(
+    app: tauri::AppHandle,
+    video_type: Option<String>,
+    include_content: Option<bool>,
+) -> Result<VideoResponse, String> {
     let db_path = get_db_path(&app);
     db::init_db(&db_path).map_err(|e| e.to_string())?;
-    let videos = db::list_videos(&db_path, video_type.as_deref()).map_err(|e| e.to_string())?;
+    let videos = db::list_videos(&db_path, video_type.as_deref(), include_content.unwrap_or(false))
+        .map_err(|e| e.to_string())?;
     Ok(VideoResponse { videos, continuation: None, total_count: None })
 }
 
@@ -467,7 +518,7 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
                         author: channel_title,
                         handle: None, status: None, date_added: None,
                         length_seconds: None, video_type: None, transcript: None,
-                        tags: None,
+                        summary: None, tags: None, has_transcript: None, has_summary: None,
                     });
                 }
             }

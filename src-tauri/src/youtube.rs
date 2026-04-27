@@ -293,6 +293,28 @@ pub async fn fetch_transcript(player_json: &Value) -> Result<Option<String>, Str
                 .map_err(|e| e.to_string())?;
             let text = res.text().await.map_err(|e| e.to_string())?;
 
+            // Detect YouTube's bot-check / rate-limit error pages.
+            // These are returned as HTML/plain-text instead of XML/JSON and must
+            // never be stored as transcript content.
+            let lower = text.to_lowercase();
+            let bot_phrases = [
+                "but your computer or network may be sending automated queries",
+                "our systems have detected unusual traffic",
+                "to protect our users, we can't process your request right now",
+                "please solve this captcha",
+                "unusual traffic from your computer network",
+                "this page checks to see if it's really you sending the requests",
+            ];
+            if bot_phrases.iter().any(|phrase| lower.contains(phrase)) {
+                return Err("YouTube rate-limit or bot-detection triggered; transcript unavailable right now.".to_string());
+            }
+
+            // Also reject obvious HTML error pages (no valid XML/JSON transcript starts with <!DOCTYPE or <html)
+            let trimmed = text.trim_start();
+            if trimmed.starts_with("<!") || trimmed.to_lowercase().starts_with("<html") {
+                return Err("YouTube returned an HTML page instead of a transcript; the request may have been blocked.".to_string());
+            }
+
             if text.trim().starts_with('{') {
                 let data: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
                 let mut lines: Vec<String> = Vec::new();

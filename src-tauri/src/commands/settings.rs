@@ -105,6 +105,7 @@ pub fn get_display_settings(app: tauri::AppHandle) -> Result<DisplaySettings, St
         fullscreen: db::get_setting(&db_path, "fullscreen").unwrap_or(None).map(|s| s == "true").unwrap_or(false),
         theme: get("theme", "dark"),
         video_list_mode: get("video_list_mode", "grid"),
+        navigation_orientation: get("navigation_orientation", "horizontal"),
     })
 }
 
@@ -122,6 +123,7 @@ pub fn set_display_settings(app: tauri::AppHandle, settings: DisplaySettings) ->
     db::set_setting(&db_path, "fullscreen", &settings.fullscreen.to_string()).map_err(|e| e.to_string())?;
     db::set_setting(&db_path, "theme", &settings.theme).map_err(|e| e.to_string())?;
     db::set_setting(&db_path, "video_list_mode", &settings.video_list_mode).map_err(|e| e.to_string())?;
+    db::set_setting(&db_path, "navigation_orientation", &settings.navigation_orientation).map_err(|e| e.to_string())?;
 
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_fullscreen(settings.fullscreen);

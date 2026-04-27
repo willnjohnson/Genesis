@@ -16,7 +16,10 @@ export interface Video {
     handle?: string;
     status?: string;
     transcript?: string;
+    summary?: string;
     tags?: string;
+    hasTranscript?: boolean;
+    hasSummary?: boolean;
 }
 
 export interface SearchResponse {
@@ -37,6 +40,7 @@ export interface DisplaySettings {
     fullscreen: boolean;
     theme: string;
     videoListMode: 'grid' | 'compact';
+    navigationOrientation: 'horizontal' | 'vertical';
 }
 
 export interface HistoryEntry {
@@ -62,8 +66,8 @@ export async function getVideoHandle(id: string): Promise<string | null> {
     return await invoke("fetch_video_handle", { videoId: id });
 }
 
-export async function summarizeTranscript(transcript: string, handle?: string): Promise<string> {
-    return await invoke("summarize_transcript", { transcript, handle: handle ?? null });
+export async function summarizeTranscript(transcript: string, handle?: string, videoId?: string): Promise<string> {
+    return await invoke("summarize_transcript", { transcript, handle: handle ?? null, videoId: videoId ?? null });
 }
 
 export async function getVideoInfo(id: string): Promise<Video> {
@@ -78,8 +82,8 @@ export async function searchVideos(query: string, continuation?: string | null):
     return await invoke("search_videos", { query, continuation });
 }
 
-export async function getSavedVideos(videoType?: string): Promise<SearchResponse> {
-    return await invoke("fetch_saved_videos", { videoType });
+export async function getSavedVideos(videoType?: string, includeContent?: boolean): Promise<SearchResponse> {
+    return await invoke("fetch_saved_videos", { videoType, includeContent });
 }
 
 export async function deleteVideo(id: string): Promise<void> {
@@ -206,6 +210,10 @@ export async function saveTags(videoId: string, tags: string): Promise<void> {
     await invoke("save_tags", { videoId, tags });
 }
 
+export async function saveTranscript(videoId: string, transcript: string): Promise<void> {
+    await invoke("save_transcript", { videoId, transcript });
+}
+
 export async function getSummary(videoId: string): Promise<string | null> {
     return await invoke("get_summary", { videoId });
 }
@@ -263,6 +271,23 @@ export interface GlossaryTerm {
     term: string;
     definition: string;
 }
+
+export interface BiographyEntry {
+    handle: string;
+    displayName: string;
+    bio: string;
+    wikipedia: string;
+    website: string;
+    twitter: string;
+    instagram: string;
+    facebook: string;
+    threads: string;
+    youtube: string;
+    tiktok: string;
+    twitch: string;
+    reddit: string;
+    discord: string;
+}
 export async function addGlossaryTerm(term: string, definition: string): Promise<void> {
     await invoke("add_glossary_term", { term, definition });
 }
@@ -273,6 +298,68 @@ export async function getGlossaryTerms(): Promise<[string, string][]> {
 
 export async function deleteGlossaryTerm(term: string): Promise<void> {
     await invoke("delete_glossary_term", { term });
+}
+
+type RawBiographyEntry = {
+    handle: string;
+    display_name: string;
+    bio: string;
+    wikipedia: string;
+    website: string;
+    twitter: string;
+    instagram: string;
+    facebook: string;
+    threads: string;
+    youtube: string;
+    tiktok: string;
+    twitch: string;
+    reddit: string;
+    discord: string;
+};
+
+const mapBiography = (entry: RawBiographyEntry): BiographyEntry => ({
+    handle: entry.handle,
+    displayName: entry.display_name,
+    bio: entry.bio,
+    wikipedia: entry.wikipedia,
+    website: entry.website,
+    twitter: entry.twitter,
+    instagram: entry.instagram,
+    facebook: entry.facebook,
+    threads: entry.threads,
+    youtube: entry.youtube,
+    tiktok: entry.tiktok,
+    twitch: entry.twitch,
+    reddit: entry.reddit,
+    discord: entry.discord,
+});
+
+export async function getBiographies(): Promise<BiographyEntry[]> {
+    const rows = await invoke("get_biographies") as RawBiographyEntry[];
+    return rows.map(mapBiography);
+}
+
+export async function getBiography(handle: string): Promise<BiographyEntry | null> {
+    const row = await invoke("get_biography", { handle }) as RawBiographyEntry | null;
+    return row ? mapBiography(row) : null;
+}
+
+export async function updateBiography(entry: BiographyEntry): Promise<void> {
+    await invoke("update_biography", {
+        handle: entry.handle,
+        bio: entry.bio,
+        wikipedia: entry.wikipedia,
+        website: entry.website,
+        twitter: entry.twitter,
+        instagram: entry.instagram,
+        facebook: entry.facebook,
+        threads: entry.threads,
+        youtube: entry.youtube,
+        tiktok: entry.tiktok,
+        twitch: entry.twitch,
+        reddit: entry.reddit,
+        discord: entry.discord,
+    });
 }
 
 export async function openExternalUrl(url: string): Promise<void> {
@@ -308,4 +395,41 @@ export async function deleteCustomPrompt(handle: string): Promise<void> {
 
 export async function getUniqueHandles(): Promise<string[]> {
     return await invoke("get_unique_handles");
+}
+
+export interface PixabayImage {
+    id: number;
+    url: string;
+    thumbnail: string;
+    width: number;
+    height: number;
+    tags: string;
+}
+
+export async function searchPixabay(query: string): Promise<PixabayImage[]> {
+    return await invoke("search_pixabay", { query });
+}
+
+export async function uploadToImgur(imageUrl: string): Promise<string> {
+    return await invoke("upload_to_imgur", { imageUrl });
+}
+
+export async function getPixabayApiKey(): Promise<string | null> {
+    return await invoke("get_pixabay_api_key");
+}
+
+export async function setPixabayApiKey(key: string): Promise<void> {
+    await invoke("set_pixabay_api_key", { apiKey: key });
+}
+
+export async function generateImage(prompt: string): Promise<string> {
+    return await invoke("generate_image", { prompt });
+}
+
+export async function fetchImageAsDataUri(url: string): Promise<string> {
+    return await invoke("fetch_image_as_data_uri", { url });
+}
+
+export async function saveImage(path: string, contentsBase64: string): Promise<void> {
+    await invoke("save_image", { path, contentsBase64 });
 }

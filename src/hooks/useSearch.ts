@@ -179,7 +179,7 @@ export function useSearch(hasApiKey: boolean) {
     const filteredVideos = useMemo(() => {
         if (!searchQuery) return videos;
         
-        const whitelist = ['handle', 'playlist', 'video', 'title_search', 'transcript_search', 'term_search', 'definition_search', 'tag_search'];
+        const whitelist = ['handle', 'playlist', 'video', 'title_search', 'transcript_search', 'summary_search', 'term_search', 'definition_search', 'tag_search'];
         const facetRegex = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
         const facets: { type: string; value: string }[] = [];
         let m;
@@ -242,6 +242,8 @@ export function useSearch(hasApiKey: boolean) {
                     if (!normalizeText(v.id).includes(val)) return false;
                 } else if (f.type === 'transcript_search') {
                     if (!normalizeText(v.transcript || "").includes(val)) return false;
+                } else if (f.type === 'summary_search') {
+                    if (!normalizeText(v.summary || "").includes(val)) return false;
                 }
             }
             
@@ -262,7 +264,7 @@ export function useSearch(hasApiKey: boolean) {
         const lowerVal = val.toLowerCase();
         
         // Handle specific prefixes (consistent with App.tsx whitelist)
-        const prefixes = ['handle:', 'playlist:', 'video:', 'title_search:', 'transcript_search:', 'tag_search:'];
+        const prefixes = ['handle:', 'playlist:', 'video:', 'title_search:', 'transcript_search:', 'summary_search:', 'tag_search:'];
         for (const prefix of prefixes) {
             if (lowerVal.includes(prefix)) {
                 const afterFacet = val.slice(val.toLowerCase().indexOf(prefix) + prefix.length);

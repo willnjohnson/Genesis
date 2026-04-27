@@ -1,7 +1,8 @@
-import { X, FileText, Hash, Type } from 'lucide-react';
+import { X, FileText, Hash, Type, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { openExternalUrl } from '../api';
+import React, { useEffect, useState } from 'react';
+import { openExternalUrl, getSetting } from '../api';
 
 interface GlossaryTerm {
     term: string;
@@ -11,10 +12,22 @@ interface GlossaryTerm {
 interface Props {
     term: GlossaryTerm;
     onClose: () => void;
-    onSearch: (term: string, mode: 'title' | 'transcript' | 'tag') => void;
+    onSearch: (term: string, mode: 'title' | 'transcript' | 'tag' | 'summary') => void;
 }
 
 export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
+    const [showTag, setShowTag] = useState(true);
+    const [showTitle, setShowTitle] = useState(true);
+    const [showTranscript, setShowTranscript] = useState(true);
+    const [showSummary, setShowSummary] = useState(true);
+
+    useEffect(() => {
+        getSetting('showGlossarySearchByTag').then(v => { if (v === 'false') setShowTag(false); });
+        getSetting('showGlossarySearchTermInTitle').then(v => { if (v === 'false') setShowTitle(false); });
+        getSetting('showGlossarySearchTermInTranscript').then(v => { if (v === 'false') setShowTranscript(false); });
+        getSetting('showGlossarySearchTermInAISummary').then(v => { if (v === 'false') setShowSummary(false); });
+    }, []);
+
     return (
         <div
             className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200"
@@ -36,7 +49,7 @@ export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
                 </div>
 
                 {/* Content */}
-                <div className="p-8 bg-[#0f0f0f] overflow-y-auto flex-1">
+                <div className="p-6 bg-[#0f0f0f] overflow-y-auto flex-1">
                     <div className="leading-relaxed prose dark:prose-invert prose-lg max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
                         <ReactMarkdown
                             remarkPlugins={[remarkGfm]}
@@ -68,36 +81,54 @@ export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
                 {/* Footer */}
                 <div className="px-6 py-4 border-t border-[#303030] flex justify-start items-center bg-[#141414]">
                     <div className="flex gap-3">
-                        <button
-                            onClick={() => {
-                                onSearch(`${term.term}#`, 'tag');
-                                onClose();
-                            }}
-                            className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
-                        >
-                            <Hash className="w-3.5 h-3.5" />
-                            Search by Tag
-                        </button>
-                        <button
-                            onClick={() => {
-                                onSearch(term.term, 'title');
-                                onClose();
-                            }}
-                            className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
-                        >
-                            <Type className="w-3.5 h-3.5" />
-                            Search Term in Title
-                        </button>
-                        <button
-                            onClick={() => {
-                                onSearch(term.term, 'transcript');
-                                onClose();
-                            }}
-                            className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
-                        >
-                            <FileText className="w-3.5 h-3.5" />
-                            Search Term in Transcript
-                        </button>
+                        {showTag && (
+                            <button
+                                onClick={() => {
+                                    onSearch(`${term.term}#`, 'tag');
+                                    onClose();
+                                }}
+                                className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
+                            >
+                                <Hash className="w-3.5 h-3.5" />
+                                Search by Tag
+                            </button>
+                        )}
+                        {showTitle && (
+                            <button
+                                onClick={() => {
+                                    onSearch(term.term, 'title');
+                                    onClose();
+                                }}
+                                className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
+                            >
+                                <Type className="w-3.5 h-3.5" />
+                                Search Term in Title
+                            </button>
+                        )}
+                        {showTranscript && (
+                            <button
+                                onClick={() => {
+                                    onSearch(term.term, 'transcript');
+                                    onClose();
+                                }}
+                                className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
+                            >
+                                <FileText className="w-3.5 h-3.5" />
+                                Search Term in Transcript
+                            </button>
+                        )}
+                        {showSummary && (
+                            <button
+                                onClick={() => {
+                                    onSearch(term.term, 'summary');
+                                    onClose();
+                                }}
+                                className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
+                            >
+                                <Sparkles className="w-3.5 h-3.5" />
+                                Search Term in AI Summary
+                            </button>
+                        )}
                     </div>
                 </div>
             </div>

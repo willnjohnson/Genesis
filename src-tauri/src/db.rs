@@ -51,6 +51,55 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     )?;
 
+    // Create biographies table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS biographies (
+            handle TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL DEFAULT '',
+            bio TEXT NOT NULL DEFAULT '',
+            wikipedia TEXT NOT NULL DEFAULT '',
+            website TEXT NOT NULL DEFAULT '',
+            twitter TEXT NOT NULL DEFAULT '',
+            instagram TEXT NOT NULL DEFAULT '',
+            facebook TEXT NOT NULL DEFAULT '',
+            threads TEXT NOT NULL DEFAULT '',
+            youtube TEXT NOT NULL DEFAULT '',
+            tiktok TEXT NOT NULL DEFAULT '',
+            twitch TEXT NOT NULL DEFAULT '',
+            reddit TEXT NOT NULL DEFAULT '',
+            discord TEXT NOT NULL DEFAULT ''
+        )",
+        [],
+    )?;
+
+    // Migration: Add new biography columns if they don't exist
+    let has_twitch: Result<i32> = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('biographies') WHERE name='twitch'",
+        [],
+        |row| row.get(0),
+    );
+    if has_twitch.unwrap_or(0) == 0 {
+        let _ = conn.execute("ALTER TABLE biographies ADD COLUMN twitch TEXT NOT NULL DEFAULT ''", []);
+    }
+
+    let has_reddit: Result<i32> = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('biographies') WHERE name='reddit'",
+        [],
+        |row| row.get(0),
+    );
+    if has_reddit.unwrap_or(0) == 0 {
+        let _ = conn.execute("ALTER TABLE biographies ADD COLUMN reddit TEXT NOT NULL DEFAULT ''", []);
+    }
+
+    let has_discord: Result<i32> = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('biographies') WHERE name='discord'",
+        [],
+        |row| row.get(0),
+    );
+    if has_discord.unwrap_or(0) == 0 {
+        let _ = conn.execute("ALTER TABLE biographies ADD COLUMN discord TEXT NOT NULL DEFAULT ''", []);
+    }
+
     // Create search_history table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS search_history (
@@ -91,6 +140,19 @@ pub fn init_db(db_path: &str) -> Result<()> {
         ("showSearch", "true"),
         ("allowDeletionLibrary", "true"),
         ("allowModificationGlossary", "true"),
+        ("showSummarizeButton", "true"),
+        ("showSummarizeOllama", "true"),
+        ("showSummarizeVenice", "true"),
+        ("showSynthesizeVenice", "true"),
+        ("showSynthesizePixabay", "true"),
+        ("showSynthesizeUpload", "true"),
+        ("showGlossarySearchByTag", "true"),
+        ("showGlossarySearchTermInTitle", "true"),
+        ("showGlossarySearchTermInTranscript", "true"),
+        ("showGlossarySearchTermInAISummary", "true"),
+        ("showBiography", "true"),
+        ("allowEditBio", "true"),
+        ("navigation_orientation", "horizontal"),
     ];
 
     for (key, val) in defaults.iter() {
@@ -207,16 +269,26 @@ pub fn init_db(db_path: &str) -> Result<()> {
         }
     }
 
+    // Migration: Populate biographies from existing video handles
+    // Ensures channels that have been saved previously appear in the Biography view
+    if let Err(e) = populate_biographies_from_videos(db_path) {
+        log::warn!("Failed to populate biographies from videos: {}", e);
+    }
+
     Ok(())
 }
 
-pub fn list_videos(db_path: &str, video_type_filter: Option<&str>) -> Result<Vec<Video>> {
+pub fn list_videos(
+    db_path: &str,
+    video_type_filter: Option<&str>,
+    include_content: bool,
+) -> Result<Vec<Video>> {
     let conn = Connection::open(db_path)?;
 
     let query = match video_type_filter {
-        Some("short") => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript, tags FROM videos WHERE video_type = 'short' ORDER BY date_added DESC, rowid DESC",
-        Some("standard") => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript, tags FROM videos WHERE video_type = 'standard' ORDER BY date_added DESC, rowid DESC",
-        _ => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript, tags FROM videos ORDER BY date_added DESC, rowid DESC",
+        Some("short") => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript, tags, summary, CASE WHEN transcript IS NOT NULL AND transcript != '' THEN 1 ELSE 0 END AS has_transcript, CASE WHEN summary IS NOT NULL AND summary != '' THEN 1 ELSE 0 END AS has_summary FROM videos WHERE video_type = 'short' ORDER BY date_added DESC, rowid DESC",
+        Some("standard") => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript, tags, summary, CASE WHEN transcript IS NOT NULL AND transcript != '' THEN 1 ELSE 0 END AS has_transcript, CASE WHEN summary IS NOT NULL AND summary != '' THEN 1 ELSE 0 END AS has_summary FROM videos WHERE video_type = 'standard' ORDER BY date_added DESC, rowid DESC",
+        _ => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript, tags, summary, CASE WHEN transcript IS NOT NULL AND transcript != '' THEN 1 ELSE 0 END AS has_transcript, CASE WHEN summary IS NOT NULL AND summary != '' THEN 1 ELSE 0 END AS has_summary FROM videos ORDER BY date_added DESC, rowid DESC",
     };
 
     let mut stmt = conn.prepare(query)?;
@@ -257,8 +329,19 @@ pub fn list_videos(db_path: &str, video_type_filter: Option<&str>) -> Result<Vec
             date_added: row.get::<_, Option<String>>(6).unwrap_or(None),
             handle: row.get::<_, Option<String>>(7).unwrap_or(None),
             video_type: row.get::<_, Option<String>>(8).unwrap_or(None),
-            transcript: row.get::<_, Option<String>>(9).unwrap_or(None),
+            transcript: if include_content {
+                row.get::<_, Option<String>>(9).unwrap_or(None)
+            } else {
+                None
+            },
             tags: row.get::<_, Option<String>>(10).unwrap_or(None),
+            summary: if include_content {
+                row.get::<_, Option<String>>(11).unwrap_or(None)
+            } else {
+                None
+            },
+            has_transcript: Some(row.get::<_, i64>(12).unwrap_or(0) > 0),
+            has_summary: Some(row.get::<_, i64>(13).unwrap_or(0) > 0),
         })
     })?;
 
@@ -342,10 +425,12 @@ pub fn get_video_full(
         String,
         String,
         String,
+        String,
+        String,
     )>,
 > {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT video_id, title, author, length_seconds, transcript, view_count, published_at, handle, video_type, date_added FROM videos WHERE video_id = ?")?;
+    let mut stmt = conn.prepare("SELECT video_id, title, author, length_seconds, transcript, view_count, published_at, handle, video_type, date_added, summary, tags FROM videos WHERE video_id = ?")?;
     let mut rows = stmt.query(params![video_id])?;
     if let Some(row) = rows.next()? {
         Ok(Some((
@@ -386,6 +471,12 @@ pub fn get_video_full(
                 .unwrap_or(None)
                 .unwrap_or_else(|| "standard".to_string()),
             row.get::<_, Option<String>>(9)
+                .unwrap_or(None)
+                .unwrap_or_else(|| "".to_string()),
+            row.get::<_, Option<String>>(10)
+                .unwrap_or(None)
+                .unwrap_or_else(|| "".to_string()),
+            row.get::<_, Option<String>>(11)
                 .unwrap_or(None)
                 .unwrap_or_else(|| "".to_string()),
         )))
@@ -463,6 +554,15 @@ pub fn get_video_count(
     let mut stmt = conn.prepare(&query)?;
     let count: i64 = stmt.query_row([], |row| row.get(0))?;
     Ok(count)
+}
+
+pub fn save_transcript(db_path: &str, video_id: &str, transcript: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "UPDATE videos SET transcript = ?1 WHERE video_id = ?2",
+        params![transcript, video_id],
+    )?;
+    Ok(())
 }
 
 pub fn get_history_stats(db_path: &str) -> Result<i64> {
@@ -548,6 +648,156 @@ pub fn delete_glossary_term(db_path: &str, term: &str) -> Result<()> {
     Ok(())
 }
 
+pub type BiographyRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
+pub fn upsert_biography_from_video(db_path: &str, handle: &str, display_name: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    let cleaned_handle = handle.trim();
+    if cleaned_handle.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO biographies (handle, display_name)
+         VALUES (?1, ?2)
+         ON CONFLICT(handle) DO UPDATE SET
+           display_name = CASE
+             WHEN biographies.display_name IS NULL OR TRIM(biographies.display_name) = ''
+             THEN excluded.display_name
+             ELSE biographies.display_name
+           END",
+        params![cleaned_handle, display_name.trim()],
+    )?;
+    Ok(())
+}
+
+pub fn get_biographies(db_path: &str) -> Result<Vec<BiographyRow>> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT handle, display_name, bio, wikipedia, website, twitter, instagram, facebook, threads, youtube, tiktok, twitch, reddit, discord
+         FROM biographies
+         ORDER BY
+           CASE WHEN TRIM(display_name) = '' THEN handle ELSE display_name END COLLATE NOCASE",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next()? {
+        entries.push((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
+            row.get(11)?,
+            row.get(12)?,
+            row.get(13)?,
+        ));
+    }
+    Ok(entries)
+}
+
+pub fn get_biography_by_handle(db_path: &str, handle: &str) -> Result<Option<BiographyRow>> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT handle, display_name, bio, wikipedia, website, twitter, instagram, facebook, threads, youtube, tiktok, twitch, reddit, discord
+         FROM biographies
+         WHERE LOWER(handle) = LOWER(?)",
+    )?;
+    let mut rows = stmt.query(params![handle.trim()])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
+            row.get(11)?,
+            row.get(12)?,
+            row.get(13)?,
+        )))
+    } else {
+        Ok(None)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_biography_details(
+    db_path: &str,
+    handle: &str,
+    bio: &str,
+    wikipedia: &str,
+    website: &str,
+    twitter: &str,
+    instagram: &str,
+    facebook: &str,
+    threads: &str,
+    youtube: &str,
+    tiktok: &str,
+    twitch: &str,
+    reddit: &str,
+    discord: &str,
+) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "UPDATE biographies
+         SET bio = ?2,
+             wikipedia = ?3,
+             website = ?4,
+             twitter = ?5,
+             instagram = ?6,
+             facebook = ?7,
+             threads = ?8,
+             youtube = ?9,
+             tiktok = ?10,
+             twitch = ?11,
+             reddit = ?12,
+             discord = ?13
+         WHERE LOWER(handle) = LOWER(?1)",
+        params![
+            handle.trim(),
+            bio,
+            wikipedia,
+            website,
+            twitter,
+            instagram,
+            facebook,
+            threads,
+            youtube,
+            tiktok,
+            twitch,
+            reddit,
+            discord
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn get_custom_prompt(
     db_path: &str,
     handle: &str,
@@ -624,4 +874,50 @@ pub fn get_unique_handles(db_path: &str) -> Result<Vec<String>> {
         .filter_map(|r| r.ok())
         .collect();
     Ok(handles)
+}
+
+/// Populate biographies table from existing video handles.
+/// For each distinct handle in the videos table:
+/// - If no biography entry exists, create one with the author as display_name
+/// - If biography entry exists but display_name is empty, update it with author
+pub fn populate_biographies_from_videos(db_path: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    
+    // Get distinct handles with their corresponding author (use MIN for deterministic choice)
+    let mut stmt = conn.prepare(
+        "SELECT handle, MIN(author) as author
+         FROM videos
+         WHERE handle IS NOT NULL AND handle != ''
+         GROUP BY handle"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+        ))
+    })?;
+    
+    let mut count = 0;
+    for row in rows {
+        if let Ok((handle, author_opt)) = row {
+            let display_name = author_opt.unwrap_or_else(|| "".to_string());
+            
+            // Use upsert that preserves existing non-empty display_name
+            conn.execute(
+                "INSERT INTO biographies (handle, display_name)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(handle) DO UPDATE SET
+                   display_name = CASE
+                     WHEN TRIM(biographies.display_name) = ''
+                     THEN excluded.display_name
+                     ELSE biographies.display_name
+                   END",
+                params![handle, display_name],
+            )?;
+            count += 1;
+        }
+    }
+    
+    log::info!("Populated {} biography entries from existing videos", count);
+    Ok(())
 }

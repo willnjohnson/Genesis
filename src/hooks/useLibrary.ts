@@ -19,18 +19,20 @@ export function useLibrary(
     const [summarizedCount, setSummarizedCount] = useState(0);
     const [confirmDelete, setConfirmDelete] = useState<{ video: Video; fromSidebar?: boolean } | null>(null);
     const [initialized, setInitialized] = useState(false);
+    const [hasFullTextLoaded, setHasFullTextLoaded] = useState(false);
 
     const refreshSummarizedCount = useCallback(async () => {
         if (!pluginSummarizeEnabled) return;
         try { setSummarizedCount(await getSummarizedCount()); } catch { /* ignore */ }
     }, [pluginSummarizeEnabled]);
 
-    const refreshLibrary = useCallback(async (force = false) => {
+    const refreshLibrary = useCallback(async (force = false, includeContent = false) => {
         if (!force && initialized) return;
         setLoading(true);
         try {
-            const res = await getSavedVideos();
+            const res = await getSavedVideos(undefined, includeContent);
             setLibraryVideos(res.videos);
+            setHasFullTextLoaded(includeContent);
             if (pluginSummarizeEnabled) refreshSummarizedCount();
             setInitialized(true);
         } catch {
@@ -39,6 +41,11 @@ export function useLibrary(
             setLoading(false);
         }
     }, [pluginSummarizeEnabled, refreshSummarizedCount, setNotification, initialized]);
+
+    const ensureFullTextLoaded = useCallback(async () => {
+        if (hasFullTextLoaded) return;
+        await refreshLibrary(true, true);
+    }, [hasFullTextLoaded, refreshLibrary]);
 
     const handleSaveVideo = useCallback(async (video: Video, summary?: string | null) => {
         if (!video) return;
@@ -141,6 +148,8 @@ export function useLibrary(
         confirmDelete,
         setConfirmDelete,
         refreshLibrary,
+        ensureFullTextLoaded,
+        hasFullTextLoaded,
         refreshSummarizedCount,
         handleSaveVideo,
         handleDeleteVideo,

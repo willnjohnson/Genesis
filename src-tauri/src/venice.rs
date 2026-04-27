@@ -136,7 +136,7 @@ async fn call_venice_api(client: &reqwest::Client, api_key: &str, prompt: &str) 
     Ok(summary)
 }
 
-pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Option<String>) -> Result<String, String> {
+pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Option<String>, video_id: Option<String>) -> Result<String, String> {
     let db_path = get_db_path(&app);
     
     let api_key = db::get_setting(&db_path, "venice_api_key")
@@ -152,11 +152,24 @@ pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Op
         }
     }
     
-    let prompt_template = prompt_template.unwrap_or_else(|| {
+    let mut prompt_template = prompt_template.unwrap_or_else(|| {
         db::get_setting(&db_path, "venice_prompt")
             .unwrap_or(None)
             .unwrap_or_else(|| "Create a synopsis of this video transcript with pretty format.".to_string())
     });
+
+    if let Some(vid) = &video_id {
+        if let Ok(Some(video)) = db::get_video_full(&db_path, vid) {
+            prompt_template = prompt_template.replace("${title}", &video.1);
+            prompt_template = prompt_template.replace("${author}", &video.2);
+            prompt_template = prompt_template.replace("${length_seconds}", &video.3.to_string());
+            prompt_template = prompt_template.replace("${view_count}", &video.5.to_string());
+            prompt_template = prompt_template.replace("${handle}", &video.7);
+        }
+    }
+    if let Some(h) = &handle {
+        prompt_template = prompt_template.replace("${handle}", h);
+    }
 
     let prompt = if prompt_template.contains("{}") {
         prompt_template.replace("{}", &transcript)
@@ -172,22 +185,28 @@ pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Op
 pub struct VeniceImageRequest {
     pub model: String,
     pub prompt: String,
-    pub width: u32,
-    pub height: u32,
-    pub steps: u32,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub steps: Option<u32>,
     pub seed: Option<i64>,
-    pub format: String,
-    pub safe_mode: bool,
-    pub hide_watermark: bool,
-    pub embed_exif_metadata: bool,
+    pub format: Option<String>,
+    pub safe_mode: Option<bool>,
+    pub hide_watermark: Option<bool>,
+    pub resolution: Option<String>,
+    pub return_binary: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct VeniceImageResponse {
-    pub id: String,
-    pub images: Vec<String>,
-    pub request: serde_json::Value,
-    pub timing: serde_json::Value,
+    pub images: Option<Vec<String>>,
+    pub data: Option<Vec<VeniceImageData>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VeniceImageData {
+    #[serde(rename = "b64_json")]
+    pub b64_json: Option<String>,
+    pub url: Option<String>,
 }
 
 pub async fn generate_image(app: AppHandle, prompt: String) -> Result<String, String> {
@@ -199,20 +218,21 @@ pub async fn generate_image(app: AppHandle, prompt: String) -> Result<String, St
 
     let request_body = VeniceImageRequest {
         model: "nano-banana-pro".to_string(),
-        prompt: prompt.clone(),
-        width: 1024,
-        height: 1024,
-        steps: 25,
-        seed: None,
-        format: "webp".to_string(),
-        safe_mode: true,
-        hide_watermark: false,
-        embed_exif_metadata: false,
+        prompt,
+        width: Some(1024),
+        height: Some(1024),
+        steps: Some(25),
+        seed: Some(0),
+        format: Some("png".to_string()),
+        safe_mode: Some(false),
+        hide_watermark: Some(true),
+        resolution: Some("1K".to_string()),
+        return_binary: Some(false),
     };
 
     let client = reqwest::Client::new();
     let response = client
-        .post("https://api.venice.ai/api/v1/image/generation")
+        .post("https://api.venice.ai/api/v1/image/generate")
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&request_body)
@@ -223,8 +243,6 @@ pub async fn generate_image(app: AppHandle, prompt: String) -> Result<String, St
     let status = response.status();
     let error_text = response.text().await.unwrap_or_default();
 
-    eprintln!("Raw response (first 500 chars): {}", &error_text[..error_text.len().min(500)]);
-
     if !status.is_success() {
         return Err(format!("Venice image API error: {} - {}", status, error_text));
     }
@@ -232,12 +250,24 @@ pub async fn generate_image(app: AppHandle, prompt: String) -> Result<String, St
     let result: VeniceImageResponse = serde_json::from_str(&error_text)
         .map_err(|e| format!("Failed to parse Venice image response: {}. Response was: {}", e, error_text))?;
 
-    eprintln!("Venice image response: {:?}", result);
+    // Try new format first (images array)
+    if let Some(images) = result.images {
+        if let Some(base64_image) = images.into_iter().next() {
+            return Ok(format!("data:image/png;base64,{}", base64_image));
+        }
+    }
 
-    let base64_image = result.images
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No image generated".to_string())?;
+    // Try OpenAI-compatible format (data array with b64_json)
+    if let Some(data) = result.data {
+        if let Some(first) = data.into_iter().next() {
+            if let Some(b64) = first.b64_json {
+                return Ok(format!("data:image/png;base64,{}", b64));
+            }
+            if let Some(url) = first.url {
+                return Ok(url);
+            }
+        }
+    }
 
-    Ok(format!("data:image/webp;base64,{}", base64_image))
+    Err("No image generated in response".to_string())
 }

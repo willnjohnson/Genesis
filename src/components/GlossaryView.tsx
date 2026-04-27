@@ -1,11 +1,14 @@
 import { useEffect, useState, useMemo } from 'react';
 import { getGlossaryTerms, addGlossaryTerm, deleteGlossaryTerm, type GlossaryTerm } from '../api';
-import { Plus, X, Pencil } from 'lucide-react';
+import { Plus, X, Pencil, Eye, EyeOff } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { normalizeText } from '../lib/utils';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { handleMarkdownKeyDown } from './Sidebar';
 
-export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'title' | 'transcript' | 'tag') => void, allowModification?: boolean, onChange?: () => void }) {
+export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'title' | 'transcript' | 'tag' | 'summary') => void, allowModification?: boolean, onChange?: () => void }) {
     const [terms, setTerms] = useState<GlossaryTerm[]>([]);
     const [loading, setLoading] = useState(true);
     const [showAddModal, setShowAddModal] = useState(false);
@@ -14,6 +17,13 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
     const [selectedTerm, setSelectedTerm] = useState<GlossaryTerm | null>(null);
     const [termToDelete, setTermToDelete] = useState<GlossaryTerm | null>(null);
     const [termToEdit, setTermToEdit] = useState<{ originalTerm: string, term: string, definition: string } | null>(null);
+    const [isPreviewEdit, setIsPreviewEdit] = useState(false);
+
+    useEffect(() => {
+      if (termToEdit) {
+        setIsPreviewEdit(false);
+      }
+    }, [termToEdit]);
 
     useEffect(() => {
         loadTerms();
@@ -100,7 +110,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                 {allowModification && (
                     <button
                         onClick={() => setShowAddModal(true)}
-                        className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-colors text-sm font-semibold cursor-pointer"
+                        className="flex items-center gap-1.5 px-2 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-md transition-colors text-[11px] font-semibold cursor-pointer"
                     >
                         <Plus className="w-4 h-4" /> Add Term
                     </button>
@@ -205,6 +215,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                                     required
                                     value={newDefinition}
                                     onChange={e => setNewDefinition(e.target.value)}
+                                    onKeyDown={(e) => handleMarkdownKeyDown(e, newDefinition, setNewDefinition)}
                                     rows={8}
                                     className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600 transition-all resize-none placeholder-gray-600"
                                     placeholder="Enter definition (Markdown supported)..."
@@ -271,7 +282,8 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                                 <textarea
                                     required
                                     value={termToEdit.definition}
-                                    onChange={e => setTermToEdit({ ...termToEdit, definition: e.target.value })}
+                                    onChange={e => setTermToEdit(prev => ({ ...prev, definition: e.target.value }))}
+                                    onKeyDown={(e) => handleMarkdownKeyDown(e, termToEdit.definition, (val) => setTermToEdit(prev => ({ ...prev, definition: val })))}
                                     rows={8}
                                     className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all resize-none placeholder-gray-600"
                                 />

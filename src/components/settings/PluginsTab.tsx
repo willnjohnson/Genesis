@@ -1,7 +1,7 @@
-import { Cpu, Check, Save } from "lucide-react";
-import { useState } from "react";
+import { Cpu, Check, Save, Terminal, Lightbulb } from "lucide-react";
+import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect } from "react";
 import {
     setSetting,
     checkOllama, checkModelPulled, pullModel, deleteModel, installOllama,
@@ -31,7 +31,7 @@ function PromptEditor({
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
                 placeholder="Create a synopsis of this video transcript with pretty format."
-                className="w-full h-24 bg-[#1a1a1a] border border-[#303030] text-sm text-white rounded-lg px-3 py-2.5 outline-none hover:bg-[#202020] transition-colors resize-none font-mono text-[11px]"
+                className="w-full h-80 bg-[#1a1a1a] border border-[#303030] text-sm text-white rounded-lg px-3 py-2.5 outline-none hover:bg-[#202020] transition-colors resize-y font-mono text-[11px]"
             />
             <div className="flex items-center justify-between mt-2">
                 {dirty && (
@@ -53,6 +53,67 @@ function DefaultBadge() {
         <div className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500/10 border border-green-500/30 text-green-400 rounded-md text-[10px] font-bold">
             <Check className="w-3 h-3" />
             Default
+        </div>
+    );
+}
+
+function TooltipLightbulb() {
+    const [isHovered, setIsHovered] = useState(false);
+    const [rect, setRect] = useState<DOMRect | null>(null);
+
+    return (
+        <div 
+            className="relative flex items-center"
+            onMouseEnter={(e) => {
+                setRect(e.currentTarget.getBoundingClientRect());
+                setIsHovered(true);
+            }}
+            onMouseLeave={() => setIsHovered(false)}
+        >
+            <Lightbulb className="w-3.5 h-3.5 text-[#666666] hover:text-orange-400 transition-colors cursor-help" />
+            {isHovered && rect && createPortal(
+                <div 
+                    className="fixed z-[999999] w-80 bg-[#1a1a1a] shadow-2xl p-4 rounded-xl border border-[#333] pointer-events-none animate-in fade-in slide-in-from-bottom-2 duration-200"
+                    style={{ 
+                        top: rect.top - 12, 
+                        left: rect.left, 
+                        transform: 'translateY(-100%)'
+                    }}
+                >
+                    <h4 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 border-b border-[#333] pb-2 flex items-center gap-2">
+                        <Terminal className="w-3.5 h-3.5" />
+                        Supported Variables
+                    </h4>
+                    <div className="space-y-4">
+                        <div className="grid grid-cols-1 gap-1.5 pt-1 text-[11px]">
+                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                <span>{"${title}"}:</span>
+                                <span className="text-gray-500 group-hover/code:text-gray-300">Video title</span>
+                            </code>
+                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                <span>{"${author}"}:</span>
+                                <span className="text-gray-500 group-hover/code:text-gray-300">Channel name</span>
+                            </code>
+                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                <span>{"${handle}"}:</span>
+                                <span className="text-gray-500 group-hover/code:text-gray-300">Channel handle</span>
+                            </code>
+                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                <span>{"${length_seconds}"}:</span>
+                                <span className="text-gray-500 group-hover/code:text-gray-300">Video length</span>
+                            </code>
+                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                <span>{"${view_count}"}:</span>
+                                <span className="text-gray-500 group-hover/code:text-gray-300">View count</span>
+                            </code>
+                        </div>
+                        <p className="text-[10px] text-gray-400 leading-relaxed italic">
+                            These variables substitute dynamically when generating a summary from the library.
+                        </p>
+                    </div>
+                </div>,
+                document.body
+            )}
         </div>
     );
 }
@@ -328,12 +389,22 @@ interface Props {
     plugins: Plugin[];
     onTogglePlugin: (id: string, newState: boolean) => void;
     loading: boolean;
+    showSummarizeOllama?: boolean;
+    showSummarizeVenice?: boolean;
 }
 
-export function PluginsTab({ plugins, onTogglePlugin, loading }: Props) {
+export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOllama = true, showSummarizeVenice = true }: Props) {
     const [summarizeTab, setSummarizeTab] = useState<'local' | 'cloud'>('local');
     const [summarizeProvider, setSummarizeProvider] = useState<string>('local');
     const [showCustomPrompt, setShowCustomPrompt] = useState(true);
+
+    useEffect(() => {
+        if (summarizeTab === 'local' && !showSummarizeOllama) {
+            if (showSummarizeVenice) setSummarizeTab('cloud');
+        } else if (summarizeTab === 'cloud' && !showSummarizeVenice) {
+            if (showSummarizeOllama) setSummarizeTab('local');
+        }
+    }, [summarizeTab, showSummarizeOllama, showSummarizeVenice]);
 
     useEffect(() => {
         import("../../api").then(({ getSetting }) => {
@@ -350,7 +421,7 @@ export function PluginsTab({ plugins, onTogglePlugin, loading }: Props) {
     return (
         <div className="space-y-6 animate-in slide-in-from-right-4 duration-300">
             <div>
-                <h3 className="text-base font-bold mb-1">External Plugins</h3>
+                <h3 className="text-base font-bold mb-1">Plugins</h3>
                 <p className="text-xs text-[#aaaaaa] mb-6">
                     Extend the app with modular functionalities powered by external services.
                 </p>
@@ -381,7 +452,10 @@ export function PluginsTab({ plugins, onTogglePlugin, loading }: Props) {
                                 <div className="mt-6 pt-6 border-t border-[#303030]">
                                     {/* Show Custom Prompt Toggle */}
                                     <div className="flex items-center justify-between mb-4">
-                                        <span className="text-xs font-bold text-white">Show Custom Prompt in Sidebar</span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-xs font-bold text-white">Show Custom Prompt in Sidebar</span>
+                                            <TooltipLightbulb />
+                                        </div>
                                         <button
                                             onClick={async () => {
                                                 const newValue = !showCustomPrompt;
@@ -396,16 +470,24 @@ export function PluginsTab({ plugins, onTogglePlugin, loading }: Props) {
 
                                     {/* Sub-tabs */}
                                     <div className="flex gap-4 mb-4 border-b border-[#303030]">
-                                        {(['local', 'cloud'] as const).map(t => (
+                                        {showSummarizeOllama && (
                                             <button
-                                                key={t}
-                                                onClick={() => setSummarizeTab(t)}
-                                                className={`pb-2 text-xs font-bold transition-all cursor-pointer relative ${summarizeTab === t ? 'text-white' : 'text-[#555] hover:text-[#aaaaaa]'}`}
+                                                onClick={() => setSummarizeTab('local')}
+                                                className={`pb-2 text-xs font-bold transition-all cursor-pointer relative ${summarizeTab === 'local' ? 'text-white' : 'text-[#555] hover:text-[#aaaaaa]'}`}
                                             >
-                                                {t === 'local' ? 'Local (Ollama)' : 'Cloud (Venice)'}
-                                                {summarizeTab === t && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
+                                                Local (Ollama)
+                                                {summarizeTab === 'local' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                             </button>
-                                        ))}
+                                        )}
+                                        {showSummarizeVenice && (
+                                            <button
+                                                onClick={() => setSummarizeTab('cloud')}
+                                                className={`pb-2 text-xs font-bold transition-all cursor-pointer relative ${summarizeTab === 'cloud' ? 'text-white' : 'text-[#555] hover:text-[#aaaaaa]'}`}
+                                            >
+                                                Cloud (Venice)
+                                                {summarizeTab === 'cloud' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
+                                            </button>
+                                        )}
                                     </div>
 
                                     <div className={summarizeTab === 'local' ? 'block' : 'hidden'}>

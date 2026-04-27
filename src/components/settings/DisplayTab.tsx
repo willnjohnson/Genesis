@@ -1,4 +1,4 @@
-import { Sun, Moon, LayoutGrid, List } from "lucide-react";
+import { Sun, Moon, LayoutGrid, List, AlignJustify, AlignLeft } from "lucide-react";
 import { BRAND } from "../../branding";
 import { type DisplaySettings } from "../../api";
 
@@ -10,6 +10,7 @@ const RESOLUTIONS = [
 interface Props {
     settings: DisplaySettings;
     currentVideoListMode: 'grid' | 'compact';
+    currentNavigationOrientation: 'horizontal' | 'vertical';
     onUpdate: (updates: Partial<DisplaySettings>) => void;
 }
 
@@ -25,7 +26,7 @@ function Toggle({ on, onChange }: { on: boolean; onChange: () => void }) {
     );
 }
 
-export function DisplayTab({ settings, currentVideoListMode, onUpdate }: Props) {
+export function DisplayTab({ settings, currentVideoListMode, currentNavigationOrientation, onUpdate }: Props) {
     const isDark = settings.theme === 'dark';
 
     const toggleTheme = () => {
@@ -105,6 +106,30 @@ export function DisplayTab({ settings, currentVideoListMode, onUpdate }: Props) 
                             >
                                 <List className="w-3.5 h-3.5" />
                                 Compact
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Navigation Orientation */}
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <span className="text-sm font-semibold text-white block">Navigation Orientation</span>
+                            <span className="text-xs text-[#aaaaaa]">Choose horizontal/vertical layout</span>
+                        </div>
+                        <div className="flex gap-2 bg-[#121212] border border-[#303030] rounded-md p-0.5">
+                            <button
+                                onClick={() => onUpdate({ navigationOrientation: 'horizontal' })}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentNavigationOrientation === 'horizontal' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
+                            >
+                                <AlignJustify className="w-3.5 h-3.5" />
+                                Horizontal
+                            </button>
+                            <button
+                                onClick={() => onUpdate({ navigationOrientation: 'vertical' })}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentNavigationOrientation === 'vertical' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
+                            >
+                                <AlignLeft className="w-3.5 h-3.5" />
+                                Vertical
                             </button>
                         </div>
                     </div>

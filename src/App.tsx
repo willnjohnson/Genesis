@@ -2,8 +2,10 @@ import { useEffect, useState, useCallback, useMemo } from "react";
 import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
     getApiKey, getSetting, setDbPath, openExternalUrl,
-    type Video, type GlossaryTerm, saveTags, getGlossaryTerms
+    type Video, type GlossaryTerm, type BiographyEntry, saveTags, getGlossaryTerms, getBiography,
+    fetchImageAsDataUri, saveImage
 } from "./api";
+import { save } from '@tauri-apps/plugin-dialog';
 import { normalizeText } from "./lib/utils";
 import { SearchBar, type Facet } from "./components/SearchBar";
 import { VideoList } from "./components/VideoList";
@@ -12,14 +14,16 @@ import { BRAND } from "./branding";
 import { Notification, type NotificationType } from "./components/Notification";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SettingsModal } from "./components/SettingsModal";
-import { Settings, ChevronUp, LayoutGrid, List, ChevronDown } from "lucide-react";
+import { Settings, ChevronUp, LayoutGrid, List, ChevronDown, Sparkles, Search, BookMarked, BookA, UserSearch } from "lucide-react";
 import { GlossaryView } from "./components/GlossaryView";
+import { BiographyView } from "./components/BiographyView";
+import { BiographyModal } from "./components/BiographyView";
 import { useSearch } from "./hooks/useSearch";
 import { useLibrary } from "./hooks/useLibrary";
 
-type ViewMode = 'search' | 'library' | 'glossary';
+type ViewMode = 'search' | 'library' | 'glossary' | 'biography';
 
-const VALID_FACETS = ['handle', 'playlist', 'video', 'title_search', 'transcript_search', 'term_search', 'definition_search', 'tag_search'];
+const VALID_FACETS = ['handle', 'playlist', 'video', 'title_search', 'transcript_search', 'summary_search', 'term_search', 'definition_search', 'tag_search', 'person_search', 'bio_search'];
 const DEFAULT_FILTER_FACET = [{ type: 'title_search', value: '' }] as Facet[];
 const DEFAULT_GLOSSARY_FACET = [{ type: 'term_search', value: '' }] as Facet[];
 
@@ -27,7 +31,9 @@ function getLibraryFacets(q: string, viewMode: ViewMode): Facet[] {
     if (!q) return [];
     const whitelist = viewMode === 'glossary'
         ? ['term_search', 'definition_search']
-        : ['title_search', 'transcript_search', 'tag_search', 'video', 'handle', 'playlist'];
+        : viewMode === 'biography'
+            ? ['person_search', 'bio_search']
+            : ['title_search', 'transcript_search', 'summary_search', 'tag_search', 'video', 'handle', 'playlist'];
 
     const FACET_RE = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
     const facets: Facet[] = [];
@@ -42,7 +48,9 @@ function getLibraryQuery(q: string, viewMode: ViewMode): string {
     if (!q) return '';
     const whitelist = viewMode === 'glossary'
         ? ['term_search', 'definition_search']
-        : ['title_search', 'transcript_search', 'tag_search', 'video', 'handle', 'playlist'];
+        : viewMode === 'biography'
+            ? ['person_search', 'bio_search']
+            : ['title_search', 'transcript_search', 'summary_search', 'tag_search', 'video', 'handle', 'playlist'];
 
     // Check if q starts with a facet prefix and has exactly one colon
     const colonIndex = q.indexOf(':');
@@ -62,11 +70,16 @@ function getLibraryQuery(q: string, viewMode: ViewMode): string {
     return q.replace(FACET_RE, '');
 }
 
+function hasLibraryTextSearch(q: string): boolean {
+    return q.includes('transcript_search:') || q.includes('summary_search:');
+}
+
 function App() {
     // ── App-level state ─────────────────────────────────────────────────────
     const [viewMode, setViewMode] = useState<ViewMode>('search');
     const [showGlossaryMenu, setShowGlossaryMenu] = useState(false);
     const [glossarySearchQuery, setGlossarySearchQuery] = useState("term_search:");
+    const [biographySearchQuery, setBiographySearchQuery] = useState("person_search:");
     const [initialLibrarySearch, setInitialLibrarySearch] = useState("");
     const [initialLibraryFacets, setInitialLibraryFacets] = useState<Facet[]>(DEFAULT_FILTER_FACET);
     const [notification, setNotification] = useState<{ message: string; type: NotificationType } | null>(null);
@@ -74,10 +87,22 @@ function App() {
     const [showSettings, setShowSettings] = useState(false);
     const [hasApiKey, setHasApiKey] = useState(false);
     const [videoListMode, setVideoListMode] = useState<'grid' | 'compact'>('grid');
+    const [navigationOrientation, setNavigationOrientation] = useState<'horizontal' | 'vertical'>('horizontal');
     const [pluginSummarizeEnabled, setPluginSummarizeEnabled] = useState(false);
+    const [pluginPhotosynthesisEnabled, setPluginPhotosynthesisEnabled] = useState(false);
     const [showSearch, setShowSearch] = useState(true);
     const [allowDeletionLibrary, setAllowDeletionLibrary] = useState(true);
     const [allowModificationGlossary, setAllowModificationGlossary] = useState(true);
+
+    // New granular visibility flags
+    const [showSummarizeButton, setShowSummarizeButton] = useState(true);
+    const [showSummarizeOllama, setShowSummarizeOllama] = useState(true);
+    const [showSummarizeVenice, setShowSummarizeVenice] = useState(true);
+    const [showSynthesizeVenice, setShowSynthesizeVenice] = useState(true);
+    const [showSynthesizePixabay, setShowSynthesizePixabay] = useState(true);
+    const [showSynthesizeUpload, setShowSynthesizeUpload] = useState(true);
+    const [showBiography, setShowBiography] = useState(true);
+    const [allowEditBio, setAllowEditBio] = useState(true);
 
     // ── Sidebar / transcript state ───────────────────────────────────────────
     const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
@@ -87,12 +112,17 @@ function App() {
     const [cachedSummaries, setCachedSummaries] = useState<Record<string, string>>({});
     const [videoTags, setVideoTags] = useState<string[]>([]);
     const [glossaryTerms, setGlossaryTerms] = useState<string[]>([]);
+    const [sidebarInitialTab, setSidebarInitialTab] = useState<'transcript' | 'summary' | undefined>(undefined);
+    const [selectedBiography, setSelectedBiography] = useState<BiographyEntry | null>(null);
 
     // ── Hooks ────────────────────────────────────────────────────────────────
     const search = useSearch(hasApiKey);
 
+    const effectivePluginSummarizeEnabled = pluginSummarizeEnabled && (showSummarizeOllama || showSummarizeVenice);
+    const effectivePluginPhotosynthesisEnabled = pluginPhotosynthesisEnabled && (showSynthesizeVenice || showSynthesizePixabay || showSynthesizeUpload);
+
     const library = useLibrary(
-        pluginSummarizeEnabled,
+        effectivePluginSummarizeEnabled,
         search.filteredVideos,
         setNotification,
     );
@@ -135,6 +165,8 @@ function App() {
                         )) return false;
                     } else if (f.type === 'transcript_search') {
                         if (!normalizeText(v.transcript || "").includes(f.value)) return false;
+                    } else if (f.type === 'summary_search') {
+                        if (!normalizeText(v.summary || "").includes(f.value)) return false;
                     } else if (f.type === 'tag_search') {
                         const tagValue = (f.value || "").trim();
                         if (!tagValue) continue;
@@ -203,29 +235,98 @@ function App() {
             }
             getApiKey().then(k => setHasApiKey(!!k));
             getSetting('plugin_summarize_enabled').then(v => setPluginSummarizeEnabled(v === 'true'));
+            getSetting('plugin_photosynthesis_enabled').then(v => setPluginPhotosynthesisEnabled(v === 'true'));
 
             // Load DB flags
-            const sSearch = await getSetting('showSearch');
-            const sDelete = await getSetting('allowDeletionLibrary');
-            const sGlossary = await getSetting('allowModificationGlossary');
+            const sSearch = await getSetting('showSearch').catch(() => 'true');
+            const sDelete = await getSetting('allowDeletionLibrary').catch(() => 'true');
+            const sGlossary = await getSetting('allowModificationGlossary').catch(() => 'true');
+            const sSumBtn = await getSetting('showSummarizeButton').catch(() => 'true');
+            const sSumOllama = await getSetting('showSummarizeOllama').catch(() => 'true');
+            const sSumVenice = await getSetting('showSummarizeVenice').catch(() => 'true');
+            const sSynVenice = await getSetting('showSynthesizeVenice').catch(() => 'true');
+            const sSynPixabay = await getSetting('showSynthesizePixabay').catch(() => 'true');
+            const sSynUpload = await getSetting('showSynthesizeUpload').catch(() => 'true');
+            const sBiography = await getSetting('showBiography').catch(() => 'true');
+            const sAllowEditBio = await getSetting('allowEditBio').catch(() => 'true');
 
             const showSearchVal = sSearch !== 'false';
             setShowSearch(showSearchVal);
             setAllowDeletionLibrary(sDelete !== 'false');
             setAllowModificationGlossary(sGlossary !== 'false');
+            setShowSummarizeButton(sSumBtn !== 'false');
+            setShowSummarizeOllama(sSumOllama !== 'false');
+            setShowSummarizeVenice(sSumVenice !== 'false');
+            setShowSynthesizeVenice(sSynVenice !== 'false');
+            setShowSynthesizePixabay(sSynPixabay !== 'false');
+            setShowSynthesizeUpload(sSynUpload !== 'false');
+            setShowBiography(sBiography !== 'false');
+            setAllowEditBio(sAllowEditBio !== 'false');
 
             if (!showSearchVal) {
                 setViewMode('library');
             }
         };
-        initialize();
+        initialize().catch(error => {
+            console.error('Failed to initialize app:', error);
+        });
     }, []);
+
+    const handleSaveImageAs = useCallback(async (url: string) => {
+        try {
+            let dataUri = url;
+            if (!url.startsWith('data:')) {
+                dataUri = await fetchImageAsDataUri(url);
+            }
+            if (!dataUri) return;
+
+            // Try to suggest a filename based on the URL or default
+            let suggestedName = 'image.webp';
+            try {
+                const urlParts = url.split('/');
+                const lastPart = urlParts[urlParts.length - 1].split('?')[0];
+                if (lastPart.match(/\.(png|jpg|jpeg|webp|gif)$/i)) {
+                    suggestedName = lastPart;
+                }
+            } catch { /* ignore */ }
+
+            const filePath = await save({
+                filters: [
+                    { name: 'Images', extensions: ['webp', 'png', 'jpg', 'jpeg', 'gif'] },
+                    { name: 'All Files', extensions: ['*'] }
+                ],
+                defaultPath: suggestedName
+            });
+            
+            if (filePath) {
+                const parts = dataUri.split(',');
+                const base64 = parts.length > 1 ? parts[1] : parts[0];
+                await saveImage(filePath, base64);
+            }
+        } catch (e: any) {
+            console.error("Save failed:", e);
+        }
+    }, []);
+
+    useEffect(() => {
+        const handleGlobalContextMenu = (e: MouseEvent) => {
+            const target = e.target as HTMLElement;
+            if (target instanceof HTMLImageElement) {
+                e.preventDefault();
+                e.stopPropagation();
+                handleSaveImageAs(target.src);
+            }
+        };
+        document.addEventListener('contextmenu', handleGlobalContextMenu);
+        return () => document.removeEventListener('contextmenu', handleGlobalContextMenu);
+    }, [handleSaveImageAs]);
 
     // ── Theme / display settings ─────────────────────────────────────────────
     useEffect(() => {
         getDisplaySettings().then(settings => {
             document.documentElement.classList.toggle('dark', settings.theme === 'dark');
             setVideoListMode((settings.videoListMode as 'grid' | 'compact') || 'grid');
+            setNavigationOrientation((settings.navigationOrientation as 'horizontal' | 'vertical') || 'horizontal');
         }).catch(() => document.documentElement.classList.add('dark'));
     }, []);
 
@@ -243,6 +344,12 @@ function App() {
         }
     }, [viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    useEffect(() => {
+        if (viewMode === 'library' && hasLibraryTextSearch(library.librarySearch)) {
+            library.ensureFullTextLoaded();
+        }
+    }, [viewMode, library.librarySearch]); // eslint-disable-line react-hooks/exhaustive-deps
+
     // ── Refresh summarized count when entering Library (if plugin on) ─────────
     useEffect(() => {
         if (viewMode === 'library' && pluginSummarizeEnabled) {
@@ -251,7 +358,8 @@ function App() {
     }, [viewMode, pluginSummarizeEnabled]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Handlers ─────────────────────────────────────────────────────────────
-    const handleSelectVideo = useCallback(async (video: Video) => {
+    const handleSelectVideo = useCallback(async (video: Video, tab?: 'transcript' | 'summary') => {
+        setSidebarInitialTab(tab);
         setSelectedVideo(video);
         setVideoTags(video.tags ? video.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : []);
         setSidebarOpen(true);
@@ -293,7 +401,7 @@ function App() {
         } catch { /* ignore */ }
     };
 
-    const handleSearchInLibrary = (term: string, mode: 'title' | 'transcript' | 'tag') => {
+    const handleSearchInLibrary = (term: string, mode: 'title' | 'transcript' | 'tag' | 'summary') => {
         // First switch to library to ensure fresh mount
         setViewMode('library');
         // Close sidebar if open
@@ -301,13 +409,23 @@ function App() {
         // Then set query - will be picked up on next render
         const query = mode === 'title' ? `title_search:${term}`
             : mode === 'transcript' ? `transcript_search:${term}`
-                : `tag_search:${term}`;
+                : mode === 'summary' ? `summary_search:${term}`
+                    : `tag_search:${term}`;
         library.setLibrarySearch(query);
     };
 
     const handleTagClick = (term: GlossaryTerm) => {
         // Open term definition in sidebar - same as clicking in Glossary
     };
+
+    const handleViewBiography = useCallback(async (channelHandle: string) => {
+        const bio = await getBiography(channelHandle);
+        if (bio) {
+            setSelectedBiography(bio);
+            return;
+        }
+        setNotification({ message: `No biography found for ${channelHandle}`, type: "error" });
+    }, []);
 
     const handleAddTag = async (term: string) => {
         if (!videoTags.includes(term)) {
@@ -343,102 +461,201 @@ function App() {
         }
     };
 
+
     return (
         <div className="min-h-screen bg-[#0f0f0f] text-white font-sans selection:bg-red-500/30 selection:text-white pb-20 select-none">
-            <div className="container mx-auto px-4 pt-4">
-                <header className="mb-10 relative z-10 transition-all">
-                    {/* Top bar */}
-                    <div className="flex items-center justify-between mb-12 relative max-w-7xl mx-auto border-b border-[#272727] pb-6">
-                        <div className="flex items-center gap-3">
-                            <img src={BRAND.logo} alt={BRAND.name} className="w-8 h-8" />
-                            <div className="flex flex-col">
-                                <h1 className="text-2xl font-bold tracking-tighter text-white">
-                                    <span className="text-red-500">{BRAND.name.substring(0, 3)}</span>{BRAND.name.substring(3)}
-                                </h1>
-                                <span className="text-xs text-gray-500 -mt-0.5">{BRAND.tagline}</span>
-                            </div>
-                        </div>
-
-                        <div className="flex gap-3">
-                            {(['search', 'library'] as ViewMode[]).map(mode => {
-                                if (mode === 'search' && !showSearch) return null;
-                                return (
-                                    <button
-                                        key={mode}
-                                        onClick={() => {
-                                            if (mode === 'library') {
-                                                setViewMode('library');
-                                                library.setLibrarySearch("");
-                                            }
-                                            setViewMode(mode);
-                                        }}
-                                        className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all cursor-pointer capitalize ${viewMode === mode ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
-                                    >
-                                        {mode}
-                                    </button>
-                                );
-                            })}
-                            <div className="relative">
-                                <button
-                                    onClick={() => setShowGlossaryMenu(!showGlossaryMenu)}
-                                    onBlur={() => setTimeout(() => setShowGlossaryMenu(false), 200)}
-                                    className={`p-2 rounded-lg transition-all cursor-pointer flex items-center justify-center ${viewMode === 'glossary' || showGlossaryMenu ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
-                                    title="More Options"
-                                >
-                                    <ChevronDown className="w-5 h-5" />
-                                </button>
-                                {showGlossaryMenu && (
-                                    <div className="absolute top-full right-0 mt-2 w-32 bg-[#272727] border border-[#3f3f3f] rounded-lg shadow-xl z-50 overflow-hidden">
-                                        <button
-                                            onClick={() => { setGlossarySearchQuery(""); setViewMode('glossary'); setShowGlossaryMenu(false); }}
-                                            className={`w-full text-left px-4 py-2 text-sm hover:bg-[#3f3f3f] cursor-pointer ${viewMode === 'glossary' ? 'text-white font-bold' : 'text-gray-300'}`}
-                                        >
-                                            Glossary
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-                            <button
-                                onClick={toggleVideoListMode}
-                                className="p-2 ml-2 text-gray-400 hover:text-white transition-all cursor-pointer bg-[#272727] rounded-lg"
-                                title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}
-                            >
-                                {videoListMode === 'grid' ? <List className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
-                            </button>
-                            <button
-                                onClick={() => setShowSettings(true)}
-                                className="p-2 ml-1 text-gray-400 hover:text-white transition-all cursor-pointer"
-                                title="Settings"
-                            >
-                                <Settings className="w-5 h-5" />
-                            </button>
-                        </div>
+            {/* Navigation - conditional rendering */}
+            {navigationOrientation === 'vertical' && (
+                <div className="fixed left-0 top-0 h-full w-16 bg-[#0f0f0f] border-r border-[#272727] z-40 flex flex-col items-center py-6">
+                    {/* Logo */}
+                    <div className="mb-8">
+                        <img
+                            src={BRAND.logo}
+                            alt={BRAND.name}
+                            className="w-8 h-8 pointer-events-auto"
+                            onContextMenu={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                handleSaveImageAs(BRAND.logo);
+                            }}
+                        />
                     </div>
+
+                    {/* Navigation Icons */}
+                    <div className="flex-1 flex flex-col items-center gap-4">
+                        {showSearch && (
+                            <button
+                                onClick={() => setViewMode('search')}
+                                className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'search' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
+                                title="Search"
+                            >
+                                <Search className="w-5 h-5" />
+                            </button>
+                        )}
+                        <button
+                            onClick={() => {
+                                setViewMode('library');
+                                library.setLibrarySearch("");
+                            }}
+                            className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'library' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
+                            title="Library"
+                        >
+                            <BookMarked className="w-5 h-5" />
+                        </button>
+                            <button
+                                onClick={() => { setGlossarySearchQuery(""); setViewMode('glossary'); }}
+                                className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'glossary' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
+                                title="Glossary"
+                            >
+                                <BookA className="w-5 h-5" />
+                            </button>
+                        {showBiography && (
+                            <button
+                                onClick={() => { setBiographySearchQuery(""); setViewMode('biography'); }}
+                                className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'biography' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
+                                title="Biography"
+                            >
+                                <UserSearch className="w-5 h-5" />
+                            </button>
+                        )}
+                    </div>
+
+                    {/* Bottom Icons */}
+                    <div className="flex flex-col items-center gap-4">
+                        <button
+                            onClick={toggleVideoListMode}
+                            className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
+                            title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}
+                        >
+                            {videoListMode === 'grid' ? <List className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
+                        </button>
+                        <button
+                            onClick={() => setShowSettings(true)}
+                            className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
+                            title="Settings"
+                        >
+                            <Settings className="w-5 h-5" />
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            <div className={`${navigationOrientation === 'vertical' ? 'ml-16' : ''} container mx-auto px-4 pt-4`}>
+                <header className="mb-10 relative z-40 transition-all">
+                    {/* Top bar - only show in horizontal mode */}
+                    {navigationOrientation === 'horizontal' && (
+                        <div className="flex items-center justify-between mb-12 relative max-w-7xl mx-auto border-b border-[#272727] pb-6">
+                            <div className="flex items-center gap-3">
+                                <img
+                                    src={BRAND.logo}
+                                    alt={BRAND.name}
+                                    className="w-8 h-8 pointer-events-auto"
+                                    onContextMenu={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        handleSaveImageAs(BRAND.logo);
+                                    }}
+                                />
+                                <div className="flex flex-col">
+                                    <h1 className="text-2xl font-bold tracking-tighter text-white">
+                                        <span className="text-red-500">{BRAND.name.substring(0, 3)}</span>{BRAND.name.substring(3)}
+                                    </h1>
+                                    <span className="text-xs text-gray-500 -mt-0.5">{BRAND.tagline}</span>
+                                </div>
+                            </div>
+
+                            <div className="flex gap-3">
+                                {(['search', 'library'] as ViewMode[]).map(mode => {
+                                    if (mode === 'search' && !showSearch) return null;
+                                    return (
+                                        <button
+                                            key={mode}
+                                            onClick={() => {
+                                                if (mode === 'library') {
+                                                    setViewMode('library');
+                                                    library.setLibrarySearch("");
+                                                }
+                                                setViewMode(mode);
+                                            }}
+                                            className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all cursor-pointer capitalize ${viewMode === mode ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
+                                        >
+                                            {mode}
+                                        </button>
+                                    );
+                                })}
+                                <div className="relative">
+                                    <button
+                                        onClick={() => setShowGlossaryMenu(!showGlossaryMenu)}
+                                        onBlur={() => setTimeout(() => setShowGlossaryMenu(false), 200)}
+                                        className={`p-2 rounded-lg transition-all cursor-pointer flex items-center justify-center ${viewMode === 'glossary' || viewMode === 'biography' || showGlossaryMenu ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
+                                        title="More Options"
+                                    >
+                                        <ChevronDown className="w-5 h-5" />
+                                    </button>
+                                    {showGlossaryMenu && (
+                                        <div className="absolute top-full right-0 mt-2 w-32 bg-[#272727] border border-[#3f3f3f] rounded-lg shadow-xl z-50 overflow-hidden">
+                                            <button
+                                                onClick={() => { setGlossarySearchQuery(""); setViewMode('glossary'); setShowGlossaryMenu(false); }}
+                                                className={`w-full text-left px-4 py-2 text-sm hover:bg-[#3f3f3f] cursor-pointer ${viewMode === 'glossary' ? 'text-white font-bold' : 'text-gray-300'}`}
+                                            >
+                                                Glossary
+                                            </button>
+                                            {showBiography && (
+                                                <button
+                                                    onClick={() => { setBiographySearchQuery(""); setViewMode('biography'); setShowGlossaryMenu(false); }}
+                                                    className={`w-full text-left px-4 py-2 text-sm hover:bg-[#3f3f3f] cursor-pointer ${viewMode === 'biography' ? 'text-white font-bold' : 'text-gray-300'}`}
+                                                >
+                                                    Biography
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                                <button
+                                    onClick={toggleVideoListMode}
+                                    className="p-2 ml-2 text-gray-400 hover:text-white transition-all cursor-pointer bg-[#272727] rounded-lg"
+                                    title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}
+                                >
+                                    {videoListMode === 'grid' ? <List className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
+                                </button>
+                                <button
+                                    onClick={() => setShowSettings(true)}
+                                    className="p-2 ml-1 text-gray-400 hover:text-white transition-all cursor-pointer"
+                                    title="Settings"
+                                >
+                                    <Settings className="w-5 h-5" />
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
                     <SearchBar
                         key={viewMode}
-                        onSearch={viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : handleSearch)}
+                        onSearch={viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : handleSearch))}
                         onLiveFilter={
-                            viewMode === 'search' 
+                            viewMode === 'search'
                                 ? (search.videos.length > 0 ? search.handleInput : undefined)
-                                : (viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : undefined))
+                                : (viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : undefined)))
                         }
                         loading={search.loading || library.loading}
                         viewMode={viewMode}
                         initialFacets={
                             viewMode === 'glossary'
                                 ? getLibraryFacets(glossarySearchQuery, 'glossary')
-                                : (viewMode === 'library' ? (library.librarySearch ? getLibraryFacets(library.librarySearch, 'library') : []) : search.activeFacets as Facet[])
+                                : viewMode === 'biography'
+                                    ? getLibraryFacets(biographySearchQuery, 'biography')
+                                    : (viewMode === 'library' ? (library.librarySearch ? getLibraryFacets(library.librarySearch, 'library') : []) : search.activeFacets as Facet[])
                         }
                         initialQuery={
                             viewMode === 'glossary'
                                 ? getLibraryQuery(glossarySearchQuery, 'glossary')
+                                : viewMode === 'biography'
+                                    ? getLibraryQuery(biographySearchQuery, 'biography')
                                 : (viewMode === 'library' ? getLibraryQuery(library.librarySearch, 'library') : search.activeText)
                         }
-                        placeholder={viewMode === 'glossary' ? "Look up Glossary Terms" : (viewMode === 'library' ? "Look up Videos and Transcripts" : "Search YouTube handle, playlist URL, or video URL")}
+                         placeholder={viewMode === 'glossary' ? "Look up Glossary Terms" : (viewMode === 'biography' ? "Look up Person" : (viewMode === 'library' ? "Look up Videos and Transcripts" : "Search YouTube handle, playlist URL, or video URL"))}
                     />
                 </header>
-
                 {search.error && (
                     <div className="mt-8 text-center animate-in fade-in duration-300">
                         <div className="text-[#ff4e4e] font-medium bg-[#ff4e4e]/10 px-6 py-3 rounded-lg border border-[#ff4e4e]/20 inline-block mx-auto text-sm">
@@ -448,22 +665,25 @@ function App() {
                 )}
 
                 <div className="mt-8">
-                    {viewMode === 'glossary' ? (
-                        <GlossaryView
-                            searchQuery={glossarySearchQuery}
-                            onSearchInLibrary={handleSearchInLibrary}
-                            allowModification={allowModificationGlossary}
-                            onChange={() => {
-                                getGlossaryTerms().then(terms => {
-                                    setGlossaryTerms(terms.map(t => t[0]));
-                                }).catch(() => { });
-                            }}
-                        />
-                    ) : viewMode === 'search' ? (
+                     {viewMode === 'glossary' ? (
+                         <GlossaryView
+                             searchQuery={glossarySearchQuery}
+                             onSearchInLibrary={handleSearchInLibrary}
+                             allowModification={allowModificationGlossary}
+                             onChange={() => {
+                                 getGlossaryTerms().then(terms => {
+                                     setGlossaryTerms(terms.map(t => t[0]));
+                                 }).catch(() => { });
+                             }}
+                         />
+                     ) : viewMode === 'biography' ? (
+                          <BiographyView searchQuery={biographySearchQuery} onVideoSelect={handleSelectVideo} onViewMore={(handle) => { setViewMode('library'); library.setLibrarySearch(`handle:${handle.replace('@', '')}`); }} allowEditBio={allowEditBio} />
+                     ) : viewMode === 'search' ? (
                         <>
                             <VideoList
                                 videos={displayedVideos}
                                 onSelect={handleSelectVideo}
+                                onSelectWithTab={handleSelectVideo}
                                 onSaveAll={displayedVideos.length > 0 ? library.handleSaveAll : undefined}
                                 saveProgress={library.saveProgress}
                                 compact={videoListMode === 'compact'}
@@ -508,14 +728,16 @@ function App() {
                                 <VideoList
                                     videos={displayedVideos}
                                     onSelect={handleSelectVideo}
+                                    onSelectWithTab={handleSelectVideo}
                                     onDelete={library.handleDeleteVideo}
                                     compact={videoListMode === 'compact'}
-                                    onSummarizeAll={pluginSummarizeEnabled ? library.handleSummarizeAll : undefined}
+                                    onSummarizeAll={effectivePluginSummarizeEnabled ? library.handleSummarizeAll : undefined}
                                     summarizeProgress={library.summarizeProgress}
                                     summarizedCount={library.summarizedCount}
                                     totalCount={library.libraryVideos.length}
                                     isLibrary={true}
                                     allowDeletion={allowDeletionLibrary}
+                                    showSummarizeButton={showSummarizeButton}
                                 />
                             )}
                         </div>
@@ -525,7 +747,10 @@ function App() {
 
             <Sidebar
                 isOpen={sidebarOpen}
-                onClose={() => setSidebarOpen(false)}
+                onClose={() => {
+                    setSidebarOpen(false);
+                    setSidebarInitialTab(undefined);
+                }}
                 transcript={transcript}
                 loading={loadingTranscript}
                 title={selectedVideo?.title || ""}
@@ -535,7 +760,11 @@ function App() {
                 onDelete={() => library.handleDeleteFromSidebar(selectedVideo)}
                 onRefetch={selectedVideo ? () => handleSelectVideo(selectedVideo) : undefined}
                 hasApiKey={hasApiKey}
-                pluginSummarizeEnabled={pluginSummarizeEnabled}
+                pluginSummarizeEnabled={effectivePluginSummarizeEnabled}
+                pluginPhotosynthesisEnabled={effectivePluginPhotosynthesisEnabled}
+                showSynthesizeVenice={showSynthesizeVenice}
+                showSynthesizePixabay={showSynthesizePixabay}
+                showSynthesizeUpload={showSynthesizeUpload}
                 onSummaryGenerated={library.refreshSummarizedCount}
                 cachedSummaries={cachedSummaries}
                 onCacheSummary={(id, s) => setCachedSummaries(prev => ({ ...prev, [id]: s }))}
@@ -543,9 +772,12 @@ function App() {
                 isLibrary={viewMode === 'library'}
                 videoTags={videoTags}
                 onTagClick={handleTagClick}
+                onHandleClick={handleViewBiography}
                 onAddTag={handleAddTag}
                 onRemoveTag={handleRemoveTag}
                 onSearchInLibrary={handleSearchInLibrary}
+                initialTab={sidebarInitialTab}
+                showBiography={showBiography}
             />
 
             <SettingsModal
@@ -554,7 +786,17 @@ function App() {
                 onStatusChange={setHasApiKey}
                 onVideoListModeChange={setVideoListMode}
                 currentVideoListMode={videoListMode}
-                onPluginsChange={() => getSetting('plugin_summarize_enabled').then(v => setPluginSummarizeEnabled(v === 'true'))}
+                onNavigationOrientationChange={setNavigationOrientation}
+                currentNavigationOrientation={navigationOrientation}
+                onPluginsChange={() => {
+                    getSetting('plugin_summarize_enabled').then(v => setPluginSummarizeEnabled(v === 'true'));
+                    getSetting('plugin_photosynthesis_enabled').then(v => setPluginPhotosynthesisEnabled(v === 'true'));
+                }}
+                showSummarizeOllama={showSummarizeOllama}
+                showSummarizeVenice={showSummarizeVenice}
+                showSynthesizeVenice={showSynthesizeVenice}
+                showSynthesizePixabay={showSynthesizePixabay}
+                showSynthesizeUpload={showSynthesizeUpload}
             />
 
             {notification && (
@@ -562,6 +804,20 @@ function App() {
                     message={notification.message}
                     type={notification.type}
                     onClose={() => setNotification(null)}
+                />
+            )}
+
+            {selectedBiography && (
+                <BiographyModal
+                    biography={selectedBiography}
+                    onClose={() => setSelectedBiography(null)}
+                    onVideoSelect={handleSelectVideo}
+                    onViewMore={(handle) => {
+                        setViewMode('library');
+                        library.setLibrarySearch(`handle:${handle}`);
+                        setSelectedBiography(null);
+                    }}
+                    allowEditBio={allowEditBio}
                 />
             )}
 
@@ -580,6 +836,26 @@ function App() {
             >
                 <ChevronUp className="w-6 h-6" style={{ color: '#ffffff' }} />
             </button>
+
+            {viewMode === 'library' && effectivePluginSummarizeEnabled && showSummarizeButton && !sidebarOpen && (
+                <button
+                    onClick={library.handleSummarizeAll}
+                    disabled={!!library.summarizeProgress}
+                    className={`fixed bottom-12 left-20 summarize-btn px-4 py-2.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-500 hover:to-blue-500 rounded-lg text-sm font-bold transition-all shadow-lg hover:shadow-purple-500/25 disabled:opacity-50 flex items-center gap-2 z-40 ${!library.summarizeProgress ? 'cursor-pointer' : 'cursor-default'}`}
+                >
+                    {library.summarizeProgress ? (
+                        <>
+                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            {library.summarizeProgress}
+                        </>
+                    ) : (
+                        <>
+                            <Sparkles className="w-4 h-4" />
+                            {library.summarizedCount > 0 ? `Summarized (${library.summarizedCount}/${library.libraryVideos.length})` : 'Summarize All'}
+                        </>
+                    )}
+                </button>
+            )}
         </div>
     );
 }

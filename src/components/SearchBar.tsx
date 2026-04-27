@@ -13,12 +13,12 @@ interface Props {
     onLiveFilter?: (query: string) => void;
     loading: boolean;
     placeholder?: string;
-    viewMode?: 'search' | 'library' | 'glossary';
+    viewMode?: 'search' | 'library' | 'glossary' | 'biography';
     initialFacets?: Facet[];
     initialQuery?: string;
 }
 
-export type SearchFacet = 'handle' | 'playlist' | 'video' | 'title_search' | 'transcript_search' | 'term_search' | 'definition_search' | 'tag_search';
+export type SearchFacet = 'handle' | 'playlist' | 'video' | 'title_search' | 'transcript_search' | 'summary_search' | 'term_search' | 'definition_search' | 'tag_search' | 'person_search' | 'bio_search';
 
 export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search', initialFacets = [], initialQuery = '', placeholder }: Props) {
     const [query, setQuery] = useState(initialQuery);
@@ -31,8 +31,9 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
 
     const isLibrary = viewMode === 'library';
     const isGlossary = viewMode === 'glossary';
-    const isLibraryOrGlossary = isLibrary || isGlossary;
-    const isFilterSearchActive = facets.some(f => f.type === 'title_search' || f.type === 'transcript_search' || f.type === 'term_search' || f.type === 'definition_search');
+    const isBiography = viewMode === 'biography';
+    const isLibraryOrGlossary = isLibrary || isGlossary || isBiography;
+    const isFilterSearchActive = facets.some(f => f.type === 'title_search' || f.type === 'transcript_search' || f.type === 'summary_search' || f.type === 'term_search' || f.type === 'definition_search');
 
     // Reset when view mode changes
     useEffect(() => {
@@ -110,8 +111,11 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             case 'video': return <span className="text-xs font-bold">{'>'}</span>;
             case 'transcript_search':
             case 'definition_search': return <FileText className="w-3 h-3" />;
+            case 'summary_search': return <Lightbulb className="w-3 h-3" />;
             case 'title_search':
             case 'term_search': return <Type className="w-3 h-3" />;
+            case 'person_search': return <AtSign className="w-3 h-3" />;
+            case 'bio_search': return <FileText className="w-3 h-3" />;
             case 'tag_search': return <span className="text-xs font-bold">#</span>;
             default: return <Filter className="w-3 h-3" />;
         }
@@ -122,10 +126,14 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         if (isGlossary) {
             patterns['term_search:'] = 'term_search';
             patterns['definition_search:'] = 'definition_search';
+        } else if (isBiography) {
+            patterns['person_search:'] = 'person_search';
+            patterns['bio_search:'] = 'bio_search';
         } else {
             patterns['title_search:'] = 'title_search';
             if (isLibrary) {
                 patterns['transcript_search:'] = 'transcript_search';
+                patterns['summary_search:'] = 'summary_search';
                 patterns['tag_search:'] = 'tag_search';
             }
             patterns['handle:'] = 'handle';
@@ -135,7 +143,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             }
         }
         return patterns;
-    }, [isLibrary, isGlossary]);
+    }, [isLibrary, isGlossary, isBiography]);
 
     const extractPlaylistId = (val: string) => {
         const match = val.match(/[?&]list=([^#&?]+)/);
@@ -179,11 +187,30 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             }
         }
 
-        if (!isGlossary && (facets.length === 0 || (isLibrary && facets.length === 1 && (facets[0].type === 'title_search' || facets[0].type === 'transcript_search' || facets[0].type === 'tag_search')))) {
+        if (!isGlossary && !isBiography && (facets.length === 0 || (isLibrary && facets.length === 1 && (facets[0].type === 'title_search' || facets[0].type === 'transcript_search' || facets[0].type === 'summary_search' || facets[0].type === 'tag_search')))) {
             const handle = extractHandle(val);
             const videoId = extractVideoId(val);
             const playlistId = !isLibrary ? extractPlaylistId(val) : null;
             const tagMatch = val.match(/^#(.+?)#?$/);
+
+            // Shortcuts: !s → summary_search, !t → transcript_search, !n → title_search
+            if (isLibrary) {
+                if (val === '!s' || val.startsWith('!s ')) {
+                    setFacets([{ type: 'summary_search', value: '' }]);
+                    setQuery(val.slice(2).trimStart());
+                    return;
+                }
+                if (val === '!t' || val.startsWith('!t ')) {
+                    setFacets([{ type: 'transcript_search', value: '' }]);
+                    setQuery(val.slice(2).trimStart());
+                    return;
+                }
+                if (val === '!n' || val.startsWith('!n ')) {
+                    setFacets([{ type: 'title_search', value: '' }]);
+                    setQuery(val.slice(2).trimStart());
+                    return;
+                }
+            }
 
             if (tagMatch && isLibrary) {
                 setFacets([{ type: 'tag_search', value: '' }]);
@@ -200,6 +227,44 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             } else if (!isLibrary && playlistId && val.includes('list=')) {
                 setFacets([{ type: 'playlist', value: "" }]);
                 setQuery(playlistId);
+                return;
+            }
+            // Search mode shortcuts: !n → title_search, !p → playlist
+            if (!isLibrary) {
+                if (val === '!n' || val.startsWith('!n ')) {
+                    setFacets([{ type: 'title_search', value: '' }]);
+                    setQuery(val.slice(2).trimStart());
+                    return;
+                }
+                if (val === '!p' || val.startsWith('!p ')) {
+                    setFacets([{ type: 'playlist', value: '' }]);
+                    setQuery(val.slice(2).trimStart());
+                    return;
+                }
+            }
+        }
+        // Glossary mode shortcuts: !g → term_search, !d → definition_search
+        if (isGlossary) {
+            if (val === '!g' || val.startsWith('!g ')) {
+                setFacets([{ type: 'term_search', value: '' }]);
+                setQuery(val.slice(2).trimStart());
+                return;
+            }
+            if (val === '!d' || val.startsWith('!d ')) {
+                setFacets([{ type: 'definition_search', value: '' }]);
+                setQuery(val.slice(2).trimStart());
+                return;
+            }
+        }
+        if (isBiography) {
+            if (val === '!b' || val.startsWith('!b ')) {
+                setFacets([{ type: 'person_search', value: '' }]);
+                setQuery(val.slice(2).trimStart());
+                return;
+            }
+            if (val === '!m' || val.startsWith('!m ')) {
+                setFacets([{ type: 'bio_search', value: '' }]);
+                setQuery(val.slice(2).trimStart());
                 return;
             }
         }
@@ -264,23 +329,30 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     const availableFacets = useMemo(() => {
         if (viewMode === 'glossary') {
             return [
-                { type: 'term_search' as const, label: 'Term' },
-                { type: 'definition_search' as const, label: 'Definition' },
+                { type: 'term_search' as const, label: 'Term (!g)' },
+                { type: 'definition_search' as const, label: 'Definition (!d)' },
+            ];
+        }
+        if (viewMode === 'biography') {
+            return [
+                { type: 'person_search' as const, label: 'Person (!b)' },
+                { type: 'bio_search' as const, label: 'Biography (!m)' },
             ];
         }
         if (viewMode === 'search') {
             return [
-                { type: 'title_search' as const, label: 'Title' },
+                { type: 'title_search' as const, label: 'Title (!n)' },
                 { type: 'handle' as const, label: 'Channel (@)' },
-                { type: 'playlist' as const, label: 'Playlist' },
+                { type: 'playlist' as const, label: 'Playlist (!p)' },
                 { type: 'video' as const, label: 'Video ID (>)' },
             ];
         }
         // Library mode
         return [
-            { type: 'title_search' as const, label: 'Title' },
-            { type: 'transcript_search' as const, label: 'Transcript' },
-            { type: 'tag_search' as const, label: 'Tag' },
+            { type: 'title_search' as const, label: 'Title (!n)' },
+            { type: 'transcript_search' as const, label: 'Transcript (!t)' },
+            { type: 'summary_search' as const, label: 'AI Summary (!s)' },
+            { type: 'tag_search' as const, label: 'Tag (#)' },
             { type: 'handle' as const, label: 'Channel (@)' },
             { type: 'video' as const, label: 'Video ID (>)' },
         ];
@@ -309,7 +381,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     }, [facetMenuIndex]);
 
     return (
-        <form onSubmit={handleSubmit} className="w-full max-w-2xl mx-auto mb-10 px-4">
+        <form onSubmit={handleSubmit} className="w-full max-w-2xl mx-auto mb-10 px-4 relative z-50">
             <div className={`flex items-stretch justify-center transition-all ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
                 <div ref={containerRef} className="relative flex-1">
                     <div className={`flex flex-wrap items-center bg-[#121212] border border-[#404040] ${isLibraryOrGlossary ? 'rounded-full' : 'rounded-l-full'} focus-within:ring-1 focus-within:ring-[red] transition-all min-h-11 py-1 px-3 gap-2`}>
@@ -369,12 +441,13 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                             disabled={loading}
                         />
 
-                        {/* Hints Lightbulb */}
-                        <div className="group/hint relative flex items-center pr-1">
-                            <Lightbulb className="w-4 h-4 text-gray-500 hover:text-yellow-400 transition-colors cursor-help" />
+                         {/* Hints Lightbulb */}
+                        {!isBiography && (
+                            <div className="group/hint relative flex items-center pr-1">
+                                <Lightbulb className="w-4 h-4 text-gray-500 hover:text-orange-400 transition-colors cursor-help" />
 
-                            <div className="absolute top-full right-0 mt-3 w-80 bg-[#1a1a1a] border border-[#333] rounded-xl p-4 opacity-0 translate-y-2 pointer-events-none group-hover/hint:opacity-100 group-hover/hint:translate-y-0 transition-all duration-200 z-100">
-                                <h4 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 border-b border-[#333] pb-2">Search Tips</h4>
+                                <div className="absolute top-full right-0 mt-3 w-80 bg-[#1a1a1a] border border-[#333] rounded-xl p-4 opacity-0 translate-y-2 pointer-events-none group-hover/hint:opacity-100 group-hover/hint:translate-y-0 transition-all duration-200 z-[100]">
+                                    <h4 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 border-b border-[#333] pb-2">Search Tips</h4>
                                 <div className="space-y-4">
                                     <div className="flex flex-col gap-1">
                                         <span className="text-[10px] text-gray-500 font-bold uppercase tracking-tighter">{isGlossary ? "Glossary Mode" : isLibrary ? "Library Mode" : "Paste Mode"}</span>
@@ -389,28 +462,32 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                                 <>
                                                     <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                         <span>term_search:</span>
-                                                        <span className="text-gray-500 group-hover/code:text-gray-300">Term Filter</span>
+                                                        <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!g</span>/ Term Filter</span>
                                                     </code>
                                                     <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                         <span>definition_search:</span>
-                                                        <span className="text-gray-500 group-hover/code:text-gray-300">Definition Filter</span>
+                                                        <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!d</span>/ Definition Filter</span>
                                                     </code>
                                                 </>
                                             ) : (
                                                 <>
                                                     <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                         <span>title_search:</span>
-                                                        <span className="text-gray-500 group-hover/code:text-gray-300">Title Filter</span>
+                                                        <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!n</span>/ Title Filter</span>
                                                     </code>
                                                     {isLibrary && (
                                                         <>
                                                             <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                                 <span>transcript_search:</span>
-                                                                <span className="text-gray-500 group-hover/code:text-gray-300">Transcript Filter</span>
+                                                                <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!t</span>/ Transcript Filter</span>
+                                                            </code>
+                                                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                                <span>summary_search:</span>
+                                                                <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!s</span>/ AI Summary Filter</span>
                                                             </code>
                                                             <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                                 <span>tag_search:</span>
-                                                                <span className="text-gray-500 group-hover/code:text-gray-300"># / Tags</span>
+                                                                <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">#</span>/ Tags</span>
                                                             </code>
                                                         </>
                                                     )}
@@ -419,26 +496,28 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                             {!isLibraryOrGlossary && (
                                                 <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                     <span>playlist:</span>
-                                                    <span className="text-gray-500 group-hover/code:text-gray-300">ID / URL</span>
+                                                    <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!p</span>/ ID / URL</span>
                                                 </code>
                                             )}
                                             {!isGlossary && (
                                                 <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                     <span>video:</span>
-                                                    <span className="text-gray-500 group-hover/code:text-gray-300">{'>'} / ID / URL</span>
+                                                    <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">{'>'}</span>/ ID / URL</span>
                                                 </code>
                                             )}
                                             {!isGlossary && (
                                                 <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                     <span>handle:</span>
-                                                    <span className="text-gray-500 group-hover/code:text-gray-300">@ / ID / URL</span>
+                                                    <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">@</span>/ ID / URL</span>
                                                 </code>
                                             )}
                                         </div>
                                     </div>
-                                </div>
+
+                                 </div>
                             </div>
                         </div>
+                        )}
                     </div>
 
                     {/* Search History Dropdown */}

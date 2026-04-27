@@ -114,6 +114,10 @@
 /* Purple items in Light Mode */
 :root:not(.dark) .bg-purple-600 { background-color: #9333ea !important; color: #ffffff !important; }
 
+/* Green buttons in Light Mode */
+:root:not(.dark) .bg-green-600 { background-color: #16a34a !important; color: #ffffff !important; }
+:root:not(.dark) .bg-green-600:hover { background-color: #15803d !important; }
+
 /* Sidebar/Card fixes */
 :root:not(.dark) .selection\:bg-\[\#3f3f3f\] { selection-background-color: #dddddd !important; }
 
@@ -155,8 +159,10 @@
 :root:not(.dark) .text-gray-300 { color: #444444 !important; }
 :root:not(.dark) .text-gray-500 { color: #666666 !important; }
 
-/* Lightbulb icon - dark gold on hover */
-:root:not(.dark) .hover\:text-yellow-400:hover { color: #b8860b !important; }
+/* Lightbulb icon - orange on hover */
+:root:not(.dark) .hover\:text-orange-400:hover { color: #c2410c !important; }
+/* Shortcut hints in tooltip - darker orange for light bg */
+:root:not(.dark) .text-orange-400 { color: #c2410c !important; }
 
 /* Sidebar - divider */
 :root:not(.dark) .hover\:bg-\[\#272727\]:hover { background-color: #bbbbbb !important; }

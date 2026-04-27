@@ -63,7 +63,12 @@ pub struct Video {
     #[serde(rename = "videoType")]
     pub video_type: Option<String>,
     pub transcript: Option<String>,
+    pub summary: Option<String>,
     pub tags: Option<String>,
+    #[serde(rename = "hasTranscript")]
+    pub has_transcript: Option<bool>,
+    #[serde(rename = "hasSummary")]
+    pub has_summary: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,6 +94,7 @@ pub struct DisplaySettings {
     pub fullscreen: bool,
     pub theme: String,
     pub video_list_mode: String,
+    pub navigation_orientation: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

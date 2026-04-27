@@ -727,7 +727,7 @@ pub async fn install_ollama(app: AppHandle) -> Result<(), String> {
 }
 
 /// Summarize a transcript using Ollama
-pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Option<String>) -> Result<String, String> {
+pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Option<String>, video_id: Option<String>) -> Result<String, String> {
     ensure_ollama_running().await?;
     
     // Get settings from database
@@ -777,11 +777,24 @@ pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Op
     };
     
     // Use default prompt if the saved prompt is empty
-    let prompt_template = if prompt_template.trim().is_empty() {
+    let mut prompt_template = if prompt_template.trim().is_empty() {
         DEFAULT_PROMPT_TEMPLATE.to_string()
     } else {
         prompt_template
     };
+
+    if let Some(vid) = &video_id {
+        if let Ok(Some(video)) = db::get_video_full(&db_path, vid) {
+            prompt_template = prompt_template.replace("${title}", &video.1);
+            prompt_template = prompt_template.replace("${author}", &video.2);
+            prompt_template = prompt_template.replace("${length_seconds}", &video.3.to_string());
+            prompt_template = prompt_template.replace("${view_count}", &video.5.to_string());
+            prompt_template = prompt_template.replace("${handle}", &video.7);
+        }
+    }
+    if let Some(h) = &handle {
+        prompt_template = prompt_template.replace("${handle}", h);
+    }
     
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))  // 2 minute timeout for CPU-based generation

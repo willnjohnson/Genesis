@@ -20,7 +20,14 @@ interface Props {
     onThemeChange?: (theme: string) => void;
     onVideoListModeChange: (mode: 'grid' | 'compact') => void;
     currentVideoListMode: 'grid' | 'compact';
+    onNavigationOrientationChange: (orientation: 'horizontal' | 'vertical') => void;
+    currentNavigationOrientation: 'horizontal' | 'vertical';
     onPluginsChange?: () => void;
+    showSummarizeOllama?: boolean;
+    showSummarizeVenice?: boolean;
+    showSynthesizeVenice?: boolean;
+    showSynthesizePixabay?: boolean;
+    showSynthesizeUpload?: boolean;
 }
 
 type Tab = 'api' | 'db' | 'display' | 'history' | 'plugins';
@@ -35,17 +42,21 @@ const TAB_CONFIG: { id: Tab; label: string; Icon: React.ElementType }[] = [
 
 export function SettingsModal({
     isOpen, onClose, onStatusChange, onThemeChange,
-    onVideoListModeChange, currentVideoListMode, onPluginsChange
+    onVideoListModeChange, currentVideoListMode,
+    onNavigationOrientationChange, currentNavigationOrientation, onPluginsChange,
+    showSummarizeOllama = true, showSummarizeVenice = true,
+    showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true
 }: Props) {
     const [activeTab, setActiveTab] = useState<Tab>('api');
     const [hasApiKey, setHasApiKey] = useState(false);
     const [dbDetails, setDbDetails] = useState<DbDetails | null>(null);
     const [displaySettings, setDisplaySettingsState] = useState<DisplaySettings>({
-        resolution: '1440x900', fullscreen: false, theme: 'dark', videoListMode: 'grid'
+        resolution: '1440x900', fullscreen: false, theme: 'dark', videoListMode: 'grid', navigationOrientation: 'horizontal'
     });
     const [history, setHistory] = useState<HistoryEntry[]>([]);
     const [plugins, setPlugins] = useState([
-        { id: 'summarize', name: 'Summarize Transcripts [Beta]', enabled: false, description: 'Adds AI-powered summarization for transcripts using Local (Ollama) or Cloud (Venice) models.' }
+        { id: 'summarize', name: 'Summarize Transcripts', enabled: false, description: 'Adds AI-powered summarization for transcripts using Local (Ollama) or Cloud (Venice) models.' },
+        { id: 'photosynthesis', name: 'Photosynthesis', enabled: false, description: 'Enables markdown editing and photo tools (AI generation and local upload).' }
     ]);
     const [loading, setLoading] = useState(false);
 
@@ -58,14 +69,17 @@ export function SettingsModal({
             getDisplaySettings(),
             getSearchHistory(100),
             getSetting('plugin_summarize_enabled'),
-        ]).then(([key, db, display, hist, summarizeEnabled]) => {
+            getSetting('plugin_photosynthesis_enabled'),
+        ]).then(([key, db, display, hist, summarizeEnabled, photoEnabled]) => {
             setHasApiKey(!!key);
             setDbDetails(db);
             setDisplaySettingsState(display);
             setHistory(hist);
-            setPlugins(prev => prev.map(p =>
-                p.id === 'summarize' ? { ...p, enabled: summarizeEnabled === 'true' } : p
-            ));
+            setPlugins(prev => prev.map(p => {
+                if (p.id === 'summarize') return { ...p, enabled: summarizeEnabled === 'true' };
+                if (p.id === 'photosynthesis') return { ...p, enabled: photoEnabled === 'true' };
+                return p;
+            }));
         }).catch(console.error).finally(() => setLoading(false));
     }, [isOpen]);
 
@@ -77,6 +91,7 @@ export function SettingsModal({
         try {
             await setDisplaySettings(newSettings);
             if (updates.videoListMode) onVideoListModeChange(updates.videoListMode);
+            if (updates.navigationOrientation) onNavigationOrientationChange(updates.navigationOrientation);
             if (updates.theme) onThemeChange?.(updates.theme);
         } catch (e) {
             console.error("Failed to apply display settings", e);
@@ -171,6 +186,7 @@ export function SettingsModal({
                             <DisplayTab
                                 settings={displaySettings}
                                 currentVideoListMode={currentVideoListMode}
+                                currentNavigationOrientation={currentNavigationOrientation}
                                 onUpdate={handleUpdateDisplay}
                             />
                         )}
@@ -193,9 +209,15 @@ export function SettingsModal({
                         )}
                         {activeTab === 'plugins' && (
                             <PluginsTab
-                                plugins={plugins}
+                                plugins={plugins.filter(p => {
+                                    if (p.id === 'summarize') return showSummarizeOllama || showSummarizeVenice;
+                                    if (p.id === 'photosynthesis') return showSynthesizeVenice || showSynthesizePixabay || showSynthesizeUpload;
+                                    return true;
+                                })}
                                 onTogglePlugin={handleTogglePlugin}
                                 loading={loading}
+                                showSummarizeOllama={showSummarizeOllama}
+                                showSummarizeVenice={showSummarizeVenice}
                             />
                         )}
                     </div>
