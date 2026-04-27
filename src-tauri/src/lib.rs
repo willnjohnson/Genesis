@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 use tauri::Manager;
+use tauri::webview::WebviewWindowBuilder;
+use tauri::WebviewUrl;
 use std::sync::Mutex;
 
 #[cfg(feature = "genesis")]
@@ -7,7 +9,7 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.2.5";
+const VERSION: &str = "0.2.4";
 
 fn get_window_title() -> String {
     format!("{} v{}", APP_NAME, VERSION)
@@ -156,7 +158,6 @@ pub fn run() {
             commands::fetch_transcript,
             commands::fetch_video_handle,
             commands::save_video,
-            commands::save_transcript,
             commands::fetch_saved_videos,
             commands::delete_video,
             commands::check_video_exists,
@@ -191,17 +192,11 @@ pub fn run() {
             commands::get_venice_prompt,
             commands::set_venice_prompt,
             commands::generate_image,
-            commands::search_pixabay,
-            commands::upload_to_imgur,
-            commands::get_pixabay_api_key,
-            commands::set_pixabay_api_key,
-            commands::fetch_image_as_data_uri,
             commands::get_custom_prompt,
             commands::get_all_custom_prompts,
             commands::set_custom_prompt,
             commands::delete_custom_prompt,
             commands::get_unique_handles,
-            commands::save_image,
             // History
             commands::add_search_history,
             commands::get_search_history,
@@ -212,9 +207,6 @@ pub fn run() {
             commands::add_glossary_term,
             commands::get_glossary_terms,
             commands::delete_glossary_term,
-            commands::get_biographies,
-            commands::get_biography,
-            commands::update_biography,
             get_app_info,
         ])
         .manage(DbPathState(Mutex::new(None)))
