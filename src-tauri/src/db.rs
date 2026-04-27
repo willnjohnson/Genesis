@@ -1,8 +1,32 @@
 use crate::Video;
 use rusqlite::{params, Connection, Result};
 
+fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+        params![table_name],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 pub fn init_db(db_path: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
+    
+    // Verify all required tables exist; if not, this is likely a corrupted/partial database
+    let required_tables = ["videos", "settings", "glossary", "biographies", "search_history", "custom_prompts"];
+    let mut missing_tables = Vec::new();
+    
+    for table in &required_tables {
+        if !table_exists(&conn, table).unwrap_or(false) {
+            missing_tables.push(*table);
+        }
+    }
+    
+    // If we're missing critical tables (not just videos), log a warning
+    if !missing_tables.is_empty() {
+        log::info!("Creating missing database tables: {:?}", missing_tables);
+    }
 
     // Create videos table
     conn.execute(

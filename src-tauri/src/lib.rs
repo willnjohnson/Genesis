@@ -9,7 +9,7 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.2.4";
+const VERSION: &str = "0.2.5";
 
 fn get_window_title() -> String {
     format!("{} v{}", APP_NAME, VERSION)
@@ -115,7 +115,9 @@ pub(crate) fn get_db_path(app: &tauri::AppHandle) -> String {
 
     let path_str = db_file_path.to_string_lossy().to_string();
     *guard = Some(path_str.clone());
-    let _ = db::init_db(&path_str);
+    if let Err(e) = db::init_db(&path_str) {
+        log::error!("Failed to initialize database at {}: {}", path_str, e);
+    }
     path_str
 }
 
@@ -182,6 +184,7 @@ pub fn run() {
             commands::summarize_transcript,
             commands::save_summary,
             commands::save_tags,
+            commands::save_transcript,
             commands::get_summary,
             commands::get_summarized_count,
             commands::get_videos_with_summaries,
@@ -192,6 +195,11 @@ pub fn run() {
             commands::get_venice_prompt,
             commands::set_venice_prompt,
             commands::generate_image,
+            commands::search_pixabay,
+            commands::upload_to_imgur,
+            commands::get_pixabay_api_key,
+            commands::set_pixabay_api_key,
+            commands::fetch_image_as_data_uri,
             commands::get_custom_prompt,
             commands::get_all_custom_prompts,
             commands::set_custom_prompt,
@@ -203,10 +211,16 @@ pub fn run() {
             commands::clear_history_before_date,
             commands::delete_history_entry,
             commands::clear_all_history,
+            // IO
+            commands::save_image,
             // Misc
             commands::add_glossary_term,
             commands::get_glossary_terms,
             commands::delete_glossary_term,
+            // Biography
+            commands::get_biographies,
+            commands::get_biography,
+            commands::update_biography,
             get_app_info,
         ])
         .manage(DbPathState(Mutex::new(None)))

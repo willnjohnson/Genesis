@@ -434,7 +434,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                       {/* Sidebar Content: Latest Videos */}
                       <div className="w-96 bg-gray-50 dark:bg-[#0f0f0f] flex flex-col p-6 space-y-4">
                           <div className="flex items-center justify-between mb-4">
-                              <h3 className="text-lg font-bold text-black dark:text-white">Latest Videos in Library</h3>
+                              <h3 className="text-lg font-bold text-black dark:text-white">Latest Videos</h3>
                              {videos.length > 0 && (
                                  <button
                                      onClick={() => {
