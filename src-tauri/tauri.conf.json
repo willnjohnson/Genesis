@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Kinesis",
+  "productName": "Genesis",
   "version": "0.2.5",
-  "identifier": "kinesisapp",
+  "identifier": "genesisapp",
   "build": {
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev",
@@ -19,11 +19,11 @@
     "active": true,
     "targets": "all",
     "icon": [
-      "icons-kinesis/32x32.png",
-      "icons-kinesis/128x128.png",
-      "icons-kinesis/128x128@2x.png",
-      "icons-kinesis/icon.icns",
-      "icons-kinesis/icon.ico"
+      "icons-genesis/32x32.png",
+      "icons-genesis/128x128.png",
+      "icons-genesis/128x128@2x.png",
+      "icons-genesis/icon.icns",
+      "icons-genesis/icon.ico"
     ],
     "resources": [
       "../dist"

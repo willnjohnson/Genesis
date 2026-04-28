@@ -2345,6 +2345,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-openurl",
  "tauri-plugin-shell",
+ "tiny_http",
  "tokio",
  "urlencoding",
 ]

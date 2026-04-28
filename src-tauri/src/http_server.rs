@@ -34,29 +34,18 @@ fn find_dist_path(suggested: PathBuf) -> Option<PathBuf> {
     None
 }
 
-/// Start an HTTP server serving the built app on localhost.
+/// Start an HTTP server for YouTube embeds on localhost.
 /// Tries a small range of ports and returns the bound port on success.
-pub fn start_server(dist_path: PathBuf) -> Result<u16, Box<dyn std::error::Error>> {
-    let dist = match find_dist_path(dist_path) {
-        Some(p) => p,
-        None => {
-            return Err("Could not find a dist directory containing index.html".into())
-        }
-    };
-
-    eprintln!("Starting HTTP server serving: {}", dist.display());
-
-    for port in 1430..1440u16 {
+pub fn start_server() -> Result<u16, Box<dyn std::error::Error>> {
+    for port in 1431..1440u16 {
         let bind = format!("127.0.0.1:{}", port);
         match Server::http(&bind) {
             Ok(server) => {
-                eprintln!("HTTP server listening on http://{}", bind);
-                let dist = Arc::new(dist);
+                eprintln!("YouTube embed HTTP server listening on http://{}", bind);
                 std::thread::spawn(move || {
                     for request in server.incoming_requests() {
-                        let dist_clone = Arc::clone(&dist);
                         std::thread::spawn(move || {
-                            if let Err(err) = handle_request(request, &dist_clone) {
+                            if let Err(err) = handle_request(request) {
                                 eprintln!("Error handling request: {}", err);
                             }
                         });
@@ -70,50 +59,68 @@ pub fn start_server(dist_path: PathBuf) -> Result<u16, Box<dyn std::error::Error
         }
     }
 
-    Err("Could not bind to any port in range 1430-1439".into())
+    Err("Could not bind to any port in range 1431-1439".into())
 }
 
-fn handle_request(request: Request, dist_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    // Normalize requested path and strip query params
-    let mut path = request.url().trim_start_matches('/').split('?').next().unwrap_or("").to_string();
-
-    if path.is_empty() {
-        path = "index.html".to_string();
-    }
-
-    let file_path = dist_path.join(&path);
-
-    // Prevent directory traversal by comparing canonical paths
-    let canonical_dist = fs::canonicalize(dist_path).unwrap_or_else(|_| dist_path.clone());
-    let canonical_file = fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
-
-    if !canonical_file.starts_with(&canonical_dist) {
-        return request.respond(Response::from_string("Forbidden").with_status_code(403)).map_err(|e| e.into());
-    }
-
-    // Try the requested file first; fall back to index.html for SPA routes
-    let response = match fs::read(&file_path) {
-        Ok(data) => {
-            let content_type = get_content_type(&file_path);
-            Response::from_data(data)
-                .with_header(Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes()).unwrap())
-                .with_header(Header::from_bytes(&b"Cache-Control"[..], b"no-cache").unwrap())
-                .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], b"*").unwrap())
-        }
-        Err(_) => {
-            // Serve index.html for client-side routes
-            let index_path = dist_path.join("index.html");
-            match fs::read(&index_path) {
-                Ok(data) => Response::from_data(data)
-                    .with_header(Header::from_bytes(&b"Content-Type"[..], b"text/html").unwrap())
-                    .with_header(Header::from_bytes(&b"Cache-Control"[..], b"no-cache").unwrap())
-                    .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], b"*").unwrap()),
-                Err(_) => Response::from_string("Not Found").with_status_code(404),
+fn handle_youtube_embed(request: Request) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse query parameters to get video ID
+    let url = request.url();
+    let query_start = url.find('?');
+    let mut video_id = String::new();
+    if let Some(start) = query_start {
+        let query = &url[start + 1..];
+        let params: Vec<&str> = query.split('&').collect();
+        for param in params {
+            if param.starts_with("v=") {
+                video_id = param[2..].to_string();
+                break;
             }
         }
-    };
+    }
+
+    if video_id.is_empty() {
+        return request.respond(Response::from_string("Missing video ID").with_status_code(400)).map_err(|e| e.into());
+    }
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  html, body {{ width: 100%; height: 100%; overflow: hidden; background: #000; }}
+  iframe {{ width: 100%; height: 100%; border: none; }}
+</style>
+</head>
+<body>
+<iframe
+  src="https://www.youtube.com/embed/{}"
+  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+  allowfullscreen>
+</iframe>
+</body>
+</html>"#,
+        video_id
+    );
+
+    let response = Response::from_string(html)
+        .with_header(Header::from_bytes(&b"Content-Type"[..], b"text/html").unwrap())
+        .with_header(Header::from_bytes(&b"Cache-Control"[..], b"no-cache").unwrap())
+        .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], b"*").unwrap());
 
     request.respond(response)?;
+    Ok(())
+}
+
+fn handle_request(request: Request) -> Result<(), Box<dyn std::error::Error>> {
+    // Check for YouTube embed endpoint
+    if request.url().starts_with("/youtube_embed") {
+        return handle_youtube_embed(request);
+    }
+
+    // For other requests, return 404
+    request.respond(Response::from_string("Not Found").with_status_code(404))?;
     Ok(())
 }
 

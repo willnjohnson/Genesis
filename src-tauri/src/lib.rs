@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use tauri::Manager;
-use tauri::WebviewUrl;
 use std::sync::Mutex;
+mod http_server;
 
 #[cfg(feature = "genesis")]
 const APP_NAME: &str = "Genesis";
@@ -226,7 +226,12 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle();
             let db_path = get_db_path(app_handle);
-            
+
+            // Start HTTP server for YouTube embeds
+            if let Ok(port) = http_server::start_server() {
+                eprintln!("YouTube embed server started on port {}", port);
+            }
+
             // Get saved window settings
             let resolution = db::get_setting(&db_path, "resolution").unwrap_or(None).unwrap_or_else(|| "1440x900".to_string());
             let fullscreen = db::get_setting(&db_path, "fullscreen").unwrap_or(None).map(|s| s == "true").unwrap_or(false);

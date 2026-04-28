@@ -641,6 +641,8 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         }
     }, [handle, isLibrary]);
 
+
+
     const handleOnSave = useCallback(async () => {
         if (!videoId || !onSave) return;
         try {
@@ -1071,16 +1073,16 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                     {videoId && isOpen ? (
                                         <>
                                             <div className={`aspect-video w-full bg-black rounded-lg overflow-hidden border border-gray-800 relative group ${isResizing ? 'pointer-events-none' : ''}`}>
-                                                <iframe
-                                                    width="100%"
-                                                    height="100%"
-                                                    src={`https://www.youtube.com/embed/${videoId}?rel=0&modestbranding=1&playsinline=1`}
-                                                    title="YouTube video player"
-                                                    frameBorder="0"
-                                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                                                    referrerPolicy="strict-origin-when-cross-origin"
-                                                    allowFullScreen
-                                                />
+                                                 <iframe
+                                                     width="100%"
+                                                     height="100%"
+                                                     src={videoId ? `http://localhost:1431/youtube_embed?v=${videoId}` : undefined}
+                                                     title="YouTube video player"
+                                                     frameBorder="0"
+                                                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                                     referrerPolicy="strict-origin-when-cross-origin"
+                                                     allowFullScreen
+                                                 />
                                                 <div className="absolute bottom-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                                     <button
                                                         onClick={() => openExternalUrl(`https://www.youtube.com/watch?v=${videoId}`)}
