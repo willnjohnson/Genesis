@@ -106,7 +106,7 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
     if (videos.length === 0) return null;
 
     return (
-        <div className="w-full max-w-[1700px] mx-auto">
+        <div className="w-full">
             {/* Header Row 1: Title and Actions */}
             <div className="flex flex-col lg:flex-row justify-between items-center mb-8 gap-4 px-2">
                 <div className="flex items-baseline gap-1.5 flex-shrink-0">

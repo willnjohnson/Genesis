@@ -52,18 +52,18 @@ export const handleMarkdownKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement
     const end = target.selectionEnd;
     const selectedText = value.substring(start, end);
 
-    const patterns: Record<string, { prefix: string; suffix: string; detect?: RegExp }> = {
+    const patterns: Record<string, { prefix: string; suffix: string; detect?: RegExp; defaultText?: string }> = {
         bold: { prefix: '**', suffix: '**', detect: /^\*\*(.*)\*\*$/s },
         italic: { prefix: '*', suffix: '*', detect: /^\*(.*)\*$/s },
         strikethrough: { prefix: '~~', suffix: '~~', detect: /^~~(.*)~~$/s },
-        link: { prefix: '[', suffix: '](https://example.com)' },
-        image: { prefix: '![', suffix: '](https://upload.wikimedia.org/wikipedia/commons/6/60/No-Image-Placeholder-banner.svg)' },
+        link: { prefix: '[', suffix: '](https://example.com)', defaultText: 'URL Title' },
+        image: { prefix: '![', suffix: '](https://i.imgur.com/7Cn5qJG.png)', defaultText: 'Image' },
         blockquote: { prefix: '> ', suffix: '' },
     };
 
     const replaceSelection = (type: string, defaultText: string = "TEXT") => {
         e.preventDefault();
-        const textToWrap = selectedText || defaultText;
+        const textToWrap = selectedText || patterns[type].defaultText || defaultText;
         const { prefix, suffix, detect } = patterns[type];
 
         let replacement: string;
@@ -191,6 +191,9 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [isUploadingImage, setIsUploadingImage] = useState(false);
     const [veniceApiKey, setVeniceApiKeyLocal] = useState("");
     const [veniceApiKeySaved, setVeniceApiKeySaved] = useState(false);
+    const [showImageUploadErrorModal, setShowImageUploadErrorModal] = useState(false);
+    const [imageUploadErrorMessage, setImageUploadErrorMessage] = useState("");
+    const [imageToSaveLocally, setImageToSaveLocally] = useState("");
 
     // Find & Replace state
     const [findText, setFindText] = useState("");
@@ -252,17 +255,17 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         const activeTextareaRef = isEditingTranscript ? transcriptEditRef : summaryEditRef;
         const match = searchIndices[idx];
         if (!match || !activeTextareaRef.current) return;
-        
+
         const textarea = activeTextareaRef.current;
         if (!preventFocus) textarea.focus();
         textarea.setSelectionRange(match.start, match.end);
-        
+
         // Ensure the selection is visible
         const fullText = isEditingTranscript ? editedTranscript : editedSummary;
         const textBeforeMatch = fullText.substring(0, match.start);
         const linesBefore = textBeforeMatch.split('\n').length;
         const totalLines = fullText.split('\n').length;
-        
+
         // This is a naive way to scroll but works for basic cases
         textarea.scrollTop = (linesBefore / totalLines) * textarea.scrollHeight - (textarea.clientHeight / 2);
 
@@ -399,7 +402,13 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                 setEditedSummary(prev => markdown + prev);
             }
         } catch (e: any) {
-            console.error("Failed to add image:", e);
+            if (imageTab === 'venice' || imageTab === 'pixabay') {
+                setImageUploadErrorMessage(e.message || 'Unknown error occurred');
+                setImageToSaveLocally(imageUrl);
+                setShowImageUploadErrorModal(true);
+            } else {
+                console.error("Failed to add image:", e);
+            }
         } finally {
             setIsUploadingImage(false);
         }
@@ -755,6 +764,112 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                             <X className="w-5 h-5" />
                         </button>
                     </div>
+
+                    {/* Find & Replace Panel */}
+                    {showFindReplace && (
+                        <div className="absolute top-4 right-4 z-51 p-2.5 bg-[#1a1a1a] rounded-xl border border-[#303030] flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-200 w-80 shadow-xl">
+                            {/* Row 1: Find + Nav */}
+                            <div className="flex items-center gap-2">
+                                <div className="flex-1 relative group">
+                                    <input
+                                        type="text"
+                                        placeholder="Find text..."
+                                        value={findText}
+                                        onChange={(e) => setFindText(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                                e.preventDefault();
+                                                navigateMatch('next', true);
+                                            }
+                                        }}
+                                        className="w-full h-8 pl-3 pr-16 bg-[#121212] border border-[#303030] hover:border-[#505050] rounded-lg text-xs text-white placeholder-[#555555] focus:outline-none focus:border-blue-500/50 transition-all font-mono"
+                                    />
+                                    <div className="absolute right-1 top-0.5 bottom-0.5 flex items-center gap-0.5">
+                                        <button
+                                            onClick={() => setMatchCase(!matchCase)}
+                                            className={`p-1 rounded transition-all cursor-pointer ${matchCase ? 'bg-blue-600 text-white' : 'text-[#888888] hover:text-white hover:bg-white/10'}`}
+                                            title="Match Case"
+                                        >
+                                            <CaseSensitive className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                            onClick={() => setMatchWholeWord(!matchWholeWord)}
+                                            className={`p-1 rounded transition-all cursor-pointer ${matchWholeWord ? 'bg-blue-600 text-white' : 'text-[#888888] hover:text-white hover:bg-white/10'}`}
+                                            title="Match Whole Word"
+                                        >
+                                            <WholeWord className="w-3.5 h-3.5" />
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="flex items-center bg-[#121212] border border-[#303030] rounded-lg h-8 px-0.5">
+                                    <button
+                                        onClick={() => navigateMatch('prev')}
+                                        className="p-1 text-[#888888] hover:text-white transition-colors disabled:opacity-10 cursor-pointer"
+                                        disabled={searchIndices.length === 0}
+                                    >
+                                        <ChevronUp className="w-4 h-4" />
+                                    </button>
+                                    <button
+                                        onClick={() => navigateMatch('next')}
+                                        className="p-1 text-[#888888] hover:text-white transition-colors disabled:opacity-10 cursor-pointer"
+                                        disabled={searchIndices.length === 0}
+                                    >
+                                        <ChevronDown className="w-4 h-4" />
+                                    </button>
+                                </div>
+                                <button
+                                    onClick={() => setShowFindReplace(false)}
+                                    className="w-8 h-8 flex items-center justify-center text-[#888888] hover:text-white transition-colors cursor-pointer"
+                                    title="Close Find & Replace"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            </div>
+
+                            {/* Row 2: Replace */}
+                            <div className="flex items-center gap-2">
+                                <input
+                                    type="text"
+                                    placeholder="Replace with..."
+                                    value={replaceText}
+                                    onChange={(e) => setReplaceText(e.target.value)}
+                                    className="w-full h-8 px-3 bg-[#121212] border border-[#303030] hover:border-[#505050] rounded-lg text-xs text-white placeholder-[#555555] focus:outline-none focus:border-blue-500/50 transition-all font-mono"
+                                />
+                            </div>
+
+                            {/* Row 3: Count + Replace All */}
+                            <div className="flex justify-between items-center px-1">
+                                <div className="text-[10px] font-bold tracking-widest uppercase">
+                                    {findText ? (
+                                        searchIndices.length > 0 ? (
+                                            <span className="text-blue-400">
+                                                {currentSearchIndex + 1} OF {searchIndices.length} MATCHES
+                                            </span>
+                                        ) : (
+                                            <span className="text-red-500/70">No results</span>
+                                        )
+                                    ) : null
+                                    }
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <button
+                                        onClick={handleReplace}
+                                        disabled={!findText || searchIndices.length === 0}
+                                        className="h-7 px-3 bg-white/5 hover:bg-white/10 text-white text-[9px] font-bold uppercase tracking-widest rounded-md transition-all cursor-pointer border border-white/5 active:scale-95 disabled:opacity-30"
+                                    >
+                                        Replace
+                                    </button>
+                                    <button
+                                        onClick={handleReplaceAll}
+                                        disabled={!findText || searchIndices.length === 0}
+                                        className="h-7 px-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 text-white text-[9px] font-bold uppercase tracking-widest rounded-md transition-all cursor-pointer active:scale-95"
+                                    >
+                                        Replace All
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     <div className="flex-1 flex overflow-hidden relative">
                         {/* Left Side: Video Player or Image Tools */}
@@ -1331,126 +1446,29 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                 <div className="flex-1 flex flex-col">
                                 {showSummary && summary && !showPromptEditor ? (
                                         <div className="flex flex-col gap-3 h-full">
-                                             {isEditingSummary ? (
-                                                 <div className="flex flex-col flex-1 min-h-0 gap-2">
-                                                     {showFindReplace && (
-                                                         <div className="relative p-2.5 bg-[#1a1a1a] rounded-xl border border-[#303030] flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-200 z-50 mb-1">
-                                                             {/* Row 1: Find + Nav */}
-                                                             <div className="flex items-center gap-2">
-                                                                 <div className="flex-1 relative group">
-                                                                     <input
-                                                                         type="text"
-                                                                         placeholder="Find text..."
-                                                                         value={findText}
-                                                                         onChange={(e) => setFindText(e.target.value)}
-                                                                         onKeyDown={(e) => {
-                                                                             if (e.key === 'Enter') {
-                                                                                 e.preventDefault();
-                                                                                 navigateMatch('next', true);
-                                                                             }
-                                                                         }}
-                                                                         className="w-full h-8 pl-3 pr-16 bg-[#121212] border border-[#303030] hover:border-[#505050] rounded-lg text-xs text-white placeholder-[#555555] focus:outline-none focus:border-blue-500/50 transition-all font-mono"
-                                                                     />
-                                                                     <div className="absolute right-1 top-0.5 bottom-0.5 flex items-center gap-0.5">
-                                                                         <button
-                                                                             onClick={() => setMatchCase(!matchCase)}
-                                                                             className={`p-1 rounded transition-all cursor-pointer ${matchCase ? 'bg-blue-600 text-white' : 'text-[#888888] hover:text-white hover:bg-white/10'}`}
-                                                                             title="Match Case"
-                                                                         >
-                                                                             <CaseSensitive className="w-3.5 h-3.5" />
-                                                                         </button>
-                                                                         <button
-                                                                             onClick={() => setMatchWholeWord(!matchWholeWord)}
-                                                                             className={`p-1 rounded transition-all cursor-pointer ${matchWholeWord ? 'bg-blue-600 text-white' : 'text-[#888888] hover:text-white hover:bg-white/10'}`}
-                                                                             title="Match Whole Word"
-                                                                         >
-                                                                             <WholeWord className="w-3.5 h-3.5" />
-                                                                         </button>
-                                                                     </div>
-                                                                 </div>
-                                                                 <div className="flex items-center bg-[#121212] border border-[#303030] rounded-lg h-8 px-0.5">
-                                                                     <button
-                                                                         onClick={() => navigateMatch('prev')}
-                                                                         className="p-1 text-[#888888] hover:text-white transition-colors disabled:opacity-10 cursor-pointer"
-                                                                         disabled={searchIndices.length === 0}
-                                                                     >
-                                                                         <ChevronUp className="w-4 h-4" />
-                                                                     </button>
-                                                                     <button
-                                                                         onClick={() => navigateMatch('next')}
-                                                                         className="p-1 text-[#888888] hover:text-white transition-colors disabled:opacity-10 cursor-pointer"
-                                                                         disabled={searchIndices.length === 0}
-                                                                     >
-                                                                         <ChevronDown className="w-4 h-4" />
-                                                                     </button>
-                                                                 </div>
-                                                             </div>
- 
-                                                             {/* Row 2: Replace */}
-                                                             <div className="flex items-center gap-2">
-                                                                 <input
-                                                                     type="text"
-                                                                     placeholder="Replace with..."
-                                                                     value={replaceText}
-                                                                     onChange={(e) => setReplaceText(e.target.value)}
-                                                                     className="w-full h-8 px-3 bg-[#121212] border border-[#303030] hover:border-[#505050] rounded-lg text-xs text-white placeholder-[#555555] focus:outline-none focus:border-blue-500/50 transition-all font-mono"
-                                                                 />
-                                                             </div>
- 
-                                                             {/* Row 3: Count + Replace All */}
-                                                             <div className="flex justify-between items-center px-1">
-                                                                 <div className="text-[10px] font-bold tracking-widest uppercase">
-                                                                     {findText ? (
-                                                                         searchIndices.length > 0 ? (
-                                                                             <span className="text-blue-400">
-                                                                                 {currentSearchIndex + 1} OF {searchIndices.length} MATCHES
-                                                                             </span>
-                                                                         ) : (
-                                                                             <span className="text-red-500/70">No results</span>
-                                                                         )
-                                                                     ) : null
-                                                                     }
-                                                                 </div>
-                                                                 <div className="flex items-center gap-1.5">
-                                                                     <button
-                                                                         onClick={handleReplace}
-                                                                         disabled={!findText || searchIndices.length === 0}
-                                                                         className="h-7 px-3 bg-white/5 hover:bg-white/10 text-white text-[9px] font-bold uppercase tracking-widest rounded-md transition-all cursor-pointer border border-white/5 active:scale-95 disabled:opacity-30"
-                                                                     >
-                                                                         Replace
-                                                                     </button>
-                                                                     <button
-                                                                         onClick={handleReplaceAll}
-                                                                         disabled={!findText || searchIndices.length === 0}
-                                                                         className="h-7 px-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 text-white text-[9px] font-bold uppercase tracking-widest rounded-md transition-all cursor-pointer active:scale-95"
-                                                                     >
-                                                                         Replace All
-                                                                     </button>
-                                                                 </div>
-                                                             </div>
-                                                         </div>
-                                                     )}
-                                                     {!isPreviewingSummary ? (
+                                              {isEditingSummary ? (
+                                                  <div className="flex flex-col flex-1 min-h-0 gap-2">
+                                                      {!isPreviewingSummary ? (
                                                      <div className="relative flex-1 min-h-[500px] bg-black/20 rounded-lg border border-[#333] focus-within:border-purple-500 overflow-hidden">
-                                                         <div
-                                                             ref={summaryBackdropRef}
-                                                             className="absolute inset-0 w-full h-full p-3 m-0 border-none font-mono text-xs leading-relaxed whitespace-pre-wrap break-words overflow-y-auto pointer-events-none"
-                                                             style={{ color: 'transparent', scrollbarWidth: 'none', msOverflowStyle: 'none' }}
-                                                             aria-hidden="true"
-                                                         >
-                                                             {showFindReplace && searchIndices.length > 0 && currentSearchIndex !== -1 ? (
-                                                                 <>
-                                                                     {editedSummary.substring(0, searchIndices[currentSearchIndex].start)}
-                                                                     <mark className="bg-purple-500/50 rounded-sm text-transparent" style={{ color: 'transparent' }}>
-                                                                         {editedSummary.substring(searchIndices[currentSearchIndex].start, searchIndices[currentSearchIndex].end)}
-                                                                     </mark>
-                                                                     {editedSummary.substring(searchIndices[currentSearchIndex].end)}
-                                                                 </>
-                                                             ) : (
-                                                                 editedSummary
-                                                             )}
-                                                             {editedSummary.endsWith('\\n') && <br />}
-                                                         </div>
+                                                          <div
+                                                              ref={summaryBackdropRef}
+                                                              className="absolute inset-0 w-full h-full p-3 m-0 border-none font-mono text-xs leading-relaxed whitespace-pre-wrap break-words overflow-y-auto pointer-events-none"
+                                                              style={{ color: 'transparent', scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+                                                              aria-hidden="true"
+                                                          >
+                                                              {showFindReplace && searchIndices.length > 0 && currentSearchIndex !== -1 ? (
+                                                                  <>
+                                                                      {editedSummary.substring(0, searchIndices[currentSearchIndex].start)}
+                                                                      <mark className="bg-purple-500/50 rounded-sm text-transparent" style={{ color: 'transparent' }}>
+                                                                          {editedSummary.substring(searchIndices[currentSearchIndex].start, searchIndices[currentSearchIndex].end)}
+                                                                      </mark>
+                                                                      {editedSummary.substring(searchIndices[currentSearchIndex].end)}
+                                                                  </>
+                                                              ) : (
+                                                                  editedSummary
+                                                              )}
+                                                              {editedSummary.endsWith('\n') && <br />}
+                                                          </div>
                                                          <textarea
                                                              ref={summaryEditRef}
                                                              value={editedSummary}
@@ -1468,7 +1486,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                      setShowFindReplace(!showFindReplace);
                                                                  }
                                                              }}
-                                                             className="absolute inset-0 w-full h-full p-3 m-0 border-none bg-transparent text-white outline-none text-xs leading-relaxed resize-none font-mono selection:bg-purple-500/30"
+                                                              className="absolute inset-0 w-full h-full p-3 m-0 border-none bg-transparent text-white outline-none text-xs leading-relaxed resize-none font-mono selection:bg-purple-500/30"
                                                              spellCheck={false}
                                                          />
                                                      </div>
@@ -1660,126 +1678,29 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                         </div>
                                     ) : !isTranscriptInvalid ? (
                                         <div className="text-gray-300 leading-relaxed whitespace-pre-wrap h-full flex flex-col">
-{isEditingTranscript ? (
+ {isEditingTranscript ? (
     <div className="flex flex-col flex-1 min-h-0 gap-2">
-        {showFindReplace && (
-                                                        <div className="relative p-2.5 bg-[#1a1a1a] rounded-xl border border-[#303030] flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-200 z-50 mb-2">
-                                                             {/* Row 1: Find + Nav */}
-                                                             <div className="flex items-center gap-2">
-                                                                 <div className="flex-1 relative group">
-                                                                     <input
-                                                                         type="text"
-                                                                         placeholder="Find text..."
-                                                                         value={findText}
-                                                                         onChange={(e) => setFindText(e.target.value)}
-                                                                         onKeyDown={(e) => {
-                                                                             if (e.key === 'Enter') {
-                                                                                 e.preventDefault();
-                                                                                 navigateMatch('next', true);
-                                                                             }
-                                                                         }}
-                                                                         className="w-full h-8 pl-3 pr-16 bg-[#121212] border border-[#303030] hover:border-[#505050] rounded-lg text-xs text-white placeholder-[#555555] focus:outline-none focus:border-blue-500/50 transition-all font-mono"
-                                                                     />
-                                                                     <div className="absolute right-1 top-0.5 bottom-0.5 flex items-center gap-0.5">
-                                                                         <button
-                                                                             onClick={() => setMatchCase(!matchCase)}
-                                                                             className={`p-1 rounded transition-all cursor-pointer ${matchCase ? 'bg-blue-600 text-white' : 'text-[#888888] hover:text-white hover:bg-white/10'}`}
-                                                                             title="Match Case"
-                                                                         >
-                                                                             <CaseSensitive className="w-3.5 h-3.5" />
-                                                                         </button>
-                                                                         <button
-                                                                             onClick={() => setMatchWholeWord(!matchWholeWord)}
-                                                                             className={`p-1 rounded transition-all cursor-pointer ${matchWholeWord ? 'bg-blue-600 text-white' : 'text-[#888888] hover:text-white hover:bg-white/10'}`}
-                                                                             title="Match Whole Word"
-                                                                         >
-                                                                             <WholeWord className="w-3.5 h-3.5" />
-                                                                         </button>
-                                                                     </div>
-                                                                 </div>
-                                                                 <div className="flex items-center bg-[#121212] border border-[#303030] rounded-lg h-8 px-0.5">
-                                                                     <button
-                                                                         onClick={() => navigateMatch('prev')}
-                                                                         className="p-1 text-[#888888] hover:text-white transition-colors disabled:opacity-10 cursor-pointer"
-                                                                         disabled={searchIndices.length === 0}
-                                                                     >
-                                                                         <ChevronUp className="w-4 h-4" />
-                                                                     </button>
-                                                                     <button
-                                                                         onClick={() => navigateMatch('next')}
-                                                                         className="p-1 text-[#888888] hover:text-white transition-colors disabled:opacity-10 cursor-pointer"
-                                                                         disabled={searchIndices.length === 0}
-                                                                     >
-                                                                         <ChevronDown className="w-4 h-4" />
-                                                                     </button>
-                                                                 </div>
-                                                             </div>
- 
-                                                             {/* Row 2: Replace */}
-                                                             <div className="flex items-center gap-2">
-                                                                 <input
-                                                                     type="text"
-                                                                     placeholder="Replace with..."
-                                                                     value={replaceText}
-                                                                     onChange={(e) => setReplaceText(e.target.value)}
-                                                                     className="w-full h-8 px-3 bg-[#121212] border border-[#303030] hover:border-[#505050] rounded-lg text-xs text-white placeholder-[#555555] focus:outline-none focus:border-blue-500/50 transition-all font-mono"
-                                                                 />
-                                                             </div>
- 
-                                                             {/* Row 3: Count + Replace All */}
-                                                             <div className="flex justify-between items-center px-1">
-                                                                 <div className="text-[10px] font-bold tracking-widest uppercase">
-                                                                     {findText ? (
-                                                                         searchIndices.length > 0 ? (
-                                                                             <span className="text-blue-400">
-                                                                                 {currentSearchIndex + 1} OF {searchIndices.length} MATCHES
-                                                                             </span>
-                                                                         ) : (
-                                                                             <span className="text-red-500/70">No results</span>
-                                                                         )
-                                                                     ) : null
-                                                                     }
-                                                                 </div>
-                                                                 <div className="flex items-center gap-1.5">
-                                                                     <button
-                                                                         onClick={handleReplace}
-                                                                         disabled={!findText || searchIndices.length === 0}
-                                                                         className="h-7 px-3 bg-white/5 hover:bg-white/10 text-white text-[9px] font-bold uppercase tracking-widest rounded-md transition-all cursor-pointer border border-white/5 active:scale-95 disabled:opacity-30"
-                                                                     >
-                                                                         Replace
-                                                                     </button>
-                                                                     <button
-                                                                         onClick={handleReplaceAll}
-                                                                         disabled={!findText || searchIndices.length === 0}
-                                                                         className="h-7 px-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 text-white text-[9px] font-bold uppercase tracking-widest rounded-md transition-all cursor-pointer active:scale-95"
-                                                                     >
-                                                                         Replace All
-                                                                     </button>
-                                                                 </div>
-                                                             </div>
-                                                        </div>
-                                                    )}
-                                                    {!isPreviewingTranscript ? (
+        {!isPreviewingTranscript ? (
                                                         <div className="relative flex-1 min-h-[500px] bg-black/20 rounded-lg border border-[#333] focus-within:border-green-500 overflow-hidden">
-                                                            <div
-                                                                ref={transcriptBackdropRef}
-                                                                className="absolute inset-0 w-full h-full p-3 m-0 border-none font-mono text-xs leading-relaxed whitespace-pre-wrap break-words overflow-y-auto pointer-events-none"
-                                                                style={{ color: 'transparent', scrollbarWidth: 'none', msOverflowStyle: 'none' }}
-                                                                aria-hidden="true"
-                                                            >
-                                                                {showFindReplace && searchIndices.length > 0 && currentSearchIndex !== -1 ? (
-                                                                    <>
-                                                                        {editedTranscript.substring(0, searchIndices[currentSearchIndex].start)}
-                                                                        <mark className="bg-green-500/50 rounded-sm text-transparent" style={{ color: 'transparent' }}>
-                                                                            {editedTranscript.substring(searchIndices[currentSearchIndex].start, searchIndices[currentSearchIndex].end)}
-                                                                        </mark>
-                                                                        {editedTranscript.substring(searchIndices[currentSearchIndex].end)}
-                                                                    </>
-                                                                ) : (
-                                                                    editedTranscript
-                                                                )}
-                                                                {editedTranscript.endsWith('\n') && <br />}
-                                                            </div>
+                                                             <div
+                                                                 ref={transcriptBackdropRef}
+                                                                 className="absolute inset-0 w-full h-full p-3 m-0 border-none font-mono text-xs leading-relaxed whitespace-pre-wrap break-words overflow-y-auto pointer-events-none"
+                                                                 style={{ color: 'transparent', scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+                                                                 aria-hidden="true"
+                                                             >
+                                                                 {showFindReplace && searchIndices.length > 0 && currentSearchIndex !== -1 ? (
+                                                                     <>
+                                                                         {editedTranscript.substring(0, searchIndices[currentSearchIndex].start)}
+                                                                         <mark className="bg-green-500/50 rounded-sm text-transparent" style={{ color: 'transparent' }}>
+                                                                             {editedTranscript.substring(searchIndices[currentSearchIndex].start, searchIndices[currentSearchIndex].end)}
+                                                                         </mark>
+                                                                         {editedTranscript.substring(searchIndices[currentSearchIndex].end)}
+                                                                     </>
+                                                                 ) : (
+                                                                     editedTranscript
+                                                                 )}
+                                                                 {editedTranscript.endsWith('\n') && <br />}
+                                                             </div>
                                                             <textarea
                                                                 ref={transcriptEditRef}
                                                                 value={editedTranscript}
@@ -1986,6 +1907,35 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                     onClose={() => setSelectedTerm(null)}
                     onSearch={onSearchInLibrary}
                 />
+            )}
+
+            {/* Image Upload Error Modal */}
+            {showImageUploadErrorModal && (
+                <div className="fixed inset-0 bg-black/80 z-60 flex items-center justify-center p-4">
+                    <div className="bg-[#1a1a1a] border border-[#303030] rounded-xl p-6 max-w-md w-full">
+                        <h3 className="text-lg font-bold text-white mb-4">Image Insertion Failed</h3>
+                        <p className="text-[#aaaaaa] text-sm mb-6 leading-relaxed">
+                            Failed to upload image to Imgur: {imageUploadErrorMessage}
+                        </p>
+                        <div className="flex gap-3">
+                            <button
+                                onClick={() => {
+                                    handleSaveImageAs(imageToSaveLocally);
+                                    setShowImageUploadErrorModal(false);
+                                }}
+                                className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-500 transition-colors cursor-pointer"
+                            >
+                                Save Image Locally
+                            </button>
+                            <button
+                                onClick={() => setShowImageUploadErrorModal(false)}
+                                className="flex-1 py-2.5 bg-[#333333] text-white rounded-lg text-sm font-bold hover:bg-[#444444] transition-colors cursor-pointer"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
         </>
     );

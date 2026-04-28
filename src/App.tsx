@@ -224,6 +224,17 @@ function App() {
         return () => document.removeEventListener('click', handleLinkClick);
     }, []);
 
+    // Disable Ctrl+J download shortcut
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') {
+                e.preventDefault();
+            }
+        };
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, []);
+
     useEffect(() => {
         const initialize = async () => {
             const savedPath = localStorage.getItem(BRAND.storageKey);
@@ -540,11 +551,11 @@ function App() {
                 </div>
             )}
 
-            <div className={`${navigationOrientation === 'vertical' ? 'ml-16' : ''} container mx-auto px-4 pt-4`}>
+            <div className={`${navigationOrientation === 'vertical' ? 'ml-16' : ''} px-4 pt-4`}>
                 <header className="mb-10 relative z-40 transition-all">
                     {/* Top bar - only show in horizontal mode */}
                     {navigationOrientation === 'horizontal' && (
-                        <div className="flex items-center justify-between mb-12 relative max-w-7xl mx-auto border-b border-[#272727] pb-6">
+                        <div className="flex items-center justify-between mb-12 relative border-b border-[#272727] pb-6">
                             <div className="flex items-center gap-3">
                                 <img
                                     src={BRAND.logo}
@@ -593,7 +604,7 @@ function App() {
                                         <ChevronDown className="w-5 h-5" />
                                     </button>
                                     {showGlossaryMenu && (
-                                        <div className="absolute top-full right-0 mt-2 w-32 bg-[#272727] border border-[#3f3f3f] rounded-lg shadow-xl z-50 overflow-hidden">
+                                        <div className="absolute top-full right-0 mt-2 w-32 bg-[#272727] border border-[#3f3f3f] rounded-lg shadow-xl z-51 overflow-hidden">
                                             <button
                                                 onClick={() => { setGlossarySearchQuery(""); setViewMode('glossary'); setShowGlossaryMenu(false); }}
                                                 className={`w-full text-left px-4 py-2 text-sm hover:bg-[#3f3f3f] cursor-pointer ${viewMode === 'glossary' ? 'text-white font-bold' : 'text-gray-300'}`}

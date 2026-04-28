@@ -1,11 +1,9 @@
 import { useEffect, useState, useMemo } from 'react';
 import { getGlossaryTerms, addGlossaryTerm, deleteGlossaryTerm, type GlossaryTerm } from '../api';
-import { Plus, X, Pencil, Eye, EyeOff } from 'lucide-react';
+import { Plus, X, Pencil } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { normalizeText } from '../lib/utils';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { handleMarkdownKeyDown } from './Sidebar';
 
 export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'title' | 'transcript' | 'tag' | 'summary') => void, allowModification?: boolean, onChange?: () => void }) {
@@ -17,13 +15,9 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
     const [selectedTerm, setSelectedTerm] = useState<GlossaryTerm | null>(null);
     const [termToDelete, setTermToDelete] = useState<GlossaryTerm | null>(null);
     const [termToEdit, setTermToEdit] = useState<{ originalTerm: string, term: string, definition: string } | null>(null);
-    const [isPreviewEdit, setIsPreviewEdit] = useState(false);
+    const [showGlossaryTags, setShowGlossaryTags] = useState(true);
 
-    useEffect(() => {
-      if (termToEdit) {
-        setIsPreviewEdit(false);
-      }
-    }, [termToEdit]);
+
 
     useEffect(() => {
         loadTerms();
@@ -40,7 +34,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
 
     const handleAdd = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!newTerm.trim() || !newDefinition.trim()) return;
+        if (!newTerm.trim() || (showGlossaryTags && !newDefinition.trim())) return;
         await addGlossaryTerm(newTerm.trim(), newDefinition.trim());
         setNewTerm("");
         setNewDefinition("");
@@ -60,7 +54,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
 
     const handleEditSave = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!termToEdit || !termToEdit.term.trim() || !termToEdit.definition.trim()) return;
+        if (!termToEdit || !termToEdit.term.trim() || (showGlossaryTags && !termToEdit.definition.trim())) return;
 
         if (termToEdit.term.trim() !== termToEdit.originalTerm) {
             await deleteGlossaryTerm(termToEdit.originalTerm);
@@ -77,12 +71,18 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
     const filteredTerms = useMemo(() => {
         const isDef = searchQuery.includes("definition_search:");
         const q = normalizeText(searchQuery.replace(/term_search:/g, '').replace(/definition_search:/g, '').replace(/"/g, '').trim());
-        if (!q) return terms;
-        return terms.filter(t => {
+        let filtered = terms;
+        if (showGlossaryTags) {
+            filtered = terms.filter(t => t.definition.trim().length > 0);
+        } else {
+            filtered = terms.filter(t => t.definition.trim().length === 0);
+        }
+        if (!q) return filtered;
+        return filtered.filter(t => {
             if (isDef) return normalizeText(t.definition).includes(q);
             return normalizeText(t.term).includes(q);
         });
-    }, [terms, searchQuery]);
+    }, [terms, searchQuery, showGlossaryTags]);
 
     const groupedTerms = useMemo(() => {
         const groups: Record<string, GlossaryTerm[]> = {};
@@ -105,19 +105,27 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
 
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
-            <div className="flex justify-between items-center mb-6 max-w-5xl mx-auto px-4">
+            <div className="flex justify-between items-center mb-6 px-4">
                 <h2 className="text-xl font-bold text-white">Glossary</h2>
-                {allowModification && (
+                <div className="flex items-center gap-3">
                     <button
-                        onClick={() => setShowAddModal(true)}
-                        className="flex items-center gap-1.5 px-2 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-md transition-colors text-[11px] font-semibold cursor-pointer"
+                        onClick={() => setShowGlossaryTags(!showGlossaryTags)}
+                        className="flex items-center gap-2 px-3 py-1.5 bg-[#272727] hover:bg-[#3f3f3f] text-white rounded-md transition-colors text-[11px] font-semibold cursor-pointer"
                     >
-                        <Plus className="w-4 h-4" /> Add Term
+                        {showGlossaryTags ? "Standard Glossary Tags" : "Quick Tags"}
                     </button>
-                )}
+                    {allowModification && (
+                        <button
+                            onClick={() => setShowAddModal(true)}
+                            className="flex items-center gap-1.5 px-2 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-md transition-colors text-[11px] font-semibold cursor-pointer"
+                        >
+                            <Plus className="w-4 h-4" /> Add Term
+                        </button>
+                    )}
+                </div>
             </div>
 
-            <div className="max-w-5xl mx-auto px-4">
+            <div className="px-4">
                 {terms.length === 0 ? (
                     <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                         <p className="text-xl font-bold text-white mb-2">No glossary terms have been added</p>
@@ -125,8 +133,8 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                     </div>
                 ) : filteredTerms.length === 0 ? (
                     <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
-                        <p className="text-xl font-bold text-white mb-2">No terms found</p>
-                        <p className="text-md">No terms match your search.</p>
+                        <p className="text-xl font-bold text-white mb-2">No {showGlossaryTags ? "glossary tags" : "quick tags"} found</p>
+                        <p className="text-md">No {showGlossaryTags ? "glossary tags" : "quick tags"} match your search.</p>
                     </div>
                 ) : (
                     <div className="space-y-8">
@@ -169,9 +177,9 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                                 </ul>
                             </div>
                         ))}
-                    </div>
-                )}
-            </div>
+                                  </div>
+                              )}
+                         </div>
 
             {/* Add Modal */}
             {showAddModal && (
@@ -188,7 +196,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                         <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
                             <div className="flex items-center gap-2 text-gray-200">
                                 <Plus className="w-4 h-4" />
-                                <h2 className="text-lg font-bold">Add Glossary Term</h2>
+                                <h2 className="text-lg font-bold">Add {showGlossaryTags ? "Glossary Tag" : "Quick Tag"}</h2>
                             </div>
                             <button type="button" onClick={() => setShowAddModal(false)} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
                                 <X className="w-5 h-5" />
@@ -197,30 +205,32 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
 
                         {/* Content */}
                         <div className="p-6 space-y-6">
-                            <div>
-                                <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Term Name</label>
-                                <input
-                                    type="text"
-                                    autoFocus
-                                    required
-                                    value={newTerm}
-                                    onChange={e => setNewTerm(e.target.value)}
-                                    className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600 transition-all placeholder-gray-600"
-                                    placeholder="Enter term..."
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Definition</label>
-                                <textarea
-                                    required
-                                    value={newDefinition}
-                                    onChange={e => setNewDefinition(e.target.value)}
-                                    onKeyDown={(e) => handleMarkdownKeyDown(e, newDefinition, setNewDefinition)}
-                                    rows={8}
-                                    className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600 transition-all resize-none placeholder-gray-600"
-                                    placeholder="Enter definition (Markdown supported)..."
-                                />
-                            </div>
+                             <div>
+                                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Term Name</label>
+                                 <input
+                                     type="text"
+                                     autoFocus
+                                     required
+                                     value={newTerm}
+                                     onChange={e => setNewTerm(e.target.value)}
+                                     className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600 transition-all placeholder-gray-600"
+                                     placeholder="Enter term..."
+                                 />
+                             </div>
+                             {showGlossaryTags && (
+                                 <div>
+                                     <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Definition</label>
+                                     <textarea
+                                         required
+                                         value={newDefinition}
+                                         onChange={e => setNewDefinition(e.target.value)}
+                                         onKeyDown={(e) => handleMarkdownKeyDown(e, newDefinition, setNewDefinition)}
+                                         rows={8}
+                                         className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600 transition-all resize-none placeholder-gray-600"
+                                         placeholder="Enter definition (Markdown supported)..."
+                                     />
+                                 </div>
+                             )}
                         </div>
 
                         {/* Footer */}
@@ -258,7 +268,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                         <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
                             <div className="flex items-center gap-2 text-gray-200">
                                 <Pencil className="w-4 h-4" />
-                                <h2 className="text-lg font-bold">Edit Glossary Term</h2>
+                                <h2 className="text-lg font-bold">Edit {showGlossaryTags ? "Glossary Tag" : "Quick Tag"}</h2>
                             </div>
                             <button type="button" onClick={() => setTermToEdit(null)} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
                                 <X className="w-5 h-5" />
@@ -267,27 +277,29 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
 
                         {/* Content */}
                         <div className="p-6 space-y-6">
-                            <div>
-                                <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Term Name</label>
-                                <input
-                                    type="text"
-                                    required
-                                    value={termToEdit.term}
-                                    onChange={e => setTermToEdit({ ...termToEdit, term: e.target.value })}
-                                    className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all placeholder-gray-600"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Definition</label>
-                                <textarea
-                                    required
-                                    value={termToEdit.definition}
-                                    onChange={e => setTermToEdit(prev => ({ ...prev, definition: e.target.value }))}
-                                    onKeyDown={(e) => handleMarkdownKeyDown(e, termToEdit.definition, (val) => setTermToEdit(prev => ({ ...prev, definition: val })))}
-                                    rows={8}
-                                    className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all resize-none placeholder-gray-600"
-                                />
-                            </div>
+                             <div>
+                                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Term Name</label>
+                                 <input
+                                     type="text"
+                                     required
+                                     value={termToEdit.term}
+                                     onChange={e => setTermToEdit({ ...termToEdit, term: e.target.value })}
+                                     className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all placeholder-gray-600"
+                                 />
+                             </div>
+                             {showGlossaryTags && (
+                                 <div>
+                                     <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Definition</label>
+                                      <textarea
+                                          required
+                                          value={termToEdit.definition}
+                                          onChange={e => setTermToEdit(prev => ({ ...prev, definition: e.target.value }))}
+                                          onKeyDown={(e) => handleMarkdownKeyDown(e, termToEdit.definition, (val) => setTermToEdit(prev => ({ ...prev, definition: val })))}
+                                          rows={8}
+                                          className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all resize-none placeholder-gray-600"
+                                      />
+                                 </div>
+                             )}
                         </div>
 
                         {/* Footer */}

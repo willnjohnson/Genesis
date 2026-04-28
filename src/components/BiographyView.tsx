@@ -61,7 +61,15 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
     const loadEntries = async () => {
         try {
             const rows = await getBiographies();
-            setEntries(rows);
+            // Deduplicate entries based on handle (case-insensitive)
+            const uniqueRows = new Map<string, BiographyEntry>();
+            rows.forEach(row => {
+                const key = row.handle.toLowerCase();
+                if (!uniqueRows.has(key)) {
+                    uniqueRows.set(key, row);
+                }
+            });
+            setEntries(Array.from(uniqueRows.values()));
         } catch (error) {
             console.error('Failed to load biographies:', error);
             setEntries([]);
@@ -172,10 +180,10 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
 
     if (loading) return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
-            <div className="flex justify-between items-center mb-6 max-w-5xl mx-auto px-4">
+            <div className="flex justify-between items-center mb-6 px-4">
                 <h2 className="text-xl font-bold text-white">Biography</h2>
             </div>
-            <div className="max-w-5xl mx-auto px-4">
+            <div className="px-4">
                 <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mx-auto mb-4" />
                     <p className="text-sm">Loading biographies...</p>
@@ -186,11 +194,11 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
 
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
-            <div className="flex justify-between items-center mb-6 max-w-5xl mx-auto px-4">
+            <div className="flex justify-between items-center mb-6 px-4">
                 <h2 className="text-xl font-bold text-white">Biography</h2>
             </div>
 
-            <div className="max-w-5xl mx-auto px-4">
+            <div className="px-4">
                 {entries.length === 0 ? (
                     <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                         <p className="text-xl font-bold text-white mb-2">No people yet</p>
@@ -380,7 +388,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200" onClick={onClose}>
-            <div onClick={(e) => e.stopPropagation()} className="bg-white dark:bg-[#0f0f0f] border border-gray-200 dark:border-[#303030] rounded-2xl w-full max-w-[1400px] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 h-[90vh]">
+            <div onClick={(e) => e.stopPropagation()} className="bg-white dark:bg-[#0f0f0f] border border-gray-200 dark:border-[#303030] rounded-2xl w-full max-w-6xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 h-[90vh]">
                         <div className="px-6 py-4 border-b border-gray-200 dark:border-[#303030] flex items-center justify-between bg-gray-100 dark:bg-[#141414]">
                     <div className="flex items-center gap-3 pr-4 overflow-hidden">
                         <FileText className="w-5 h-5 text-gray-400 shrink-0" />
@@ -399,40 +407,40 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                      </div>
                 </div>
 
-                 <div className="flex-1 flex flex-row min-h-0">
-                     {/* Main Content: Bio */}
-                      <div className="flex-1 border-r border-gray-200 dark:border-[#272727] overflow-y-auto p-6">
-                          <h3 className="text-lg font-bold text-black dark:text-white mb-4">About</h3>
-                          <div className="leading-relaxed prose dark:prose-invert prose-lg max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
-                              <ReactMarkdown
-                                  remarkPlugins={[remarkGfm]}
-                                  components={{
-                                      a: ({ node, ...props }) => (
-                                          <a
-                                              {...props}
-                                              href="#"
-                                              onClick={(e) => {
-                                                  e.preventDefault();
-                                                  if (props.href) openExternalUrl(props.href);
-                                              }}
-                                              className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
-                                          />
-                                      ),
-                                      img: ({ node, ...props }) => (
-                                          <img
-                                              {...props}
-                                              className="rounded-xl border border-white/10"
-                                          />
-                                      )
-                                  }}
-                              >
-                                  {biography.bio?.trim() || '_No biography yet._'}
-                              </ReactMarkdown>
-                          </div>
-                     </div>
+                  <div className="flex-1 flex flex-col lg:flex-row min-h-0">
+                      {/* Main Content: Bio */}
+                       <div className="flex-1 border-b lg:border-b-0 lg:border-r border-gray-200 dark:border-[#272727] overflow-y-auto p-6">
+                           <h3 className="text-lg font-bold text-black dark:text-white mb-4">About</h3>
+                           <div className="leading-relaxed prose dark:prose-invert prose-lg max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
+                               <ReactMarkdown
+                                   remarkPlugins={[remarkGfm]}
+                                   components={{
+                                       a: ({ node, ...props }) => (
+                                           <a
+                                               {...props}
+                                               href="#"
+                                               onClick={(e) => {
+                                                   e.preventDefault();
+                                                   if (props.href) openExternalUrl(props.href);
+                                               }}
+                                               className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
+                                           />
+                                       ),
+                                       img: ({ node, ...props }) => (
+                                           <img
+                                               {...props}
+                                               className="rounded-xl border border-white/10"
+                                           />
+                                       )
+                                   }}
+                               >
+                                   {biography.bio?.trim() || '_No biography yet._'}
+                               </ReactMarkdown>
+                           </div>
+                      </div>
 
-                      {/* Sidebar Content: Latest Videos */}
-                      <div className="w-96 bg-gray-50 dark:bg-[#0f0f0f] flex flex-col p-6 space-y-4">
+                       {/* Sidebar Content: Latest Videos */}
+                       <div className="w-full lg:w-96 bg-gray-50 dark:bg-[#0f0f0f] flex flex-col p-6 space-y-4">
                           <div className="flex items-center justify-between mb-4">
                               <h3 className="text-lg font-bold text-black dark:text-white">Latest Videos</h3>
                              {videos.length > 0 && (

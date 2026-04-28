@@ -164,7 +164,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
         ("showSearch", "true"),
         ("allowDeletionLibrary", "true"),
         ("allowModificationGlossary", "true"),
-        ("showSummarizeButton", "true"),
+        ("showSummarizeButton", "false"),
         ("showSummarizeOllama", "true"),
         ("showSummarizeVenice", "true"),
         ("showSynthesizeVenice", "true"),

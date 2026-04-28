@@ -381,7 +381,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     }, [facetMenuIndex]);
 
     return (
-        <form onSubmit={handleSubmit} className="w-full max-w-2xl mx-auto mb-10 px-4 relative z-50">
+        <form onSubmit={handleSubmit} className="w-full mb-10 px-4 relative z-50">
             <div className={`flex items-stretch justify-center transition-all ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
                 <div ref={containerRef} className="relative flex-1">
                     <div className={`flex flex-wrap items-center bg-[#121212] border border-[#404040] ${isLibraryOrGlossary ? 'rounded-full' : 'rounded-l-full'} focus-within:ring-1 focus-within:ring-[red] transition-all min-h-11 py-1 px-3 gap-2`}>
