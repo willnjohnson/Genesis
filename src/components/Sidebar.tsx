@@ -194,6 +194,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [showImageUploadErrorModal, setShowImageUploadErrorModal] = useState(false);
     const [imageUploadErrorMessage, setImageUploadErrorMessage] = useState("");
     const [imageToSaveLocally, setImageToSaveLocally] = useState("");
+    const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
 
     // Find & Replace state
     const [findText, setFindText] = useState("");
@@ -1508,37 +1509,38 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                                  className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
                                                                              />
                                                                          ),
-                                                                         img: ({ node, ...props }) => (
-                                                                            (() => {
-                                                                                const src = props.src || '';
-                                                                                const isHovered = summaryImageHover === src;
+                                                                          img: ({ node, ...props }) => (
+                                                                             (() => {
+                                                                                 const src = props.src || '';
+                                                                                 const isHovered = summaryImageHover === src;
 
-                                                                                return (
-                                                                                    <div
-                                                                                        className="relative inline-block my-2"
-                                                                                        onMouseEnter={() => setSummaryImageHover(src)}
-                                                                                        onMouseLeave={() => setSummaryImageHover(null)}
-                                                                                    >
-                                                                                        <img
-                                                                                            {...props}
-                                                                                            className="rounded-xl border border-white/10"
-                                                                                        />
-                                                                                        {isHovered && (
-                                                                                            <button
-                                                                                                onClick={(e) => {
-                                                                                                    e.stopPropagation();
-                                                                                                    handleDeleteSummaryImage(src);
-                                                                                                }}
-                                                                                                className="absolute top-2 right-2 w-6 h-6 bg-red-600 rounded-full flex items-center justify-center text-white hover:bg-red-500 z-10 cursor-pointer"
-                                                                                                title="Delete image"
-                                                                                            >
-                                                                                                <X className="w-4 h-4" />
-                                                                                            </button>
-                                                                                        )}
-                                                                                    </div>
-                                                                                );
-                                                                            })()
-                                                                         )
+                                                                                 return (
+                                                                                     <div
+                                                                                         className="relative inline-block my-2"
+                                                                                         onMouseEnter={() => setSummaryImageHover(src)}
+                                                                                         onMouseLeave={() => setSummaryImageHover(null)}
+                                                                                     >
+                                                                                         <img
+                                                                                             {...props}
+                                                                                             className="rounded-xl border border-white/10 cursor-pointer"
+                                                                                             onClick={() => setFullscreenImage(src)}
+                                                                                         />
+                                                                                         {isHovered && (
+                                                                                             <button
+                                                                                                 onClick={(e) => {
+                                                                                                     e.stopPropagation();
+                                                                                                     handleDeleteSummaryImage(src);
+                                                                                                 }}
+                                                                                                 className="absolute top-2 right-2 w-6 h-6 bg-red-600 rounded-full flex items-center justify-center text-white hover:bg-red-500 z-10 cursor-pointer"
+                                                                                                 title="Delete image"
+                                                                                             >
+                                                                                                 <X className="w-4 h-4" />
+                                                                                             </button>
+                                                                                         )}
+                                                                                     </div>
+                                                                                 );
+                                                                             })()
+                                                                          )
                                                                      }}
                                                                  >
                                                                      {editedSummary}
@@ -1597,12 +1599,13 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                         className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
                                                                     />
                                                                 ),
-                                                                img: ({ node, ...props }) => (
-                                                                    <img
-                                                                        {...props}
-                                                                        className="rounded-xl border border-white/10"
-                                                                    />
-                                                                )
+                                                                 img: ({ node, ...props }) => (
+                                                                     <img
+                                                                         {...props}
+                                                                         className="rounded-xl border border-white/10 cursor-pointer"
+                                                                         onClick={() => setFullscreenImage(props.src || '')}
+                                                                     />
+                                                                 )
                                                             }}
                                                         >
                                                             {summary}
@@ -1740,12 +1743,13 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                                     className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
                                                                                 />
                                                                             ),
-                                                                            img: ({ node, ...props }) => (
-                                                                                <img
-                                                                                    {...props}
-                                                                                    className="rounded-xl border border-white/10"
-                                                                                />
-                                                                            )
+                                                                             img: ({ node, ...props }) => (
+                                                                                 <img
+                                                                                     {...props}
+                                                                                     className="rounded-xl border border-white/10 cursor-pointer"
+                                                                                     onClick={() => setFullscreenImage(props.src || '')}
+                                                                                 />
+                                                                             )
                                                                         }}
                                                                     >
                                                                         {editedTranscript}
@@ -1937,6 +1941,20 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                     </div>
                 </div>
             )}
+        {/* Fullscreen Image Modal */}
+        {fullscreenImage && (
+            <div
+                className="fixed inset-0 bg-black/90 z-[100] flex items-center justify-center p-8 cursor-pointer"
+                onClick={() => setFullscreenImage(null)}
+            >
+                <img
+                    src={fullscreenImage}
+                    alt="Fullscreen view"
+                    className="max-w-full max-h-full object-contain"
+                    onClick={(e) => e.stopPropagation()}
+                />
+            </div>
+        )}
         </>
     );
 }

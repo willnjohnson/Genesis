@@ -552,10 +552,10 @@ function App() {
             )}
 
             <div className={`${navigationOrientation === 'vertical' ? 'ml-16' : ''} px-4 pt-4`}>
-                <header className="mb-10 relative z-40 transition-all">
+                <header className="mb-4 relative z-40 transition-all">
                     {/* Top bar - only show in horizontal mode */}
                     {navigationOrientation === 'horizontal' && (
-                        <div className="flex items-center justify-between mb-12 relative border-b border-[#272727] pb-6">
+                        <div className="flex items-center justify-between mb-6 relative border-b border-[#272727] pb-2">
                             <div className="flex items-center gap-3">
                                 <img
                                     src={BRAND.logo}

@@ -108,7 +108,7 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
     return (
         <div className="w-full">
             {/* Header Row 1: Title and Actions */}
-            <div className="flex flex-col lg:flex-row justify-between items-center mb-8 gap-4 px-2">
+            <div className="flex flex-col lg:flex-row justify-between items-center mb-4 gap-4 px-2">
                 <div className="flex items-baseline gap-1.5 flex-shrink-0">
                     <h3 className="text-xl font-bold text-white">Videos</h3>
                     <span className="text-[#aaaaaa] text-sm font-medium">
@@ -121,7 +121,7 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                         <button
                             onClick={onSaveAll}
                             disabled={!!saveProgress}
-                            className={`px-3 py-1.5 bg-white text-black hover:bg-[#e5e5e5] rounded-lg text-sm font-semibold transition-colors disabled:opacity-50 flex items-center gap-2 ${!saveProgress ? 'cursor-pointer' : 'cursor-default'}`}
+                            className={`px-3 py-1.5 bg-white text-black hover:bg-[#e5e5e5] rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center gap-2 ${!saveProgress ? 'cursor-pointer' : 'cursor-default'}`}
                         >
                             {saveProgress ? (
                                 <>

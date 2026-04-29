@@ -38,7 +38,7 @@ export function Notification({ message, type = "info", onClose, duration = 3000 
 
     return (
         <div
-            className={`fixed bottom-6 right-6 z-[100] flex items-center gap-3 px-5 py-3 rounded-xl border bg-[#121212] border-[#303030] transition-all duration-300 transform ${isVisible ? "translate-y-0 opacity-100 scale-100" : "translate-y-4 opacity-0 scale-95"
+            className={`fixed bottom-6 left-6 z-[100] flex items-center gap-3 px-5 py-3 rounded-xl border bg-[#121212] border-[#303030] transition-all duration-300 transform ${isVisible ? "translate-y-0 opacity-100 scale-100" : "translate-y-4 opacity-0 scale-95"
                 } ${typeStyles}`}
         >
             <Icon className="w-5 h-5 flex-shrink-0" />

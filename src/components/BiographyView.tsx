@@ -194,7 +194,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
 
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
-            <div className="flex justify-between items-center mb-6 px-4">
+            <div className="flex justify-between items-center mb-4 px-4">
                 <h2 className="text-xl font-bold text-white">Biography</h2>
             </div>
 
