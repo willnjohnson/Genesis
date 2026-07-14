@@ -86,6 +86,10 @@ export async function getSavedVideos(videoType?: string, includeContent?: boolea
     return await invoke("fetch_saved_videos", { videoType, includeContent });
 }
 
+export async function searchLibrary(query: string, videoType?: string): Promise<SearchResponse> {
+    return await invoke("search_library", { query, videoType });
+}
+
 export async function deleteVideo(id: string): Promise<void> {
     await invoke("delete_video", { videoId: id });
 }

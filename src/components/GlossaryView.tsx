@@ -6,7 +6,7 @@ import { TermDefinitionModal } from './TermDefinitionModal';
 import { normalizeText } from '../lib/utils';
 import { handleMarkdownKeyDown } from './Sidebar';
 
-export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'title' | 'transcript' | 'tag' | 'summary') => void, allowModification?: boolean, onChange?: () => void }) {
+export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'library') => void, allowModification?: boolean, onChange?: () => void }) {
     const [terms, setTerms] = useState<GlossaryTerm[]>([]);
     const [loading, setLoading] = useState(true);
     const [showAddModal, setShowAddModal] = useState(false);

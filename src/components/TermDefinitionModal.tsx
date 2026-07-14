@@ -1,4 +1,4 @@
-import { X, FileText, Hash, Type, Sparkles } from 'lucide-react';
+import { X, FileText, Hash, Search } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import React, { useEffect, useState } from 'react';
@@ -12,20 +12,16 @@ interface GlossaryTerm {
 interface Props {
     term: GlossaryTerm;
     onClose: () => void;
-    onSearch: (term: string, mode: 'title' | 'transcript' | 'tag' | 'summary') => void;
+    onSearch: (term: string, mode: 'tag' | 'library') => void;
 }
 
 export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
     const [showTag, setShowTag] = useState(true);
-    const [showTitle, setShowTitle] = useState(true);
-    const [showTranscript, setShowTranscript] = useState(true);
-    const [showSummary, setShowSummary] = useState(true);
+    const [showLibrarySearch, setShowLibrarySearch] = useState(true);
 
     useEffect(() => {
         getSetting('showGlossarySearchByTag').then(v => { if (v === 'false') setShowTag(false); });
-        getSetting('showGlossarySearchTermInTitle').then(v => { if (v === 'false') setShowTitle(false); });
-        getSetting('showGlossarySearchTermInTranscript').then(v => { if (v === 'false') setShowTranscript(false); });
-        getSetting('showGlossarySearchTermInAISummary').then(v => { if (v === 'false') setShowSummary(false); });
+        getSetting('showGlossarySearchInLibrary').then(v => { if (v === 'false') setShowLibrarySearch(false); });
     }, []);
 
     return (
@@ -93,40 +89,16 @@ export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
                                 Search by Tag
                             </button>
                         )}
-                        {showTitle && (
+                        {showLibrarySearch && (
                             <button
                                 onClick={() => {
-                                    onSearch(term.term, 'title');
+                                    onSearch(term.term, 'library');
                                     onClose();
                                 }}
                                 className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
                             >
-                                <Type className="w-3.5 h-3.5" />
-                                Search Term in Title
-                            </button>
-                        )}
-                        {showTranscript && (
-                            <button
-                                onClick={() => {
-                                    onSearch(term.term, 'transcript');
-                                    onClose();
-                                }}
-                                className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
-                            >
-                                <FileText className="w-3.5 h-3.5" />
-                                Search Term in Transcript
-                            </button>
-                        )}
-                        {showSummary && (
-                            <button
-                                onClick={() => {
-                                    onSearch(term.term, 'summary');
-                                    onClose();
-                                }}
-                                className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
-                            >
-                                <Sparkles className="w-3.5 h-3.5" />
-                                Search Term in AI Summary
+                                <Search className="w-3.5 h-3.5" />
+                                Search in Library
                             </button>
                         )}
                     </div>

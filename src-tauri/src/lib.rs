@@ -8,7 +8,7 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.2.7";
+const VERSION: &str = "0.2.8";
 
 fn get_window_title() -> String {
     format!("{} v{}", APP_NAME, VERSION)
@@ -160,6 +160,7 @@ pub fn run() {
             commands::fetch_video_handle,
             commands::save_video,
             commands::fetch_saved_videos,
+            commands::search_library,
             commands::delete_video,
             commands::check_video_exists,
             commands::bulk_save_videos,
@@ -266,8 +267,10 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                let db_path = get_db_path(app_handle);
-                let _ = db::vacuum_db(&db_path);
+                // On exit, we can perform cleanup tasks here if needed;
+                // Forego this feature for now.
+                // let db_path = get_db_path(app_handle);
+                // let _ = db::vacuum_db(&db_path);
             }
         });
 }

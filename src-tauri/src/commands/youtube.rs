@@ -9,6 +9,46 @@ fn decode_html(text: &str) -> String {
     html_escape::decode_html_entities(text).to_string()
 }
 
+/// Fetches a video's transcript from YouTube, retrying transient failures a few times and
+/// rejecting bot-detection/rate-limit pages that can slip through as transcript text.
+async fn fetch_transcript_with_retries(video_id: &str) -> Result<String, String> {
+    let client_android = YouTubeClient::new(ClientType::Android);
+
+    let mut transcript = String::new();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let p = client_android.player(video_id).await?;
+        match youtube::fetch_transcript(&p).await {
+            Ok(Some(t)) if !t.trim().is_empty() => { transcript = t; break; }
+            Ok(_) | Err(_) if attempts < 3 => {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
+            _ => break,
+        }
+    }
+
+    if transcript.is_empty() {
+        return Err("Cannot fetch transcript for this video.".to_string());
+    }
+
+    // Reject transcript if it contains YouTube's bot-detection / rate-limit text. This catches
+    // cases where the error slipped through XML parsing as text nodes.
+    let transcript_lower = transcript.to_lowercase();
+    let bot_phrases = [
+        "but your computer or network may be sending automated queries",
+        "our systems have detected unusual traffic",
+        "to protect our users, we can't process your request right now",
+        "please solve this captcha",
+        "unusual traffic from your computer network",
+    ];
+    if bot_phrases.iter().any(|phrase| transcript_lower.contains(phrase)) {
+        return Err("YouTube returned a bot-detection page instead of a transcript. Please wait a moment and try again.".to_string());
+    }
+
+    Ok(transcript)
+}
+
 #[command]
 pub async fn resolve_channel(_app: tauri::AppHandle, query: String) -> Result<ChannelInfo, String> {
     match youtube::extract_channel_id(&query).await? {
@@ -284,6 +324,15 @@ pub async fn fetch_transcript(app: tauri::AppHandle, video_id: String) -> Result
 #[command]
 pub async fn save_transcript(app: tauri::AppHandle, video_id: String, transcript: String) -> Result<(), String> {
     let db_path = get_db_path(&app);
+
+    // An empty transcript (e.g. the user cleared the "." placeholder left after transcript
+    // text was freed post-summarization) means "re-pull this from YouTube", not "save empty".
+    let transcript = if transcript.trim().is_empty() {
+        fetch_transcript_with_retries(&video_id).await?
+    } else {
+        transcript
+    };
+
     db::save_transcript(&db_path, &video_id, &transcript).map_err(|e| e.to_string())
 }
 
@@ -299,7 +348,7 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
         }
 
         let has_transcript = !v_data.4.trim().is_empty();
-        let has_summary = !v_data.10.trim().is_empty();
+        let has_summary = db::has_real_summary(&v_data.10);
         return Ok(Video {
             id: v_data.0,
             title: v_data.1,
@@ -321,7 +370,6 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
     }
 
     let client_web = YouTubeClient::new(ClientType::Web);
-    let client_android = YouTubeClient::new(ClientType::Android);
     let player_web = client_web.player(&video_id).await?;
     let details = &player_web["videoDetails"];
 
@@ -339,37 +387,7 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
         }
     }
 
-    let mut transcript = String::new();
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        let p = client_android.player(&video_id).await?;
-        match youtube::fetch_transcript(&p).await {
-            Ok(Some(t)) if !t.trim().is_empty() => { transcript = t; break; }
-            Ok(_) | Err(_) if attempts < 3 => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            }
-            _ => break,
-        }
-    }
-
-    if transcript.is_empty() {
-        return Err("Cannot save video without transcript.".to_string());
-    }
-
-    // Final guard: reject transcript if it contains YouTube's bot-detection / rate-limit text.
-    // This catches cases where the error slipped through XML parsing as text nodes.
-    let transcript_lower = transcript.to_lowercase();
-    let bot_phrases = [
-        "but your computer or network may be sending automated queries",
-        "our systems have detected unusual traffic",
-        "to protect our users, we can't process your request right now",
-        "please solve this captcha",
-        "unusual traffic from your computer network",
-    ];
-    if bot_phrases.iter().any(|phrase| transcript_lower.contains(phrase)) {
-        return Err("YouTube returned a bot-detection page instead of a transcript. Please wait a moment and try again.".to_string());
-    }
+    let transcript = fetch_transcript_with_retries(&video_id).await?;
 
     let title = decode_html(details["title"].as_str().unwrap_or("Unknown"));
     let author = if let Some(authors) = details["author"].as_array() {
@@ -400,11 +418,13 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
 
-    db::save_video(&db_path, &video_id, &title, &author, length, &transcript, view_count, published_at, handle.as_deref().unwrap_or(""), video_type, summary.as_deref())
-        .map_err(|e| e.to_string())?;
+    // Upsert the biography row before saving the video so save_video's channel-info footer
+    // (joined against biographies.handle) can find it on this very first save.
     if let Some(ref h) = handle {
         let _ = db::upsert_biography_from_video(&db_path, h, &author);
     }
+    db::save_video(&db_path, &video_id, &title, &author, length, &transcript, view_count, published_at, handle.as_deref().unwrap_or(""), video_type, summary.as_deref())
+        .map_err(|e| e.to_string())?;
 
     let date_added = {
         let conn = rusqlite::Connection::open(&db_path).ok();
@@ -442,6 +462,19 @@ pub async fn fetch_saved_videos(
     let db_path = get_db_path(&app);
     db::init_db(&db_path).map_err(|e| e.to_string())?;
     let videos = db::list_videos(&db_path, video_type.as_deref(), include_content.unwrap_or(false))
+        .map_err(|e| e.to_string())?;
+    Ok(VideoResponse { videos, continuation: None, total_count: None })
+}
+
+#[command]
+pub async fn search_library(
+    app: tauri::AppHandle,
+    query: String,
+    video_type: Option<String>,
+) -> Result<VideoResponse, String> {
+    let db_path = get_db_path(&app);
+    db::init_db(&db_path).map_err(|e| e.to_string())?;
+    let videos = db::search_library_videos(&db_path, &query, video_type.as_deref())
         .map_err(|e| e.to_string())?;
     Ok(VideoResponse { videos, continuation: None, total_count: None })
 }

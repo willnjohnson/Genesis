@@ -11,7 +11,7 @@ A lightweight desktop application for bookmarking and viewing YouTube transcript
 - **Video Search:** Browse a single video by entering a YouTube video URL.
 
 - **Bookmark videos:** Save videos to your library for quick access.
-- **Search your bookmarks:** Filter through your bookmarked videos by title.
+- **Search your bookmarks:** Filter through your bookmarked videos (uses FTS5).
 - **View transcripts:** View transcripts of videos in your library.
 
 - **AI Summarization:** Get AI-powered summaries of video transcripts using either:
@@ -62,6 +62,12 @@ A lightweight desktop application for bookmarking and viewing YouTube transcript
 To generate a production executable for your platform:
 ```bash
 npx tauri build
+```
+
+Or for specific branding:
+```bash
+npm run tauri:build:genesis
+npm run tauri:build:kinesis
 ```
 
 ## Tech Stack

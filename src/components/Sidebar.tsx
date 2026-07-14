@@ -39,7 +39,7 @@ interface Props {
     onHandleClick?: (handle: string) => void;
     onAddTag?: (term: string) => void;
     onRemoveTag?: (term: string) => void;
-    onSearchInLibrary?: (term: string, mode: 'title' | 'transcript' | 'tag') => void;
+    onSearchInLibrary?: (term: string, mode: 'tag' | 'library') => void;
     initialTab?: 'transcript' | 'summary';
     showBiography?: boolean;
 }
@@ -503,8 +503,12 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         setIsSaving(true);
         try {
             await saveSummary(videoId, editedSummary);
-            setSummary(editedSummary);
-            if (onCacheSummary) onCacheSummary(videoId, editedSummary);
+            // save_summary appends a "Channel Info:" footer server-side; re-fetch so what's
+            // displayed/cached matches what's actually persisted.
+            const saved = await getSummary(videoId);
+            const displaySummary = saved || editedSummary;
+            setSummary(displaySummary);
+            if (onCacheSummary) onCacheSummary(videoId, displaySummary);
             setIsEditingSummary(false);
             if (onRefetch) onRefetch();
         } catch (e: any) {
@@ -619,7 +623,19 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                 });
             }
         }
-    }, [videoId, isOpen, pluginSummarizeEnabled, cachedSummaries, initialTab]);
+    }, [videoId, isOpen, pluginSummarizeEnabled, initialTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Keep summary text/flag in sync with the app-level cache without re-deriving which tab is
+    // shown. This must NOT touch showSummary: the effect above already reads cachedSummaries
+    // (via closure) whenever it runs on open/videoId changes, so re-running the tab-selection
+    // logic here too would immediately hide a summary the user just generated, since caching it
+    // (handleSummarize -> onCacheSummary) is exactly what changes this cachedSummaries reference.
+    useEffect(() => {
+        if (isOpen && videoId && cachedSummaries && cachedSummaries[videoId]) {
+            setSummary(cachedSummaries[videoId]);
+            setHasExistingSummary(true);
+        }
+    }, [cachedSummaries, videoId, isOpen]);
 
                     useEffect(() => {
         if (isOpen) {
@@ -658,10 +674,19 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         try {
             await onSave(summary);
             setExistsInDb(true);
+            if (summary) {
+                // Saving appends a "Channel Info:" footer to the summary server-side; re-fetch
+                // so what's displayed/cached matches what's actually persisted.
+                const saved = await getSummary(videoId);
+                if (saved) {
+                    setSummary(saved);
+                    if (onCacheSummary) onCacheSummary(videoId, saved);
+                }
+            }
         } catch (e) {
             console.error('Save failed:', e);
         }
-    }, [videoId, onSave, summary]);
+    }, [videoId, onSave, summary, onCacheSummary]);
 
     const handleCopy = useCallback(() => {
         if (!transcript) return;
@@ -689,19 +714,26 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         setSummaryError(null);
         try {
             const result = await summarizeTranscript(transcript, handle, videoId);
-            setSummary(result);
-            setShowSummary(true);
-            setHasExistingSummary(true);
-            onSummaryGenerated?.();
-            if (videoId && onCacheSummary) onCacheSummary(videoId, result);
+            let displaySummary = result;
 
             if (videoId && existsInDb) {
                 try {
                     await saveSummary(videoId, result);
+                    // save_summary appends a "Channel Info:" footer server-side; re-fetch so
+                    // what's displayed matches what's actually persisted, instead of showing
+                    // the raw pre-footer text the summarizer returned.
+                    const saved = await getSummary(videoId);
+                    if (saved) displaySummary = saved;
                 } catch (e) {
                     console.error('Failed to save summary to DB:', e);
                 }
             }
+
+            setSummary(displaySummary);
+            setShowSummary(true);
+            setHasExistingSummary(true);
+            onSummaryGenerated?.();
+            if (videoId && onCacheSummary) onCacheSummary(videoId, displaySummary);
         } catch (err) {
             setSummaryError(err instanceof Error ? err.message : String(err));
         } finally {

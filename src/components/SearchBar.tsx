@@ -18,7 +18,7 @@ interface Props {
     initialQuery?: string;
 }
 
-export type SearchFacet = 'handle' | 'playlist' | 'video' | 'title_search' | 'transcript_search' | 'summary_search' | 'term_search' | 'definition_search' | 'tag_search' | 'person_search' | 'bio_search';
+export type SearchFacet = 'handle' | 'playlist' | 'video' | 'title_search' | 'term_search' | 'definition_search' | 'tag_search' | 'person_search' | 'bio_search';
 
 export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search', initialFacets = [], initialQuery = '', placeholder }: Props) {
     const [query, setQuery] = useState(initialQuery);
@@ -33,7 +33,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     const isGlossary = viewMode === 'glossary';
     const isBiography = viewMode === 'biography';
     const isLibraryOrGlossary = isLibrary || isGlossary || isBiography;
-    const isFilterSearchActive = facets.some(f => f.type === 'title_search' || f.type === 'transcript_search' || f.type === 'summary_search' || f.type === 'term_search' || f.type === 'definition_search');
+    const isFilterSearchActive = facets.some(f => f.type === 'title_search' || f.type === 'term_search' || f.type === 'definition_search');
 
     // Reset when view mode changes
     useEffect(() => {
@@ -109,9 +109,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             case 'handle': return <AtSign className="w-3 h-3" />;
             case 'playlist': return <ListVideo className="w-3 h-3" />;
             case 'video': return <span className="text-xs font-bold">{'>'}</span>;
-            case 'transcript_search':
             case 'definition_search': return <FileText className="w-3 h-3" />;
-            case 'summary_search': return <Lightbulb className="w-3 h-3" />;
             case 'title_search':
             case 'term_search': return <Type className="w-3 h-3" />;
             case 'person_search': return <AtSign className="w-3 h-3" />;
@@ -129,18 +127,15 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         } else if (isBiography) {
             patterns['person_search:'] = 'person_search';
             patterns['bio_search:'] = 'bio_search';
-        } else {
-            patterns['title_search:'] = 'title_search';
-            if (isLibrary) {
-                patterns['transcript_search:'] = 'transcript_search';
-                patterns['summary_search:'] = 'summary_search';
-                patterns['tag_search:'] = 'tag_search';
-            }
+        } else if (isLibrary) {
+            patterns['tag_search:'] = 'tag_search';
             patterns['handle:'] = 'handle';
             patterns['video:'] = 'video';
-            if (!isLibrary) {
-                patterns['playlist:'] = 'playlist';
-            }
+        } else {
+            patterns['title_search:'] = 'title_search';
+            patterns['handle:'] = 'handle';
+            patterns['video:'] = 'video';
+            patterns['playlist:'] = 'playlist';
         }
         return patterns;
     }, [isLibrary, isGlossary, isBiography]);
@@ -187,30 +182,11 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             }
         }
 
-        if (!isGlossary && !isBiography && (facets.length === 0 || (isLibrary && facets.length === 1 && (facets[0].type === 'title_search' || facets[0].type === 'transcript_search' || facets[0].type === 'summary_search' || facets[0].type === 'tag_search')))) {
+        if (!isGlossary && !isBiography && (facets.length === 0 || (isLibrary && facets.length === 1 && facets[0].type === 'tag_search'))) {
             const handle = extractHandle(val);
             const videoId = extractVideoId(val);
             const playlistId = !isLibrary ? extractPlaylistId(val) : null;
             const tagMatch = val.match(/^#(.+?)#?$/);
-
-            // Shortcuts: !s → summary_search, !t → transcript_search, !n → title_search
-            if (isLibrary) {
-                if (val === '!s' || val.startsWith('!s ')) {
-                    setFacets([{ type: 'summary_search', value: '' }]);
-                    setQuery(val.slice(2).trimStart());
-                    return;
-                }
-                if (val === '!t' || val.startsWith('!t ')) {
-                    setFacets([{ type: 'transcript_search', value: '' }]);
-                    setQuery(val.slice(2).trimStart());
-                    return;
-                }
-                if (val === '!n' || val.startsWith('!n ')) {
-                    setFacets([{ type: 'title_search', value: '' }]);
-                    setQuery(val.slice(2).trimStart());
-                    return;
-                }
-            }
 
             if (tagMatch && isLibrary) {
                 setFacets([{ type: 'tag_search', value: '' }]);
@@ -349,9 +325,6 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         }
         // Library mode
         return [
-            { type: 'title_search' as const, label: 'Title (!n)' },
-            { type: 'transcript_search' as const, label: 'Transcript (!t)' },
-            { type: 'summary_search' as const, label: 'AI Summary (!s)' },
             { type: 'tag_search' as const, label: 'Tag (#)' },
             { type: 'handle' as const, label: 'Channel (@)' },
             { type: 'video' as const, label: 'Video ID (>)' },
@@ -469,29 +442,16 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                                         <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!d</span>/ Definition Filter</span>
                                                     </code>
                                                 </>
+                                            ) : isLibrary ? (
+                                                <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                    <span>tag_search:</span>
+                                                    <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">#</span>/ Tags</span>
+                                                </code>
                                             ) : (
-                                                <>
-                                                    <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                                        <span>title_search:</span>
-                                                        <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!n</span>/ Title Filter</span>
-                                                    </code>
-                                                    {isLibrary && (
-                                                        <>
-                                                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                                                <span>transcript_search:</span>
-                                                                <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!t</span>/ Transcript Filter</span>
-                                                            </code>
-                                                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                                                <span>summary_search:</span>
-                                                                <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!s</span>/ AI Summary Filter</span>
-                                                            </code>
-                                                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                                                <span>tag_search:</span>
-                                                                <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">#</span>/ Tags</span>
-                                                            </code>
-                                                        </>
-                                                    )}
-                                                </>
+                                                <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                    <span>title_search:</span>
+                                                    <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!n</span>/ Title Filter</span>
+                                                </code>
                                             )}
                                             {!isLibraryOrGlossary && (
                                                 <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">

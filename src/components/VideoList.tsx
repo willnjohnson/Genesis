@@ -1,8 +1,42 @@
 import { Save, Trash2, Bookmark, ArrowDown, ArrowUp, Calendar, Users, Sparkles, FileText } from 'lucide-react';
 import { type Video, fetchImageAsDataUri, saveImage } from '../api';
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { format } from 'date-fns';
 import { save } from '@tauri-apps/plugin-dialog';
+
+// Mirrors the Tailwind breakpoints used by the grid className below (sm/md/lg/xl/2xl at
+// Tailwind's default 640/768/1024/1280/1536px) so the virtualizer knows how many cards land in
+// each rendered row without having to measure the DOM.
+function useColumnCount(compact: boolean) {
+    const getColumns = useCallback(() => {
+        const w = window.innerWidth;
+        if (compact) {
+            if (w >= 1536) return 8;
+            if (w >= 1280) return 6;
+            if (w >= 1024) return 5;
+            if (w >= 768) return 4;
+            if (w >= 640) return 3;
+            return 2;
+        }
+        if (w >= 1536) return 5;
+        if (w >= 1280) return 4;
+        if (w >= 1024) return 3;
+        if (w >= 640) return 2;
+        return 1;
+    }, [compact]);
+
+    const [columns, setColumns] = useState(getColumns);
+
+    useEffect(() => {
+        const onResize = () => setColumns(getColumns());
+        onResize();
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
+    }, [getColumns]);
+
+    return columns;
+}
 
 interface Props {
     videos: Video[];
@@ -98,6 +132,28 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
     const handleSortField = (field: SortField) => {
         setSortField(field);
     };
+
+    const columns = useColumnCount(compact);
+    const rows = useMemo(() => {
+        const out: Video[][] = [];
+        for (let i = 0; i < sortedVideos.length; i += columns) {
+            out.push(sortedVideos.slice(i, i + columns));
+        }
+        return out;
+    }, [sortedVideos, columns]);
+
+    const gridRef = useRef<HTMLDivElement>(null);
+    const [scrollMargin, setScrollMargin] = useState(0);
+    useLayoutEffect(() => {
+        setScrollMargin(gridRef.current?.offsetTop ?? 0);
+    }, [compact, isLibrary]);
+
+    const rowVirtualizer = useWindowVirtualizer({
+        count: rows.length,
+        estimateSize: () => (compact ? 210 : 270),
+        overscan: 4,
+        scrollMargin,
+    });
 
     const toggleSortOrder = () => {
         setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc');
@@ -207,107 +263,148 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
             </div>
 
 
-            <div className={`grid gap-x-3 gap-y-8 ${compact ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'}`}>
-                {sortedVideos.map((video) => (
+            <div ref={gridRef} style={{ position: 'relative', height: rowVirtualizer.getTotalSize() }}>
+                {rowVirtualizer.getVirtualItems().map((virtualRow) => (
                     <div
-                        key={video.id}
-                        className="group flex flex-col gap-2 cursor-pointer"
-                        onClick={() => onSelect(video)}
+                        key={virtualRow.key}
+                        ref={rowVirtualizer.measureElement}
+                        data-index={virtualRow.index}
+                        style={{
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            transform: `translateY(${virtualRow.start - rowVirtualizer.options.scrollMargin}px)`,
+                        }}
                     >
-                        <div className={`${compact ? 'aspect-[16/9]' : 'aspect-video'} w-full rounded-lg overflow-hidden bg-[#272727] relative`}>
-                            <img
-                                src={video.thumbnail}
-                                alt={video.title}
-                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                                loading="lazy"
-                                onContextMenu={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    handleSaveImageAs(video.thumbnail);
-                                }}
-                            />
-                        </div>
-
-                        <div className="flex gap-2 relative">
-                            <div className="flex flex-col flex-1 overflow-hidden">
-                                <h3 className={`${compact ? 'text-xs' : 'text-sm'} font-bold text-white line-clamp-2 leading-tight group-hover:text-white`}>
-                                    {video.title}
-                                </h3>
-
-                                <div className={`flex flex-col text-[#aaaaaa] ${compact ? 'text-[10px]' : 'text-[13px]'}`}>
-                                    <span
-                                        className="truncate"
-                                        title={`${(h => h ? `Handle: ${h}` : `Channel Name: ${video.author}`)(video.handle)}`}
-                                    >
-                                        {video.author || "YouTube Creator"}
-                                    </span>
-
-                                    <div className="flex items-center gap-1">
-                                        <span title={`Views: ${parseViewCount(video.viewCount).toLocaleString('en-US')}`}>
-                                            {formatViewCount(video.viewCount)} views
-                                        </span>
-                                        <span className="text-[8px]">•</span>
-                                        <span title={`Timestamp: ${video.publishedAt || 'Unknown'}`}>
-                                            {formatDate(video.publishedAt)}
-                                        </span>
-                                    </div>
-
-                                    {video.dateAdded && (
-                                        <div className="flex items-center justify-between mt-0.5 font-medium text-[10px]">
-                                            <div className="flex items-center gap-1 text-yellow-600">
-                                                <Bookmark className="w-2.5 h-2.5 fill-yellow-600" />
-                                                <span title={`Timestamp: ${video.dateAdded}`}>
-                                                    {formatDate(video.dateAdded)}
-                                                </span>
-                                            </div>
-                                            {/* Icons moved to absolute container below for better alignment and clickability */}
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-
-                            <div className="absolute bottom-0 right-0 flex items-center gap-1 z-20">
-                                {(video.hasTranscript ?? !!video.transcript) && (
-                                    <button 
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            if (onSelectWithTab) onSelectWithTab(video, 'transcript');
-                                        }}
-                                        className="p-0.5 text-green-600 hover:bg-green-600/10 rounded transition-colors cursor-pointer"
-                                        title="Transcript"
-                                    >
-                                        <FileText className="w-2.5 h-2.5" />
-                                    </button>
-                                )}
-                                {(video.hasSummary ?? !!video.summary) && (
-                                    <button 
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            if (onSelectWithTab) onSelectWithTab(video, 'summary');
-                                        }}
-                                        className="p-0.5 text-purple-600 hover:bg-purple-600/10 rounded transition-colors cursor-pointer"
-                                        title="AI Summary"
-                                    >
-                                        <Sparkles className="w-2.5 h-2.5" />
-                                    </button>
-                                )}
-                            </div>
-
-                            {onDelete && allowDeletion && (
-                                <button
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        onDelete(video);
-                                    }}
-                                    className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-[#3f3f3f] rounded-full transition-all text-white self-start hover:cursor-pointer z-10"
-                                    title="Remove"
-                                >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                            )}
+                        <div className={`grid gap-x-3 pb-8 ${compact ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'}`}>
+                            {rows[virtualRow.index].map((video) => (
+                                <VideoCard
+                                    key={video.id}
+                                    video={video}
+                                    compact={compact}
+                                    onSelect={onSelect}
+                                    onSelectWithTab={onSelectWithTab}
+                                    onDelete={onDelete}
+                                    allowDeletion={allowDeletion}
+                                    onSaveImageAs={handleSaveImageAs}
+                                />
+                            ))}
                         </div>
                     </div>
                 ))}
+            </div>
+        </div>
+    );
+}
+
+interface VideoCardProps {
+    video: Video;
+    compact: boolean;
+    onSelect: (video: Video) => void;
+    onSelectWithTab?: (video: Video, tab: 'transcript' | 'summary') => void;
+    onDelete?: (video: Video) => void;
+    allowDeletion: boolean;
+    onSaveImageAs: (url: string) => void;
+}
+
+function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowDeletion, onSaveImageAs }: VideoCardProps) {
+    return (
+        <div
+            className="group flex flex-col gap-2 cursor-pointer"
+            onClick={() => onSelect(video)}
+        >
+            <div className={`${compact ? 'aspect-[16/9]' : 'aspect-video'} w-full rounded-lg overflow-hidden bg-[#272727] relative`}>
+                <img
+                    src={video.thumbnail}
+                    alt={video.title}
+                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                    loading="lazy"
+                    onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onSaveImageAs(video.thumbnail);
+                    }}
+                />
+            </div>
+
+            <div className="flex gap-2 relative">
+                <div className="flex flex-col flex-1 overflow-hidden">
+                    <h3 className={`${compact ? 'text-xs' : 'text-sm'} font-bold text-white line-clamp-2 leading-tight group-hover:text-white`}>
+                        {video.title}
+                    </h3>
+
+                    <div className={`flex flex-col text-[#aaaaaa] ${compact ? 'text-[10px]' : 'text-[13px]'}`}>
+                        <span
+                            className="truncate"
+                            title={`${(h => h ? `Handle: ${h}` : `Channel Name: ${video.author}`)(video.handle)}`}
+                        >
+                            {video.author || "YouTube Creator"}
+                        </span>
+
+                        <div className="flex items-center gap-1">
+                            <span title={`Views: ${parseViewCount(video.viewCount).toLocaleString('en-US')}`}>
+                                {formatViewCount(video.viewCount)} views
+                            </span>
+                            <span className="text-[8px]">•</span>
+                            <span title={`Timestamp: ${video.publishedAt || 'Unknown'}`}>
+                                {formatDate(video.publishedAt)}
+                            </span>
+                        </div>
+
+                        {video.dateAdded && (
+                            <div className="flex items-center justify-between mt-0.5 font-medium text-[10px]">
+                                <div className="flex items-center gap-1 text-yellow-600">
+                                    <Bookmark className="w-2.5 h-2.5 fill-yellow-600" />
+                                    <span title={`Timestamp: ${video.dateAdded}`}>
+                                        {formatDate(video.dateAdded)}
+                                    </span>
+                                </div>
+                                {/* Icons moved to absolute container below for better alignment and clickability */}
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                <div className="absolute bottom-0 right-0 flex items-center gap-1 z-20">
+                    {(video.hasTranscript ?? !!video.transcript) && (
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (onSelectWithTab) onSelectWithTab(video, 'transcript');
+                            }}
+                            className="p-0.5 text-green-600 hover:bg-green-600/10 rounded transition-colors cursor-pointer"
+                            title="Transcript"
+                        >
+                            <FileText className="w-2.5 h-2.5" />
+                        </button>
+                    )}
+                    {(video.hasSummary ?? !!video.summary) && (
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (onSelectWithTab) onSelectWithTab(video, 'summary');
+                            }}
+                            className="p-0.5 text-purple-600 hover:bg-purple-600/10 rounded transition-colors cursor-pointer"
+                            title="AI Summary"
+                        >
+                            <Sparkles className="w-2.5 h-2.5" />
+                        </button>
+                    )}
+                </div>
+
+                {onDelete && allowDeletion && (
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onDelete(video);
+                        }}
+                        className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-[#3f3f3f] rounded-full transition-all text-white self-start hover:cursor-pointer z-10"
+                        title="Remove"
+                    >
+                        <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                )}
             </div>
         </div>
     );

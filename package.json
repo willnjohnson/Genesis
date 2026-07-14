@@ -1,7 +1,7 @@
 {
   "name": "kinesis",
   "private": true,
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "bin": {
     "tauri-branding": "./tauri-branding.cjs"

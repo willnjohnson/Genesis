@@ -1,9 +1,9 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
     getApiKey, getSetting, setDbPath, openExternalUrl,
     type Video, type GlossaryTerm, type BiographyEntry, saveTags, getGlossaryTerms, getBiography,
-    fetchImageAsDataUri, saveImage
+    fetchImageAsDataUri, saveImage, searchLibrary
 } from "./api";
 import { save } from '@tauri-apps/plugin-dialog';
 import { normalizeText } from "./lib/utils";
@@ -33,7 +33,7 @@ function getLibraryFacets(q: string, viewMode: ViewMode): Facet[] {
         ? ['term_search', 'definition_search']
         : viewMode === 'biography'
             ? ['person_search', 'bio_search']
-            : ['title_search', 'transcript_search', 'summary_search', 'tag_search', 'video', 'handle', 'playlist'];
+            : ['tag_search', 'video', 'handle'];
 
     const FACET_RE = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
     const facets: Facet[] = [];
@@ -50,7 +50,7 @@ function getLibraryQuery(q: string, viewMode: ViewMode): string {
         ? ['term_search', 'definition_search']
         : viewMode === 'biography'
             ? ['person_search', 'bio_search']
-            : ['title_search', 'transcript_search', 'summary_search', 'tag_search', 'video', 'handle', 'playlist'];
+            : ['tag_search', 'video', 'handle'];
 
     // Check if q starts with a facet prefix and has exactly one colon
     const colonIndex = q.indexOf(':');
@@ -68,10 +68,6 @@ function getLibraryQuery(q: string, viewMode: ViewMode): string {
 
     const FACET_RE = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
     return q.replace(FACET_RE, '');
-}
-
-function hasLibraryTextSearch(q: string): boolean {
-    return q.includes('transcript_search:') || q.includes('summary_search:');
 }
 
 function App() {
@@ -103,6 +99,13 @@ function App() {
     const [showSynthesizeUpload, setShowSynthesizeUpload] = useState(true);
     const [showBiography, setShowBiography] = useState(true);
     const [allowEditBio, setAllowEditBio] = useState(true);
+
+    const ftsTimerRef = useRef<number | null>(null);
+
+    // ── FTS Library Search state ──────────────────────────────────────────────
+    const [ftsSearchActive, setFtsSearchActive] = useState(false);
+    const [ftsResults, setFtsResults] = useState<Video[] | null>(null);
+    const [ftsLoading, setFtsLoading] = useState(false);
 
     // ── Sidebar / transcript state ───────────────────────────────────────────
     const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
@@ -137,6 +140,9 @@ function App() {
     // ── Computed: which videos to show in VideoList ──────────────────────────
     const displayedVideos = useMemo(() => {
         if (viewMode === 'library') {
+            if (ftsSearchActive) {
+                return ftsResults || [];
+            }
             const q = library.librarySearch;
             if (!q) return library.libraryVideos;
 
@@ -157,16 +163,6 @@ function App() {
                         if (!normalizeText(v.handle || "").includes(f.value)) return false;
                     } else if (f.type === 'video') {
                         if (!normalizeText(v.id).includes(f.value)) return false;
-                    } else if (f.type === 'title_search') {
-                        const terms = f.value.split(' ').filter(Boolean);
-                        if (!terms.every(t =>
-                            normalizeText(v.title).includes(t) ||
-                            normalizeText(v.author || "").includes(t)
-                        )) return false;
-                    } else if (f.type === 'transcript_search') {
-                        if (!normalizeText(v.transcript || "").includes(f.value)) return false;
-                    } else if (f.type === 'summary_search') {
-                        if (!normalizeText(v.summary || "").includes(f.value)) return false;
                     } else if (f.type === 'tag_search') {
                         const tagValue = (f.value || "").trim();
                         if (!tagValue) continue;
@@ -204,7 +200,7 @@ function App() {
             });
         }
         return search.filteredVideos;
-    }, [viewMode, library.librarySearch, library.libraryVideos, search.filteredVideos]);
+    }, [viewMode, ftsSearchActive, ftsResults, library.librarySearch, library.libraryVideos, search.filteredVideos]);
 
     // ── Init ─────────────────────────────────────────────────────────────────
     useEffect(() => {
@@ -355,10 +351,46 @@ function App() {
         }
     }, [viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // ── FTS-backed library search ────────────────────────────────────────────
     useEffect(() => {
-        if (viewMode === 'library' && hasLibraryTextSearch(library.librarySearch)) {
-            library.ensureFullTextLoaded();
+        if (viewMode !== 'library') {
+            setFtsSearchActive(false);
+            setFtsResults(null);
+            setFtsLoading(false);
+            return;
         }
+
+        if (!library.librarySearch.trim()) {
+            setFtsSearchActive(false);
+            setFtsResults(null);
+            setFtsLoading(false);
+            return;
+        }
+
+        if (ftsTimerRef.current) window.clearTimeout(ftsTimerRef.current);
+
+        setFtsLoading(true);
+        setFtsSearchActive(true);
+        setFtsResults(null);
+
+        ftsTimerRef.current = window.setTimeout(() => {
+            let cancelled = false;
+            searchLibrary(library.librarySearch)
+                .then(res => {
+                    if (!cancelled) setFtsResults(res.videos);
+                })
+                .catch(() => {
+                    if (!cancelled) setFtsResults([]);
+                })
+                .finally(() => {
+                    if (!cancelled) setFtsLoading(false);
+                });
+            return () => { cancelled = true; };
+        }, 300);
+
+        return () => {
+            if (ftsTimerRef.current) window.clearTimeout(ftsTimerRef.current);
+        };
     }, [viewMode, library.librarySearch]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Refresh summarized count when entering Library (if plugin on) ─────────
@@ -412,16 +444,13 @@ function App() {
         } catch { /* ignore */ }
     };
 
-    const handleSearchInLibrary = (term: string, mode: 'title' | 'transcript' | 'tag' | 'summary') => {
+    const handleSearchInLibrary = (term: string, mode: 'tag' | 'library') => {
         // First switch to library to ensure fresh mount
         setViewMode('library');
         // Close sidebar if open
         setSidebarOpen(false);
         // Then set query - will be picked up on next render
-        const query = mode === 'title' ? `title_search:${term}`
-            : mode === 'transcript' ? `transcript_search:${term}`
-                : mode === 'summary' ? `summary_search:${term}`
-                    : `tag_search:${term}`;
+        const query = mode === 'tag' ? `tag_search:${term}` : term;
         library.setLibrarySearch(query);
     };
 
@@ -470,6 +499,14 @@ function App() {
                 console.error('Failed to remove tag:', e);
             }
         }
+    };
+
+    const handleCacheSummary = (videoId: string, summary: string) => {
+        setCachedSummaries(prev => ({ ...prev, [videoId]: summary }));
+        setSelectedVideo(prev => (prev && prev.id === videoId) ? { ...prev, summary, hasSummary: true } : prev);
+        library.libraryVideos.forEach(v => {
+            if (v.id === videoId) { v.summary = summary; v.hasSummary = true; }
+        });
     };
 
 
@@ -725,12 +762,22 @@ function App() {
                         </>
                     ) : (
                         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
-                            {library.loading && library.libraryVideos.length === 0 ? (
+                            {library.loading && library.libraryVideos.length === 0 && !ftsSearchActive ? (
                                 <div className="flex flex-col items-center justify-center py-24 text-gray-400 space-y-4">
                                     <div className="w-8 h-8 border-4 border-[#303030] border-t-red-600 rounded-full animate-spin" />
                                     <p className="font-medium text-sm">Loading library...</p>
                                 </div>
-                            ) : library.libraryVideos.length === 0 ? (
+                            ) : ftsSearchActive && ftsResults === null ? (
+                                <div className="flex flex-col items-center justify-center py-24 text-gray-400 space-y-4">
+                                    <div className="w-8 h-8 border-4 border-[#303030] border-t-red-600 rounded-full animate-spin" />
+                                    <p className="font-medium text-sm">Searching library...</p>
+                                </div>
+                            ) : ftsSearchActive && ftsResults !== null && ftsResults.length === 0 ? (
+                                <div className="text-center text-gray-500 py-24">
+                                    <p className="text-xl font-bold text-white mb-2">No results</p>
+                                    <p className="text-sm">Try different search terms</p>
+                                </div>
+                            ) : library.libraryVideos.length === 0 && !ftsSearchActive ? (
                                 <div className="text-center text-gray-500 py-24">
                                     <p className="text-xl font-bold text-white mb-2">Build your library</p>
                                     <p className="text-sm">Find videos and save their transcripts here.</p>
@@ -745,7 +792,7 @@ function App() {
                                     onSummarizeAll={effectivePluginSummarizeEnabled ? library.handleSummarizeAll : undefined}
                                     summarizeProgress={library.summarizeProgress}
                                     summarizedCount={library.summarizedCount}
-                                    totalCount={library.libraryVideos.length}
+                                    totalCount={ftsSearchActive ? (ftsResults?.length ?? 0) : library.libraryVideos.length}
                                     isLibrary={true}
                                     allowDeletion={allowDeletionLibrary}
                                     showSummarizeButton={showSummarizeButton}
@@ -778,7 +825,7 @@ function App() {
                 showSynthesizeUpload={showSynthesizeUpload}
                 onSummaryGenerated={library.refreshSummarizedCount}
                 cachedSummaries={cachedSummaries}
-                onCacheSummary={(id, s) => setCachedSummaries(prev => ({ ...prev, [id]: s }))}
+                onCacheSummary={handleCacheSummary}
                 allowDeletion={allowDeletionLibrary}
                 isLibrary={viewMode === 'library'}
                 videoTags={videoTags}
