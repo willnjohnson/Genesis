@@ -820,7 +820,7 @@ pub fn search_library_videos(
                AND (?5 = '' OR v.tags LIKE ?6)
                AND {video_type_where}
              ORDER BY v.date_added DESC, v.rowid DESC
-             LIMIT 24"
+             LIMIT 10240"
         );
         let mut stmt = conn.prepare(&sql)?;
         let video_iter = stmt.query_map(
@@ -860,7 +860,7 @@ pub fn search_library_videos(
                AND (?6 = '' OR v.tags LIKE ?7)
                AND {video_type_where}
              ORDER BY bm25(ftsVideos, 8.0, 10.0, 1.0)
-             LIMIT 24"
+             LIMIT 10240"
         );
         let mut stmt = conn.prepare(&sql)?;
         let video_iter = stmt.query_map(
@@ -908,7 +908,7 @@ fn regenerate_tokens_from_transcript(conn: &Connection, video_id: &str) -> Resul
             '  ', ' '), '  ', ' '), '  ', ' '), '  ', ' '), '  ', ' ')
             ) || ' ' AS txt
             FROM videos
-            WHERE transcript IS NOT NULL AND transcript != '.'
+            WHERE transcript IS NOT NULL AND transcript != 'N/A'
             AND video_id = ?1
         ),
         word_starts AS (
@@ -1070,13 +1070,13 @@ fn clean_blockquote_lines(conn: &Connection, video_id: &str) -> Result<()> {
 // were already derived from the transcript (at save_transcript/save_video time), and the
 // summary + tokens are what's needed for search going forward, so the (often huge) transcript
 // blob is just dead weight in the DB from here on. "." is a sentinel, not a genuinely empty
-// value: regenerate_tokens_from_transcript explicitly skips rows where transcript = '.' (so it
+// value: regenerate_tokens_from_transcript explicitly skips rows where transcript = 'N/A' (so it
 // won't wipe the tokens this transcript already produced), and save_transcript treats an empty
 // transcript submission as a request to re-pull from YouTube, so a user can restore it later
 // (e.g. to regenerate the summary) by clearing the "." in the transcript editor and saving.
 fn clear_transcript_after_summary(conn: &Connection, video_id: &str) -> Result<()> {
     conn.execute(
-        "UPDATE videos SET transcript = '.' WHERE video_id = ?1",
+        "UPDATE videos SET transcript = 'N/A' WHERE video_id = ?1",
         params![video_id],
     )?;
     Ok(())

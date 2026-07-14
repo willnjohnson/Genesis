@@ -154,6 +154,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [splitPercent, setSplitPercent] = useState(65);
     const [isResizing, setIsResizing] = useState(false);
     const isResizingRef = useRef(false);
+    const autoSwitchedToSummaryRef = useRef(false);
     const [showSummary, setShowSummary] = useState(false);
     const [summary, setSummary] = useState<string | null>(null);
     const [loadingSummary, setLoadingSummary] = useState(false);
@@ -583,6 +584,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
 
         setIsEditingSummary(false);
         setIsEditingTranscript(false);
+        autoSwitchedToSummaryRef.current = false;
 
         if (initialTab) {
             setShowSummary(initialTab === 'summary');
@@ -636,6 +638,18 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             setHasExistingSummary(true);
         }
     }, [cachedSummaries, videoId, isOpen]);
+
+    // The transcript column gets overwritten with the literal placeholder "N/A" once a video has
+    // been summarized (to free up DB space), so landing on the Transcript tab would just show that
+    // placeholder. Auto-switch to AI Summary the first time this loads per video, but only once so
+    // it doesn't fight a user who deliberately navigates back to Transcript afterwards (e.g. to
+    // restore real transcript text).
+    useEffect(() => {
+        if (isOpen && !autoSwitchedToSummaryRef.current && transcript && transcript.trim() === "N/A") {
+            autoSwitchedToSummaryRef.current = true;
+            setShowSummary(true);
+        }
+    }, [isOpen, transcript]);
 
                     useEffect(() => {
         if (isOpen) {
