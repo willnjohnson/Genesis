@@ -972,24 +972,26 @@ pub fn get_history_stats(db_path: &str) -> Result<i64> {
 
 pub fn save_summary(db_path: &str, video_id: &str, summary: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
-    // Prepend the new summary above any existing "Channel Info:" footer, keeping that footer
-    // pinned at the very bottom instead of letting it get overwritten or duplicated.
+    // The caller's `summary` may already carry a "Channel Info:" footer — the edit-summary UI
+    // round-trips the full displayed text (footer included) back through here. Strip it before
+    // storing so append_channel_info_footer below adds exactly one fresh footer instead of the
+    // old one getting duplicated alongside it.
+    let bare_summary = match summary.find("Channel Info:") {
+        Some(idx) => summary[..idx].trim_end(),
+        None => summary,
+    };
     conn.execute(
-        "UPDATE videos
-         SET summary = ?1 || CASE
-             WHEN summary LIKE '%Channel Info:%' THEN char(10) || char(10) || substr(summary, instr(summary, 'Channel Info:'))
-             ELSE ''
-         END
-         WHERE video_id = ?2",
-        params![summary, video_id],
+        "UPDATE videos SET summary = ?1 WHERE video_id = ?2",
+        params![bare_summary, video_id],
     )?;
     // Some providers (e.g. Venice.ai) emit markdown blockquote lines with stray embedded
     // quote marks (`> "like this," he said`); strip quotes from just those lines.
     clean_blockquote_lines(&conn, video_id)?;
-    // Retry the footer append here too: a video can be (re-)summarized before its channel's
-    // biography row exists yet, in which case save_video's earlier attempt was a no-op.
+    // A video can be (re-)summarized before its channel's biography row exists yet, in which
+    // case save_video's earlier attempt was a no-op; this retries it, deriving a fresh footer
+    // from the current biography/author data every time.
     append_channel_info_footer(&conn, video_id)?;
-    if has_real_summary(summary) {
+    if has_real_summary(bare_summary) {
         clear_transcript_after_summary(&conn, video_id)?;
     }
     Ok(())
