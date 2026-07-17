@@ -2,11 +2,11 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
     getApiKey, getSetting, setDbPath, openExternalUrl,
-    type Video, type GlossaryTerm, type BiographyEntry, saveTags, getGlossaryTerms, getBiography,
-    fetchImageAsDataUri, saveImage, searchLibrary
+    type Video, type BiographyEntry, saveTags, getGlossaryTerms, getBiography,
+    searchLibrary
 } from "./api";
-import { save } from '@tauri-apps/plugin-dialog';
 import { normalizeText } from "./lib/utils";
+import { saveImageAs } from "./lib/save-image-as";
 import { SearchBar, type Facet } from "./components/SearchBar";
 import { VideoList } from "./components/VideoList";
 import { Sidebar } from "./components/Sidebar";
@@ -280,39 +280,23 @@ function App() {
     }, []);
 
     const handleSaveImageAs = useCallback(async (url: string) => {
+        // Try to suggest a filename based on the URL or default
+        let suggestedName = 'image.webp';
         try {
-            let dataUri = url;
-            if (!url.startsWith('data:')) {
-                dataUri = await fetchImageAsDataUri(url);
+            const urlParts = url.split('/');
+            const lastPart = urlParts[urlParts.length - 1].split('?')[0];
+            if (lastPart.match(/\.(png|jpg|jpeg|webp|gif)$/i)) {
+                suggestedName = lastPart;
             }
-            if (!dataUri) return;
+        } catch { /* ignore */ }
 
-            // Try to suggest a filename based on the URL or default
-            let suggestedName = 'image.webp';
-            try {
-                const urlParts = url.split('/');
-                const lastPart = urlParts[urlParts.length - 1].split('?')[0];
-                if (lastPart.match(/\.(png|jpg|jpeg|webp|gif)$/i)) {
-                    suggestedName = lastPart;
-                }
-            } catch { /* ignore */ }
-
-            const filePath = await save({
-                filters: [
-                    { name: 'Images', extensions: ['webp', 'png', 'jpg', 'jpeg', 'gif'] },
-                    { name: 'All Files', extensions: ['*'] }
-                ],
-                defaultPath: suggestedName
-            });
-            
-            if (filePath) {
-                const parts = dataUri.split(',');
-                const base64 = parts.length > 1 ? parts[1] : parts[0];
-                await saveImage(filePath, base64);
-            }
-        } catch (e: any) {
-            console.error("Save failed:", e);
-        }
+        await saveImageAs(url, {
+            filters: [
+                { name: 'Images', extensions: ['webp', 'png', 'jpg', 'jpeg', 'gif'] },
+                { name: 'All Files', extensions: ['*'] }
+            ],
+            defaultPath: suggestedName
+        });
     }, []);
 
     useEffect(() => {
@@ -373,8 +357,8 @@ function App() {
         setFtsSearchActive(true);
         setFtsResults(null);
 
+        let cancelled = false;
         ftsTimerRef.current = window.setTimeout(() => {
-            let cancelled = false;
             searchLibrary(library.librarySearch)
                 .then(res => {
                     if (!cancelled) setFtsResults(res.videos);
@@ -385,10 +369,10 @@ function App() {
                 .finally(() => {
                     if (!cancelled) setFtsLoading(false);
                 });
-            return () => { cancelled = true; };
         }, 300);
 
         return () => {
+            cancelled = true;
             if (ftsTimerRef.current) window.clearTimeout(ftsTimerRef.current);
         };
     }, [viewMode, library.librarySearch]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -452,10 +436,6 @@ function App() {
         // Then set query - will be picked up on next render
         const query = mode === 'tag' ? `tag_search:${term}` : term;
         library.setLibrarySearch(query);
-    };
-
-    const handleTagClick = (term: GlossaryTerm) => {
-        // Open term definition in sidebar - same as clicking in Glossary
     };
 
     const handleViewBiography = useCallback(async (channelHandle: string) => {
@@ -829,7 +809,6 @@ function App() {
                 allowDeletion={allowDeletionLibrary}
                 isLibrary={viewMode === 'library'}
                 videoTags={videoTags}
-                onTagClick={handleTagClick}
                 onHandleClick={handleViewBiography}
                 onAddTag={handleAddTag}
                 onRemoveTag={handleRemoveTag}

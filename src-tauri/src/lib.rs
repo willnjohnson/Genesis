@@ -29,6 +29,7 @@ pub use types::{parse_view_count, extract_handle_from_url};
 // ─── App state ────────────────────────────────────────────────────────────────
 
 pub(crate) struct DbPathState(pub Mutex<Option<String>>);
+pub(crate) struct EmbedServerPortState(pub Mutex<Option<u16>>);
 
 // ─── Config file manager ──────────────────────────────────────────────────────
 
@@ -84,33 +85,19 @@ pub(crate) fn ensure_no_ghost_db(path: &str) {
 
 pub(crate) fn get_db_path(app: &tauri::AppHandle) -> String {
     let state = app.state::<DbPathState>();
-    let mut guard = state.0.lock().unwrap();
+    let mut guard = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     if let Some(ref path) = *guard {
         return path.clone();
     }
 
-    let db_file_path = if let Some(saved_path) = ConfManager::read_attr(app, "db_path") {
-        let path = PathBuf::from(&saved_path);
-        if !path.exists() { let _ = std::fs::create_dir_all(&path); }
-        path.join("kinesis_data.db")
+    let dir = if let Some(saved_path) = ConfManager::read_attr(app, "db_path") {
+        PathBuf::from(saved_path)
     } else {
-        let default_dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let old_config = default_dir.join("db_path.txt");
-        if old_config.exists() {
-            if let Ok(saved_path) = std::fs::read_to_string(&old_config) {
-                let path = PathBuf::from(saved_path.trim());
-                let _ = ConfManager::write_attr(app, "db_path", saved_path.trim());
-                let _ = std::fs::remove_file(old_config);
-                path.join("kinesis_data.db")
-            } else {
-                default_dir.join("kinesis_data.db")
-            }
-        } else {
-            if !default_dir.exists() { let _ = std::fs::create_dir_all(&default_dir); }
-            default_dir.join("kinesis_data.db")
-        }
+        app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
     };
+    if !dir.exists() { let _ = std::fs::create_dir_all(&dir); }
+    let db_file_path = dir.join("kinesis_data.db");
 
     let path_str = db_file_path.to_string_lossy().to_string();
     *guard = Some(path_str.clone());
@@ -123,6 +110,13 @@ pub(crate) fn get_db_path(app: &tauri::AppHandle) -> String {
 #[tauri::command]
 fn get_app_info() -> serde_json::Value {
     serde_json::json!({ "name": APP_NAME, "version": VERSION })
+}
+
+#[tauri::command]
+fn get_embed_server_port(app: tauri::AppHandle) -> Option<u16> {
+    let state = app.state::<EmbedServerPortState>();
+    let guard = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard
 }
 
 // ─── App entry point ──────────────────────────────────────────────────────────
@@ -222,15 +216,24 @@ pub fn run() {
             commands::get_biography,
             commands::update_biography,
             get_app_info,
+            get_embed_server_port,
         ])
         .manage(DbPathState(Mutex::new(None)))
+        .manage(EmbedServerPortState(Mutex::new(None)))
         .setup(move |app| {
             let app_handle = app.handle();
             let db_path = get_db_path(app_handle);
 
             // Start HTTP server for YouTube embeds
-            if let Ok(port) = http_server::start_server() {
-                eprintln!("YouTube embed server started on port {}", port);
+            match http_server::start_server() {
+                Ok(port) => {
+                    eprintln!("YouTube embed server started on port {}", port);
+                    let port_state = app_handle.state::<EmbedServerPortState>();
+                    *port_state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(port);
+                }
+                Err(e) => {
+                    log::error!("Failed to start YouTube embed HTTP server; embeds will be unavailable: {}", e);
+                }
             }
 
             // Get saved window settings

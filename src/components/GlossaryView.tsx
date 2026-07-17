@@ -4,7 +4,7 @@ import { Plus, X, Pencil } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { normalizeText } from '../lib/utils';
-import { handleMarkdownKeyDown } from './Sidebar';
+import { handleMarkdownKeyDown } from '../lib/markdown-editor';
 
 export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'library') => void, allowModification?: boolean, onChange?: () => void }) {
     const [terms, setTerms] = useState<GlossaryTerm[]>([]);

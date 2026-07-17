@@ -13,6 +13,14 @@ interface SearchState {
     isSearch?: boolean;
 }
 
+/**
+ * Owns YouTube search/browse results. `handleSearch` classifies the query into one of four modes
+ * — playlist, single video, channel, or plain keyword search — checking, in order: an explicit
+ * `handle:`/`playlist:`/`video:` facet, then a video-ID URL/bare-ID match, then a playlist-ID
+ * URL/bare-ID match, then a channel URL/`@handle`/bare `UC...` ID; anything left over falls
+ * through to a keyword search. `filteredVideos` then applies any further facet/text filtering
+ * (title, tag, handle, transcript, summary) client-side over whichever result set that produced.
+ */
 export function useSearch(hasApiKey: boolean) {
     const [videos, setVideos] = useState<Video[]>([]);
     const [loading, setLoading] = useState(false);

@@ -15,91 +15,6 @@ pub struct VeniceRequest {
     pub messages: Vec<VeniceMessage>,
 }
 
-#[allow(dead_code)]
-fn chunk_transcript(transcript: &str, chunk_size: usize, overlap: usize, max_chunks: usize) -> Vec<String> {
-    if transcript.trim().is_empty() {
-        return vec![];
-    }
-
-    let lines: Vec<&str> = transcript.lines().collect();
-    if lines.is_empty() {
-        return vec![];
-    }
-
-    let mut chunks = Vec::new();
-    let effective_overlap = overlap.min(chunk_size / 2);
-
-    let mut current_chunk = String::new();
-    let mut chunk_start_idx = 0;
-
-    for (idx, line) in lines.iter().enumerate() {
-        let line_word_count = line.split_whitespace().count();
-        
-        if line_word_count > chunk_size {
-            if !current_chunk.is_empty() {
-                chunks.push(current_chunk.clone());
-                current_chunk.clear();
-            }
-            
-            let words: Vec<&str> = line.split_whitespace().collect();
-            let mut sub_start = 0;
-            while sub_start < words.len() {
-                let sub_end = (sub_start + chunk_size).min(words.len());
-                let sub_chunk: String = words[sub_start..sub_end].join(" ");
-                chunks.push(sub_chunk);
-                if chunks.len() >= max_chunks {
-                    break;
-                }
-                sub_start = sub_end - effective_overlap.min(sub_end);
-            }
-            chunk_start_idx = idx + 1;
-            continue;
-        }
-
-        let current_word_count = current_chunk.split_whitespace().count();
-        if current_word_count + line_word_count > chunk_size && !current_chunk.is_empty() {
-            chunks.push(current_chunk.clone());
-            
-            current_chunk = String::new();
-            
-            let overlap_lines: Vec<&str> = lines[chunk_start_idx..idx].to_vec();
-            for overlap_line in overlap_lines {
-                let overlap_words = overlap_line.split_whitespace().count();
-                let new_count = current_chunk.split_whitespace().count();
-                if new_count + overlap_words <= effective_overlap {
-                    if !current_chunk.is_empty() {
-                        current_chunk.push('\n');
-                    }
-                    current_chunk.push_str(overlap_line);
-                } else {
-                    break;
-                }
-            }
-            
-            if !current_chunk.is_empty() {
-                current_chunk.push('\n');
-            }
-            current_chunk.push_str(line);
-            chunk_start_idx = idx;
-        } else {
-            if !current_chunk.is_empty() {
-                current_chunk.push('\n');
-            }
-            current_chunk.push_str(line);
-        }
-
-        if chunks.len() >= max_chunks {
-            break;
-        }
-    }
-
-    if !current_chunk.is_empty() {
-        chunks.push(current_chunk);
-    }
-
-    chunks
-}
-
 async fn call_venice_api(client: &reqwest::Client, api_key: &str, prompt: &str) -> Result<String, String> {
     let request_body = VeniceRequest {
         model: "zai-org-glm-5".to_string(),
@@ -136,6 +51,12 @@ async fn call_venice_api(client: &reqwest::Client, api_key: &str, prompt: &str) 
     Ok(summary)
 }
 
+/// Summarizes a transcript via the Venice cloud API (the "cloud" provider counterpart to
+/// ollama::summarize_transcript). Prefers a per-handle custom cloud prompt over the global
+/// venice_prompt setting, and substitutes `${title}`/`${author}`/`${length_seconds}`/
+/// `${view_count}`/`${handle}` placeholders from the saved video (or bare `${handle}`) when
+/// present in the template. Unlike the Ollama path, there is no chunking — the full transcript
+/// is sent in one request.
 pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Option<String>, video_id: Option<String>) -> Result<String, String> {
     let db_path = get_db_path(&app);
     
@@ -209,6 +130,9 @@ pub struct VeniceImageData {
     pub url: Option<String>,
 }
 
+/// Generates an image from `prompt` via the Venice image API and returns either a base64 data
+/// URI or a direct URL, depending on which shape the response uses (Venice's own "images" array
+/// format, or an OpenAI-compatible "data" array with b64_json/url — both are checked in order).
 pub async fn generate_image(app: AppHandle, prompt: String) -> Result<String, String> {
     let db_path = get_db_path(&app);
     

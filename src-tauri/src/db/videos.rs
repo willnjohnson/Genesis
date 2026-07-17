@@ -1,8 +1,11 @@
 use crate::Video;
 use rusqlite::{params, Connection, Result};
 use super::summaries::{append_channel_info_footer, clean_blockquote_lines, clear_transcript_after_summary, has_real_summary};
-use super::search::regenerate_tokens_from_transcript;
+use super::search::{regenerate_tokens_from_transcript, video_row, video_columns_sql};
 
+/// Lists videos ordered newest-first, optionally filtered to one `video_type` ("short"/"standard").
+/// `include_content` gates whether transcript/summary text is decoded and returned at all — pass
+/// `false` for grid/list views that only need metadata and the has_transcript/has_summary flags.
 pub fn list_videos(
     db_path: &str,
     video_type_filter: Option<&str>,
@@ -10,62 +13,18 @@ pub fn list_videos(
 ) -> Result<Vec<Video>> {
     let conn = Connection::open(db_path)?;
 
-    let query = match video_type_filter {
-        Some("short") => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript, tags, summary, CASE WHEN transcript IS NOT NULL AND transcript != '' THEN 1 ELSE 0 END AS has_transcript, CASE WHEN summary IS NOT NULL AND summary != '' THEN 1 ELSE 0 END AS has_summary FROM videos WHERE video_type = 'short' ORDER BY date_added DESC, rowid DESC",
-        Some("standard") => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript, tags, summary, CASE WHEN transcript IS NOT NULL AND transcript != '' THEN 1 ELSE 0 END AS has_transcript, CASE WHEN summary IS NOT NULL AND summary != '' THEN 1 ELSE 0 END AS has_summary FROM videos WHERE video_type = 'standard' ORDER BY date_added DESC, rowid DESC",
-        _ => "SELECT video_id, title, author, length_seconds, view_count, published_at, date_added, handle, video_type, transcript, tags, summary, CASE WHEN transcript IS NOT NULL AND transcript != '' THEN 1 ELSE 0 END AS has_transcript, CASE WHEN summary IS NOT NULL AND summary != '' THEN 1 ELSE 0 END AS has_summary FROM videos ORDER BY date_added DESC, rowid DESC",
+    let video_type_where = match video_type_filter {
+        Some("short") => "video_type = 'short'",
+        Some("standard") => "video_type = 'standard'",
+        _ => "1=1",
     };
+    let columns = video_columns_sql("");
+    let query = format!(
+        "SELECT {columns} FROM videos WHERE {video_type_where} ORDER BY date_added DESC, rowid DESC"
+    );
 
-    let mut stmt = conn.prepare(query)?;
-    let video_iter = stmt.query_map([], |row| {
-        let view_count_str = match row.get::<_, Option<i64>>(4) {
-            Ok(Some(0)) | Ok(None) => "Saved".to_string(),
-            Ok(Some(n)) => n.to_string(),
-            Err(_) => match row.get::<_, Option<String>>(4) {
-                Ok(Some(ref s)) if s == "0" => "Saved".to_string(),
-                Ok(Some(s)) => s,
-                _ => "Saved".to_string(),
-            },
-        };
-        let raw_summary: Option<String> = row.get(11).unwrap_or(None);
-        Ok(Video {
-            id: row.get::<_, String>(0).unwrap_or_default(),
-            title: row
-                .get::<_, Option<String>>(1)
-                .unwrap_or(None)
-                .unwrap_or_else(|| "Unknown".to_string()),
-            author: row.get::<_, Option<String>>(2).unwrap_or(None),
-            length_seconds: match row.get::<_, Option<i32>>(3) {
-                Ok(v) => v,
-                Err(_) => row
-                    .get::<_, Option<String>>(3)
-                    .unwrap_or(None)
-                    .and_then(|s| s.parse().ok()),
-            },
-            view_count: view_count_str,
-            thumbnail: format!(
-                "https://i.ytimg.com/vi/{}/hqdefault.jpg",
-                row.get::<_, String>(0).unwrap_or_default()
-            ),
-            published_at: row
-                .get::<_, Option<String>>(5)
-                .unwrap_or(None)
-                .unwrap_or_else(|| "".to_string()),
-            status: Some("saved".to_string()),
-            date_added: row.get::<_, Option<String>>(6).unwrap_or(None),
-            handle: row.get::<_, Option<String>>(7).unwrap_or(None),
-            video_type: row.get::<_, Option<String>>(8).unwrap_or(None),
-            transcript: if include_content {
-                row.get::<_, Option<String>>(9).unwrap_or(None)
-            } else {
-                None
-            },
-            tags: row.get::<_, Option<String>>(10).unwrap_or(None),
-            summary: if include_content { raw_summary.clone() } else { None },
-            has_transcript: Some(row.get::<_, i64>(12).unwrap_or(0) > 0),
-            has_summary: Some(raw_summary.as_deref().map(has_real_summary).unwrap_or(false)),
-        })
-    })?;
+    let mut stmt = conn.prepare(&query)?;
+    let video_iter = stmt.query_map([], |row| video_row(row, include_content))?;
 
     let mut videos = Vec::new();
     for video in video_iter {
@@ -74,6 +33,9 @@ pub fn list_videos(
     Ok(videos)
 }
 
+/// Upserts a video's metadata and transcript. On conflict, `summary` only overwrites the
+/// existing value when `Some` — passing `None` preserves whatever summary was already saved,
+/// so callers that don't have a fresh summary in hand (e.g. a plain re-save) can't wipe one out.
 pub fn save_video(
     db_path: &str,
     video_id: &str,
@@ -115,6 +77,8 @@ pub fn save_video(
     Ok(())
 }
 
+/// Deletes a video by id. The FTS-index cleanup and biography cascade-delete happen via
+/// SQLite triggers (see db/schema.rs), not here.
 pub fn delete_video(db_path: &str, video_id: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute("DELETE FROM videos WHERE video_id = ?", params![video_id])?;
@@ -140,6 +104,10 @@ pub fn get_transcript(db_path: &str, video_id: &str) -> Result<Option<String>> {
     }
 }
 
+/// Fetches full video details as a fixed-order tuple: (video_id, title, author, length_seconds,
+/// transcript, view_count, published_at, handle, video_type, date_added, summary, tags).
+/// Callers index into it positionally (see e.g. commands/youtube.rs's save_video and
+/// ollama::summarize_transcript) — keep that order in sync with any change here.
 pub fn get_video_full(
     db_path: &str,
     video_id: &str,
@@ -171,26 +139,11 @@ pub fn get_video_full(
             row.get::<_, Option<String>>(2)
                 .unwrap_or(None)
                 .unwrap_or_else(|| "Unknown".to_string()),
-            match row.get::<_, Option<i32>>(3) {
-                Ok(Some(v)) => v,
-                Err(_) => row
-                    .get::<_, Option<String>>(3)
-                    .unwrap_or(None)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0),
-                _ => 0,
-            },
+            row.get::<_, Option<i32>>(3).unwrap_or(None).unwrap_or(0),
             row.get::<_, Option<String>>(4)
                 .unwrap_or(None)
                 .unwrap_or_else(|| "".to_string()),
-            match row.get::<_, Option<i64>>(5) {
-                Ok(Some(n)) => n,
-                Err(_) => match row.get::<_, Option<String>>(5) {
-                    Ok(Some(s)) => s.parse::<i64>().unwrap_or(0),
-                    _ => 0,
-                },
-                _ => 0,
-            },
+            row.get::<_, Option<i64>>(5).unwrap_or(None).unwrap_or(0),
             row.get::<_, Option<String>>(6)
                 .unwrap_or(None)
                 .unwrap_or_else(|| "".to_string()),
@@ -219,6 +172,9 @@ pub fn get_db_stats(db_path: &str) -> Result<i64> {
     get_video_count(db_path, None, None)
 }
 
+/// Counts videos matching an optional type filter and an optional case-sensitive substring
+/// match across title/author/handle/transcript (manually escaped and inlined into the query,
+/// not parameterized, since the LIKE pattern itself is built per-column here).
 pub fn get_video_count(
     db_path: &str,
     video_type_filter: Option<&str>,

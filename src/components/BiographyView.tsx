@@ -7,7 +7,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { getBiographies, updateBiography, type BiographyEntry, fetchChannelVideosV3, openExternalUrl } from '../api';
 import { normalizeText } from '../lib/utils';
-import { handleMarkdownKeyDown } from './Sidebar';
+import { handleMarkdownKeyDown } from '../lib/markdown-editor';
 
 type EditableBiography = BiographyEntry | null;
 type SocialTab = 'wikipedia' | 'website' | 'twitter' | 'instagram' | 'facebook' | 'threads' | 'youtube' | 'tiktok' | 'twitch' | 'reddit' | 'discord';

@@ -20,6 +20,13 @@ interface Props {
 
 export type SearchFacet = 'handle' | 'playlist' | 'video' | 'title_search' | 'term_search' | 'definition_search' | 'tag_search' | 'person_search' | 'bio_search';
 
+/**
+ * Search input with facet detection and mode-specific keyboard shortcuts. Typing (or pasting) a
+ * recognizable YouTube URL/handle/video-ID/playlist-ID auto-converts the input into a facet chip
+ * (see `handleInput`/`extractHandle`/`extractVideoId`/`extractPlaylistId`); `!`-prefixed shortcuts
+ * switch search mode per view (`!n`/`!p` in search mode for title/playlist search, `!g`/`!d` in
+ * glossary mode for term/definition search), and `#tag#` switches to library tag search.
+ */
 export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search', initialFacets = [], initialQuery = '', placeholder }: Props) {
     const [query, setQuery] = useState(initialQuery);
     const [facets, setFacets] = useState<Facet[]>(initialFacets);
@@ -78,8 +85,9 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             onLiveFilter(fullQuery);
         }
         
-        // After sending, we can reset if we want, but it's safer to leave as true 
-        // until next sync or next input. Actually, we must keep it true until the end of this cycle.
+        // Deliberately not reset here: userActionRef must stay true so this effect keeps firing
+        // on the next user-driven facets/query change. The two sync effects above are what reset
+        // it to false, and only when an external prop update (not the user) changes query/facets.
     }, [facets, query, isLibrary, onLiveFilter, onSearch]);
 
     const loadHistory = useCallback(async () => {

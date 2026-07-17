@@ -1,38 +1,4 @@
-#![allow(dead_code)]
-
-use std::path::PathBuf;
 use tiny_http::{Server, Request, Response, Header};
-use std::sync::Arc;
-use std::fs;
-
-/// Try a few locations for the built `dist` folder.
-fn find_dist_path(suggested: PathBuf) -> Option<PathBuf> {
-    // If the suggested path already looks valid, use it.
-    if suggested.join("index.html").exists() {
-        return Some(suggested);
-    }
-
-    let mut candidates = Vec::new();
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(parent.join("dist"));
-            candidates.push(parent.join("..").join("dist"));
-        }
-    }
-
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("dist"));
-    }
-
-    for c in candidates {
-        if c.join("index.html").exists() {
-            return Some(c);
-        }
-    }
-
-    None
-}
 
 /// Start an HTTP server for YouTube embeds on localhost.
 /// Tries a small range of ports and returns the bound port on success.
@@ -62,6 +28,13 @@ pub fn start_server() -> Result<u16, Box<dyn std::error::Error>> {
     Err("Could not bind to any port in range 1431-1439".into())
 }
 
+/// YouTube video IDs are always an 11-character string of `[A-Za-z0-9_-]`.
+/// Enforcing this strictly means the ID can never break out of the `src="..."`
+/// attribute it's interpolated into below, without needing an HTML-escaping pass.
+fn is_valid_video_id(id: &str) -> bool {
+    id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 fn handle_youtube_embed(request: Request) -> Result<(), Box<dyn std::error::Error>> {
     // Parse query parameters to get video ID
     let url = request.url();
@@ -77,9 +50,10 @@ fn handle_youtube_embed(request: Request) -> Result<(), Box<dyn std::error::Erro
             }
         }
     }
+    let video_id = urlencoding::decode(&video_id).map(|c| c.into_owned()).unwrap_or(video_id);
 
-    if video_id.is_empty() {
-        return request.respond(Response::from_string("Missing video ID").with_status_code(400)).map_err(|e| e.into());
+    if !is_valid_video_id(&video_id) {
+        return request.respond(Response::from_string("Invalid video ID").with_status_code(400)).map_err(|e| e.into());
     }
 
     let html = format!(
@@ -106,8 +80,7 @@ fn handle_youtube_embed(request: Request) -> Result<(), Box<dyn std::error::Erro
 
     let response = Response::from_string(html)
         .with_header(Header::from_bytes(&b"Content-Type"[..], b"text/html").unwrap())
-        .with_header(Header::from_bytes(&b"Cache-Control"[..], b"no-cache").unwrap())
-        .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], b"*").unwrap());
+        .with_header(Header::from_bytes(&b"Cache-Control"[..], b"no-cache").unwrap());
 
     request.respond(response)?;
     Ok(())
@@ -122,25 +95,4 @@ fn handle_request(request: Request) -> Result<(), Box<dyn std::error::Error>> {
     // For other requests, return 404
     request.respond(Response::from_string("Not Found").with_status_code(404))?;
     Ok(())
-}
-
-fn get_content_type(path: &PathBuf) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("html") => "text/html",
-        Some("css") => "text/css",
-        Some("js") => "application/javascript",
-        Some("json") => "application/json",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("ico") => "image/x-icon",
-        Some("woff") => "font/woff",
-        Some("woff2") => "font/woff2",
-        Some("ttf") => "font/ttf",
-        Some("eot") => "application/vnd.ms-fontobject",
-        Some("mp4") => "video/mp4",
-        Some("webm") => "video/webm",
-        _ => "application/octet-stream",
-    }
 }

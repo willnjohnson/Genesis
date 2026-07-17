@@ -271,6 +271,10 @@ export async function getAppInfo(): Promise<AppInfo> {
     return await invoke("get_app_info");
 }
 
+export async function getEmbedServerPort(): Promise<number | null> {
+    return await invoke("get_embed_server_port");
+}
+
 export interface GlossaryTerm {
     term: string;
     definition: string;

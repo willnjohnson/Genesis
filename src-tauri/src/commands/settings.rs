@@ -49,7 +49,7 @@ pub async fn select_folder(app: tauri::AppHandle) -> Result<Option<String>, Stri
 pub fn set_db_path_override(app: tauri::AppHandle, folder_path: String) -> Result<String, String> {
     use tauri::Manager;
     let state = app.state::<DbPathState>();
-    let mut guard = state.0.lock().unwrap();
+    let mut guard = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let old_db_path = if let Some(ref path) = *guard {
         path.clone()

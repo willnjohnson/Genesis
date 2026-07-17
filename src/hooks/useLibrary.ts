@@ -6,6 +6,13 @@ import {
 } from "../api";
 import { type NotificationType } from "../components/Notification";
 
+/**
+ * Owns the saved-videos library: loading (metadata-only by default, full text on demand via
+ * `ensureFullTextLoaded`), saving (single or bulk, chunked 10-at-a-time via `handleSaveAll` to
+ * avoid overwhelming the backend with one giant batch), deleting (two-phase: `handleDeleteVideo`/
+ * `handleDeleteFromSidebar` stage a pending confirmation, `confirmDeleteAction` commits it), and
+ * bulk summarization.
+ */
 export function useLibrary(
     pluginSummarizeEnabled: boolean,
     filteredSearchVideos: Video[],

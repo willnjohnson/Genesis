@@ -1,9 +1,9 @@
 import { Save, Trash2, Bookmark, ArrowDown, ArrowUp, Calendar, Users, Sparkles, FileText } from 'lucide-react';
-import { type Video, fetchImageAsDataUri, saveImage } from '../api';
+import { type Video } from '../api';
 import { useState, useMemo, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { format } from 'date-fns';
-import { save } from '@tauri-apps/plugin-dialog';
+import { saveImageAs } from '../lib/save-image-as';
 
 // Mirrors the Tailwind breakpoints used by the grid className below (sm/md/lg/xl/2xl at
 // Tailwind's default 640/768/1024/1280/1536px) so the virtualizer knows how many cards land in
@@ -65,26 +65,10 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
     const [filter, setFilter] = useState<FilterType>('all');
 
     const handleSaveImageAs = async (url: string) => {
-        try {
-            let dataUri = url;
-            if (!url.startsWith('data:')) {
-                dataUri = await fetchImageAsDataUri(url);
-            }
-            if (!dataUri) return;
-
-            const filePath = await save({
-                filters: [{ name: 'Image', extensions: ['webp', 'jpg', 'png'] }],
-                defaultPath: 'video-thumbnail.webp'
-            });
-            
-            if (filePath) {
-                const parts = dataUri.split(',');
-                const base64 = parts.length > 1 ? parts[1] : parts[0];
-                await saveImage(filePath, base64);
-            }
-        } catch (e: any) {
-            console.error("Save failed:", e);
-        }
+        await saveImageAs(url, {
+            filters: [{ name: 'Image', extensions: ['webp', 'jpg', 'png'] }],
+            defaultPath: 'video-thumbnail.webp'
+        });
     };
 
     const filteredVideos = useMemo(() => {
@@ -360,12 +344,13 @@ function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowD
                                         {formatDate(video.dateAdded)}
                                     </span>
                                 </div>
-                                {/* Icons moved to absolute container below for better alignment and clickability */}
                             </div>
                         )}
                     </div>
                 </div>
 
+                {/* Absolutely positioned (rather than inline above) so these stay pinned to the
+                    bottom-right corner even when dateAdded is absent and the block above doesn't render. */}
                 <div className="absolute bottom-0 right-0 flex items-center gap-1 z-20">
                     {(video.hasTranscript ?? !!video.transcript) && (
                         <button

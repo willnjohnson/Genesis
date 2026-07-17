@@ -1,5 +1,8 @@
 use rusqlite::{params, Connection, Result};
 
+/// Fixed field order returned by get_biographies/get_biography_by_handle: (handle, display_name,
+/// bio, wikipedia, website, twitter, instagram, facebook, threads, youtube, tiktok, twitch,
+/// reddit, discord).
 pub type BiographyRow = (
     String,
     String,
@@ -17,6 +20,9 @@ pub type BiographyRow = (
     String,
 );
 
+/// Ensures a biography row exists for `handle`, seeding it with `display_name`. If a row already
+/// exists, `display_name` is only applied when the existing one is empty — this never overwrites
+/// a display name a user has already set (e.g. via manual edit), only fills in a blank one.
 pub fn upsert_biography_from_video(db_path: &str, handle: &str, display_name: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     let cleaned_handle = handle.trim();
@@ -37,6 +43,8 @@ pub fn upsert_biography_from_video(db_path: &str, handle: &str, display_name: &s
     Ok(())
 }
 
+/// Returns all biography rows, sorted by display_name (falling back to handle when display_name
+/// is blank), case-insensitively.
 pub fn get_biographies(db_path: &str) -> Result<Vec<BiographyRow>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
@@ -68,6 +76,7 @@ pub fn get_biographies(db_path: &str) -> Result<Vec<BiographyRow>> {
     Ok(entries)
 }
 
+/// Looks up one biography row by handle, case-insensitively.
 pub fn get_biography_by_handle(db_path: &str, handle: &str) -> Result<Option<BiographyRow>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
@@ -98,6 +107,8 @@ pub fn get_biography_by_handle(db_path: &str, handle: &str) -> Result<Option<Bio
     }
 }
 
+/// Updates the editable bio/social fields for a handle. Does not touch `handle` or
+/// `display_name` — those are only ever set via upsert_biography_from_video.
 #[allow(clippy::too_many_arguments)]
 pub fn update_biography_details(
     db_path: &str,
@@ -147,52 +158,5 @@ pub fn update_biography_details(
             discord
         ],
     )?;
-    Ok(())
-}
-
-/// Populate biographies table from existing video handles.
-/// For each distinct handle in the videos table:
-/// - If no biography entry exists, create one with the author as display_name
-/// - If biography entry exists but display_name is empty, update it with author
-pub fn populate_biographies_from_videos(db_path: &str) -> Result<()> {
-    let conn = Connection::open(db_path)?;
-
-    // Get distinct handles with their corresponding author (use MIN for deterministic choice)
-    let mut stmt = conn.prepare(
-        "SELECT handle, MIN(author) as author
-         FROM videos
-         WHERE handle IS NOT NULL AND handle != ''
-         GROUP BY handle"
-    )?;
-    let rows: Vec<(String, Option<String>)> = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-        ))
-    })?.filter_map(|r| r.ok()).collect();
-
-    // One transaction for the whole batch instead of an autocommit round trip per handle.
-    let tx = conn.unchecked_transaction()?;
-    let mut count = 0;
-    for (handle, author_opt) in rows {
-        let display_name = author_opt.unwrap_or_else(|| "".to_string());
-
-        // Use upsert that preserves existing non-empty display_name
-        tx.execute(
-            "INSERT INTO biographies (handle, display_name)
-             VALUES (?1, ?2)
-             ON CONFLICT(handle) DO UPDATE SET
-               display_name = CASE
-                 WHEN TRIM(biographies.display_name) = ''
-                 THEN excluded.display_name
-                 ELSE biographies.display_name
-               END",
-            params![handle, display_name],
-        )?;
-        count += 1;
-    }
-    tx.commit()?;
-
-    log::info!("Populated {} biography entries from existing videos", count);
     Ok(())
 }

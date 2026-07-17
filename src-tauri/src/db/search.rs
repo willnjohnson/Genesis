@@ -3,25 +3,41 @@ use regex::Regex;
 use rusqlite::{params, Connection, Result};
 use super::summaries::has_real_summary;
 
-fn video_row(row: &rusqlite::Row) -> rusqlite::Result<Video> {
-    let view_count_str = match row.get::<_, Option<i64>>(6) {
-        Ok(Some(0)) | Ok(None) => "Saved".to_string(),
-        Ok(Some(n)) => n.to_string(),
-        Err(_) => match row.get::<_, Option<String>>(6) {
-            Ok(Some(ref s)) if s == "0" => "Saved".to_string(),
-            Ok(Some(s)) => s,
-            _ => "Saved".to_string(),
-        },
+// Canonical column order for every video_row() caller, as a single source of truth: video_id,
+// title, author, handle, length_seconds, transcript, view_count, published_at, video_type,
+// date_added, tags, summary, has_transcript, has_summary. `alias` is an optional table-alias
+// prefix (e.g. "v.") for queries that join against other tables; pass "" for a plain single-table
+// SELECT. Used by search_library_videos below and by db::videos::list_videos.
+pub(crate) fn video_columns_sql(alias: &str) -> String {
+    let cols = [
+        "video_id", "title", "author", "handle", "length_seconds", "transcript",
+        "view_count", "published_at", "video_type", "date_added", "tags", "summary",
+    ];
+    let prefixed = cols.iter().map(|c| format!("{alias}{c}")).collect::<Vec<_>>().join(", ");
+    format!(
+        "{prefixed}, \
+         CASE WHEN {alias}transcript IS NOT NULL AND {alias}transcript != '' THEN 1 ELSE 0 END AS has_transcript, \
+         CASE WHEN {alias}summary IS NOT NULL AND {alias}summary != '' THEN 1 ELSE 0 END AS has_summary"
+    )
+}
+
+// Row-mapper matching the column order built by video_columns_sql above.
+//
+// `include_content` gates whether the transcript/summary text is exposed on the returned Video.
+// summary is still always decoded from the row (has_summary needs it regardless of the flag);
+// transcript is only decoded when requested, since it can be far larger and has_transcript is
+// derived from the precomputed SQL column, not from the transcript text itself.
+pub(crate) fn video_row(row: &rusqlite::Row, include_content: bool) -> rusqlite::Result<Video> {
+    let view_count_str = match row.get::<_, Option<i64>>(6).unwrap_or(None) {
+        Some(0) | None => "Saved".to_string(),
+        Some(n) => n.to_string(),
     };
     let raw_summary: Option<String> = row.get(11).unwrap_or(None);
     Ok(Video {
         id: row.get::<_, String>(0).unwrap_or_default(),
         title: row.get::<_, Option<String>>(1).unwrap_or(None).unwrap_or_else(|| "Unknown".to_string()),
         author: row.get::<_, Option<String>>(2).unwrap_or(None),
-        length_seconds: match row.get::<_, Option<i32>>(4) {
-            Ok(v) => v,
-            Err(_) => row.get::<_, Option<String>>(4).unwrap_or(None).and_then(|s| s.parse().ok()),
-        },
+        length_seconds: row.get::<_, Option<i32>>(4).unwrap_or(None),
         view_count: view_count_str,
         thumbnail: format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", row.get::<_, String>(0).unwrap_or_default()),
         published_at: row.get::<_, Option<String>>(7).unwrap_or(None).unwrap_or_else(|| "".to_string()),
@@ -29,9 +45,9 @@ fn video_row(row: &rusqlite::Row) -> rusqlite::Result<Video> {
         date_added: row.get::<_, Option<String>>(9).unwrap_or(None),
         handle: row.get::<_, Option<String>>(3).unwrap_or(None),
         video_type: row.get::<_, Option<String>>(8).unwrap_or(None),
-        transcript: Some(row.get::<_, Option<String>>(5).unwrap_or(None).unwrap_or_else(|| "".to_string())),
+        transcript: if include_content { row.get::<_, Option<String>>(5).unwrap_or(None) } else { None },
         tags: row.get::<_, Option<String>>(10).unwrap_or(None),
-        summary: Some(raw_summary.clone().unwrap_or_else(|| "".to_string())),
+        summary: if include_content { raw_summary.clone() } else { None },
         has_transcript: Some(row.get::<_, i64>(12).unwrap_or(0) > 0),
         has_summary: Some(raw_summary.as_deref().map(has_real_summary).unwrap_or(false)),
     })
@@ -70,9 +86,21 @@ pub fn search_library_videos(
         _ => "1=1",
     };
 
-    let columns = "v.video_id, v.title, v.author, v.handle, v.length_seconds, v.transcript, v.view_count, v.published_at, v.video_type, v.date_added, v.tags, v.summary,
-                CASE WHEN v.transcript IS NOT NULL AND v.transcript != '' THEN 1 ELSE 0 END AS has_transcript,
-                CASE WHEN v.summary IS NOT NULL AND v.summary != '' THEN 1 ELSE 0 END AS has_summary";
+    let columns = video_columns_sql("v.");
+
+    // Row cap for both query paths below. Read from the settings table ('librarySearchLimit')
+    // so a developer can tune it without recompiling; falls back to 1024 when the key is
+    // missing or not a positive integer.
+    let limit: i64 = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'librarySearchLimit'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1024);
 
     let mut videos = Vec::new();
 
@@ -88,7 +116,7 @@ pub fn search_library_videos(
                AND (?5 = '' OR v.tags LIKE ?6)
                AND {video_type_where}
              ORDER BY v.date_added DESC, v.rowid DESC
-             LIMIT 10240"
+             LIMIT {limit}"
         );
         let mut stmt = conn.prepare(&sql)?;
         let video_iter = stmt.query_map(
@@ -100,7 +128,7 @@ pub fn search_library_videos(
                 tag_val,
                 format!("%{}%", tag_val)
             ],
-            video_row,
+            |row| video_row(row, true),
         )?;
         for video in video_iter {
             videos.push(video?);
@@ -128,7 +156,7 @@ pub fn search_library_videos(
                AND (?6 = '' OR v.tags LIKE ?7)
                AND {video_type_where}
              ORDER BY bm25(ftsVideos, 8.0, 10.0, 1.0)
-             LIMIT 10240"
+             LIMIT {limit}"
         );
         let mut stmt = conn.prepare(&sql)?;
         let video_iter = stmt.query_map(
@@ -141,7 +169,7 @@ pub fn search_library_videos(
                 tag_val,
                 format!("%{}%", tag_val)
             ],
-            video_row,
+            |row| video_row(row, true),
         )?;
         for video in video_iter {
             videos.push(video?);
