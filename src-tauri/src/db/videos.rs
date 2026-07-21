@@ -1,16 +1,26 @@
 use crate::Video;
 use rusqlite::{params, Connection, Result};
 use super::summaries::{append_channel_info_footer, clean_blockquote_lines, clear_transcript_after_summary, has_real_summary};
-use super::search::{regenerate_tokens_from_transcript, video_row, video_columns_sql};
+use super::search::{regenerate_tokens_from_transcript, video_row, video_columns_sql, filter_kind_where, library_order_by};
 
-/// Lists videos ordered newest-first, optionally filtered to one `video_type` ("short"/"standard").
+/// Pages the Library grid: optionally filtered to one `video_type` ("short"/"standard") and one
+/// `filter_kind` ("transcript"/"summary"/None-or-"all"), ordered per `sort_field`/`sort_order`
+/// (see `library_order_by`), and capped to `limit` rows starting at `offset` so a several-
+/// thousand-video library never has to be pulled into memory at once. Returns the page of videos
+/// alongside the total count of rows matching the filters (ignoring limit/offset), which the
+/// frontend uses for "X of Y results" and to know whether there's another page to load.
 /// `include_content` gates whether transcript/summary text is decoded and returned at all — pass
 /// `false` for grid/list views that only need metadata and the has_transcript/has_summary flags.
 pub fn list_videos(
     db_path: &str,
     video_type_filter: Option<&str>,
+    filter_kind: Option<&str>,
+    sort_field: Option<&str>,
+    sort_order: Option<&str>,
+    limit: i64,
+    offset: i64,
     include_content: bool,
-) -> Result<Vec<Video>> {
+) -> Result<(Vec<Video>, i64)> {
     let conn = Connection::open(db_path)?;
 
     let video_type_where = match video_type_filter {
@@ -18,19 +28,29 @@ pub fn list_videos(
         Some("standard") => "video_type = 'standard'",
         _ => "1=1",
     };
+    let filter_where = filter_kind_where("", filter_kind);
+    let where_sql = format!("{video_type_where} AND {filter_where}");
+
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM videos WHERE {where_sql}"),
+        [],
+        |row| row.get(0),
+    )?;
+
     let columns = video_columns_sql("");
+    let order = library_order_by("", sort_field, sort_order);
     let query = format!(
-        "SELECT {columns} FROM videos WHERE {video_type_where} ORDER BY date_added DESC, rowid DESC"
+        "SELECT {columns} FROM videos WHERE {where_sql} ORDER BY {order} LIMIT ?1 OFFSET ?2"
     );
 
     let mut stmt = conn.prepare(&query)?;
-    let video_iter = stmt.query_map([], |row| video_row(row, include_content))?;
+    let video_iter = stmt.query_map(params![limit, offset], |row| video_row(row, include_content))?;
 
     let mut videos = Vec::new();
     for video in video_iter {
         videos.push(video?);
     }
-    Ok(videos)
+    Ok((videos, total))
 }
 
 /// Upserts a video's metadata and transcript. On conflict, `summary` only overwrites the

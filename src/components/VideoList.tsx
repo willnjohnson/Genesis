@@ -38,6 +38,10 @@ function useColumnCount(compact: boolean) {
     return columns;
 }
 
+export type SortField = 'popularity' | 'date' | 'added';
+export type SortOrder = 'desc' | 'asc';
+export type FilterType = 'all' | 'transcript' | 'summary';
+
 interface Props {
     videos: Video[];
     onSelect: (video: Video) => void;
@@ -45,24 +49,46 @@ interface Props {
     onDelete?: (video: Video) => void;
     saveProgress?: string | null;
     compact?: boolean;
-    onSummarizeAll?: () => void;
-    summarizeProgress?: string | null;
-    summarizedCount?: number;
     totalCount?: number;
     isLibrary?: boolean;
     allowDeletion?: boolean;
     onSelectWithTab?: (video: Video, tab: 'transcript' | 'summary') => void;
-    showSummarizeButton?: boolean;
+    // Library mode only: keeps the sort/filter header visible (so the buttons are always usable)
+    // even while a page-1 reload is in flight or a search/filter turned up nothing.
+    loading?: boolean;
+    emptyTitle?: string;
+    emptyMessage?: string;
+    // Sort/filter are "controlled" when these are passed (Library mode, where sorting/filtering
+    // happens server-side and the buttons must survive a new search — see hooks/useLibrary.ts).
+    // Left uncontrolled (internal state) for the plain YouTube-search view, whose results are
+    // already fully loaded client-side.
+    sortField?: SortField;
+    onSortFieldChange?: (field: SortField) => void;
+    sortOrder?: SortOrder;
+    onToggleSortOrder?: () => void;
+    filterKind?: FilterType;
+    onFilterKindChange?: (filter: FilterType) => void;
+    // Infinite-scroll pagination (Library mode only).
+    onLoadMore?: () => void;
+    loadingMore?: boolean;
+    hasMore?: boolean;
 }
 
-type SortField = 'popularity' | 'date' | 'added';
-type SortOrder = 'desc' | 'asc';
-type FilterType = 'all' | 'transcript' | 'summary';
+export function VideoList({
+    videos, onSelect, onSaveAll, onDelete, saveProgress, compact = false, totalCount, isLibrary = false,
+    allowDeletion = true, onSelectWithTab,
+    sortField: sortFieldProp, onSortFieldChange, sortOrder: sortOrderProp, onToggleSortOrder,
+    filterKind: filterProp, onFilterKindChange,
+    onLoadMore, loadingMore = false, hasMore = false,
+    loading = false, emptyTitle, emptyMessage,
+}: Props) {
+    const [internalSortField, setInternalSortField] = useState<SortField>('date');
+    const [internalSortOrder, setInternalSortOrder] = useState<SortOrder>('desc');
+    const [internalFilter, setInternalFilter] = useState<FilterType>('all');
 
-export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress, compact = false, onSummarizeAll, summarizeProgress, summarizedCount = 0, totalCount = 0, isLibrary = false, allowDeletion = true, onSelectWithTab, showSummarizeButton = true }: Props) {
-    const [sortField, setSortField] = useState<SortField>('date');
-    const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
-    const [filter, setFilter] = useState<FilterType>('all');
+    const sortField = sortFieldProp ?? internalSortField;
+    const sortOrder = sortOrderProp ?? internalSortOrder;
+    const filter = filterProp ?? internalFilter;
 
     const handleSaveImageAs = async (url: string) => {
         await saveImageAs(url, {
@@ -71,8 +97,12 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
         });
     };
 
+    // Library mode's `videos` prop already arrives filtered/sorted/paginated by the backend
+    // (see db/search.rs's filter_kind_where/library_order_by), so skip redoing it client-side —
+    // filtering/sorting again here would only be re-deriving what the server already decided,
+    // and can't be "more correct" since it's operating on a partial (one-page) result set anyway.
     const filteredVideos = useMemo(() => {
-        if (!isLibrary) return videos;
+        if (isLibrary) return videos;
         return videos.filter(v => {
             const hasTranscript = v.hasTranscript ?? !!v.transcript;
             const hasSummary = v.hasSummary ?? !!v.summary;
@@ -83,6 +113,7 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
     }, [videos, filter, isLibrary]);
 
     const sortedVideos = useMemo(() => {
+        if (isLibrary) return filteredVideos;
         return [...filteredVideos].sort((a, b) => {
             let cmp = 0;
             if (sortField === 'popularity') {
@@ -111,10 +142,16 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
             if (cmp === 0) return a.id.localeCompare(b.id);
             return sortOrder === 'asc' ? cmp : -cmp;
         });
-    }, [filteredVideos, sortField, sortOrder]);
+    }, [filteredVideos, sortField, sortOrder, isLibrary]);
 
     const handleSortField = (field: SortField) => {
-        setSortField(field);
+        if (onSortFieldChange) onSortFieldChange(field);
+        else setInternalSortField(field);
+    };
+
+    const handleFilter = (f: FilterType) => {
+        if (onFilterKindChange) onFilterKindChange(f);
+        else setInternalFilter(f);
     };
 
     const columns = useColumnCount(compact);
@@ -140,10 +177,33 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
     });
 
     const toggleSortOrder = () => {
-        setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc');
+        if (onToggleSortOrder) onToggleSortOrder();
+        else setInternalSortOrder(prev => prev === 'desc' ? 'asc' : 'desc');
     };
 
-    if (videos.length === 0) return null;
+    // Infinite scroll: once the last rendered row is at (or near) the end of the currently
+    // loaded rows, ask the parent for the next page. `loadMoreLockRef` prevents re-firing on
+    // every intermediate scroll-driven render before `loadingMore` has had a chance to flip
+    // true and take over as the guard.
+    const loadMoreLockRef = useRef(false);
+    useEffect(() => {
+        loadMoreLockRef.current = loadingMore;
+    }, [loadingMore]);
+
+    const virtualItems = rowVirtualizer.getVirtualItems();
+    const lastVirtualIndex = virtualItems.length > 0 ? virtualItems[virtualItems.length - 1].index : -1;
+    useEffect(() => {
+        if (!isLibrary || !onLoadMore || !hasMore || loadingMore || loadMoreLockRef.current) return;
+        if (lastVirtualIndex >= rows.length - 1) {
+            loadMoreLockRef.current = true;
+            onLoadMore();
+        }
+    }, [isLibrary, onLoadMore, hasMore, loadingMore, lastVirtualIndex, rows.length]);
+
+    // Library mode keeps rendering (header + sort/filter buttons) even with zero results, so the
+    // buttons stay usable to back out of a too-narrow filter/search. The plain search view keeps
+    // its old behavior of rendering nothing until there's something to show.
+    if (!isLibrary && videos.length === 0) return null;
 
     return (
         <div className="w-full">
@@ -152,7 +212,9 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                 <div className="flex items-baseline gap-1.5 flex-shrink-0">
                     <h3 className="text-xl font-bold text-white">Videos</h3>
                     <span className="text-[#aaaaaa] text-sm font-medium">
-                        ({filteredVideos.length} results)
+                        {typeof totalCount === 'number' && totalCount > filteredVideos.length
+                            ? `(${filteredVideos.length} of ${totalCount} results)`
+                            : `(${filteredVideos.length} results)`}
                     </span>
                 </div>
 
@@ -186,7 +248,7 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                                 <Calendar className="w-3 h-3" />
                                 Date Added
                             </button>
-                            {videos.some(v => v.dateAdded) && (
+                            {(isLibrary || videos.some(v => v.dateAdded)) && (
                                 <button
                                     onClick={() => handleSortField('added')}
                                     className={`px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${sortField === 'added' ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`}
@@ -222,20 +284,20 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
                     {isLibrary && (
                         <div className="flex items-center bg-[#1a1a1a] p-0.5 rounded-lg border border-[#272727] gap-0.5">
                             <button
-                                onClick={() => setFilter('all')}
+                                onClick={() => handleFilter('all')}
                                 className={`px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${filter === 'all' ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`}
                             >
                                 All Videos
                             </button>
                             <button
-                                onClick={() => setFilter('transcript')}
+                                onClick={() => handleFilter('transcript')}
                                 className={`px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${filter === 'transcript' ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`}
                             >
                                 <FileText className="w-3 h-3" />
                                 Transcript Only
                             </button>
                             <button
-                                onClick={() => setFilter('summary')}
+                                onClick={() => handleFilter('summary')}
                                 className={`px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${filter === 'summary' ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`}
                             >
                                 <Sparkles className="w-3 h-3" />
@@ -247,37 +309,60 @@ export function VideoList({ videos, onSelect, onSaveAll, onDelete, saveProgress,
             </div>
 
 
-            <div ref={gridRef} style={{ position: 'relative', height: rowVirtualizer.getTotalSize() }}>
-                {rowVirtualizer.getVirtualItems().map((virtualRow) => (
-                    <div
-                        key={virtualRow.key}
-                        ref={rowVirtualizer.measureElement}
-                        data-index={virtualRow.index}
-                        style={{
-                            position: 'absolute',
-                            top: 0,
-                            left: 0,
-                            width: '100%',
-                            transform: `translateY(${virtualRow.start - rowVirtualizer.options.scrollMargin}px)`,
-                        }}
-                    >
-                        <div className={`grid gap-x-3 pb-8 ${compact ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'}`}>
-                            {rows[virtualRow.index].map((video) => (
-                                <VideoCard
-                                    key={video.id}
-                                    video={video}
-                                    compact={compact}
-                                    onSelect={onSelect}
-                                    onSelectWithTab={onSelectWithTab}
-                                    onDelete={onDelete}
-                                    allowDeletion={allowDeletion}
-                                    onSaveImageAs={handleSaveImageAs}
-                                />
-                            ))}
-                        </div>
+            {isLibrary && videos.length === 0 ? (
+                loading ? (
+                    <div className="flex flex-col items-center justify-center py-24 text-gray-400 space-y-4">
+                        <div className="w-8 h-8 border-4 border-[#303030] border-t-red-600 rounded-full animate-spin" />
+                        <p className="font-medium text-sm">Loading...</p>
                     </div>
-                ))}
-            </div>
+                ) : (
+                    <div className="text-center text-gray-500 py-24">
+                        <p className="text-xl font-bold text-white mb-2">{emptyTitle ?? "No results"}</p>
+                        {emptyMessage && <p className="text-sm">{emptyMessage}</p>}
+                    </div>
+                )
+            ) : (
+                <>
+                    <div ref={gridRef} style={{ position: 'relative', height: rowVirtualizer.getTotalSize() }}>
+                        {virtualItems.map((virtualRow) => (
+                            <div
+                                key={virtualRow.key}
+                                ref={rowVirtualizer.measureElement}
+                                data-index={virtualRow.index}
+                                style={{
+                                    position: 'absolute',
+                                    top: 0,
+                                    left: 0,
+                                    width: '100%',
+                                    transform: `translateY(${virtualRow.start - rowVirtualizer.options.scrollMargin}px)`,
+                                }}
+                            >
+                                <div className={`grid gap-x-3 pb-8 ${compact ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'}`}>
+                                    {rows[virtualRow.index].map((video) => (
+                                        <VideoCard
+                                            key={video.id}
+                                            video={video}
+                                            compact={compact}
+                                            onSelect={onSelect}
+                                            onSelectWithTab={onSelectWithTab}
+                                            onDelete={onDelete}
+                                            allowDeletion={allowDeletion}
+                                            onSaveImageAs={handleSaveImageAs}
+                                        />
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {isLibrary && loadingMore && (
+                        <div className="flex items-center justify-center gap-2 py-6 text-[#aaaaaa] text-sm">
+                            <div className="w-4 h-4 border-2 border-[#303030] border-t-red-600 rounded-full animate-spin" />
+                            Loading more...
+                        </div>
+                    )}
+                </>
+            )}
         </div>
     );
 }

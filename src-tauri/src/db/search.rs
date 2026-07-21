@@ -53,26 +53,84 @@ pub(crate) fn video_row(row: &rusqlite::Row, include_content: bool) -> rusqlite:
     })
 }
 
+// SQL boolean expression (against the `summary` column on `alias`) mirroring
+// `summaries::has_real_summary()`: true when there's non-whitespace content before any
+// "Channel Info: ..." footer that append_channel_info_footer() appends. Needed because the
+// `has_summary` column produced by video_columns_sql() above only checks non-empty, not "real".
+fn has_real_summary_sql(alias: &str) -> String {
+    format!(
+        "TRIM(SUBSTR(COALESCE({alias}summary, ''), 1, \
+         CASE WHEN INSTR(COALESCE({alias}summary, ''), 'Channel Info:') > 0 \
+              THEN INSTR(COALESCE({alias}summary, ''), 'Channel Info:') - 1 \
+              ELSE LENGTH(COALESCE({alias}summary, '')) END)) != ''"
+    )
+}
+
+// WHERE-clause fragment for the Library grid's All Videos / Transcript Only / With AI Summary
+// filter buttons (`filter_kind`: None/"all", "transcript", "summary").
+pub(crate) fn filter_kind_where(alias: &str, filter_kind: Option<&str>) -> String {
+    match filter_kind {
+        Some("transcript") => format!(
+            "(({alias}transcript IS NOT NULL AND {alias}transcript != '') AND NOT ({}))",
+            has_real_summary_sql(alias)
+        ),
+        Some("summary") => has_real_summary_sql(alias),
+        _ => "1=1".to_string(),
+    }
+}
+
+// ORDER BY clause for the Library grid's Date Added / Date Bookmarked / Views sort buttons.
+// `sort_field`: "added" -> date_added (bookmark time), "popularity" -> view_count, otherwise
+// (None/"date") -> published_at (YouTube's publish date). Ties break on rowid so pagination
+// (LIMIT/OFFSET) across pages stays stable.
+pub(crate) fn library_order_by(alias: &str, sort_field: Option<&str>, sort_order: Option<&str>) -> String {
+    let col = match sort_field {
+        Some("added") => "date_added",
+        Some("popularity") => "view_count",
+        _ => "published_at",
+    };
+    let dir = if sort_order == Some("asc") { "ASC" } else { "DESC" };
+    format!("{alias}{col} {dir}, {alias}rowid {dir}")
+}
+
+/// Paged/sorted/filtered library search. Returns `(videos for this page, total matching count)`.
+/// `limit`/`offset` drive Library grid pagination (100 rows per page, "load more" on scroll);
+/// `filter_kind`/`sort_field`/`sort_order` mirror the grid's filter/sort buttons so results stay
+/// consistent with whatever the user had selected, including while a free-text search is active.
 pub fn search_library_videos(
     db_path: &str,
     query: &str,
     video_type_filter: Option<&str>,
-) -> Result<Vec<Video>> {
+    filter_kind: Option<&str>,
+    sort_field: Option<&str>,
+    sort_order: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<(Vec<Video>, i64)> {
     let conn = Connection::open(db_path)?;
 
     let facet_re = Regex::new(r#"([a-z_]+):(?:"([^"]*)"|([^ ]*))"#).unwrap();
     let mut handle_val = "";
     let mut video_val = "";
     let mut tag_val = "";
+    // tag_search:"exact tag" (quoted) means an exact, case-insensitive match against one of the
+    // video's comma-separated tags; tag_search:contains (bare) means a substring match — the
+    // same quoted-vs-bare distinction every other facet value already gets from this regex's two
+    // capture groups. Replaces the old trailing-`#` convention.
+    let mut tag_exact = false;
     let mut remaining = query.to_string();
 
     for cap in facet_re.captures_iter(query) {
         let facet_type = &cap[1];
-        let value = cap.get(2).map(|m| m.as_str()).unwrap_or_else(|| cap.get(3).map(|m| m.as_str()).unwrap_or(""));
+        let quoted = cap.get(2).map(|m| m.as_str());
+        let value = quoted.unwrap_or_else(|| cap.get(3).map(|m| m.as_str()).unwrap_or(""));
         match facet_type {
             "handle" => handle_val = value,
             "video" => video_val = value,
-            "tag_search" => tag_val = value,
+            "tag_search" => {
+                tag_val = value;
+                tag_exact = quoted.is_some();
+            }
             _ => {}
         }
         remaining = remaining.replace(&cap[0], "");
@@ -85,48 +143,52 @@ pub fn search_library_videos(
         Some("standard") => "v.video_type = 'standard'",
         _ => "1=1",
     };
-
+    let filter_where = filter_kind_where("v.", filter_kind);
     let columns = video_columns_sql("v.");
+    let order = library_order_by("v.", sort_field, sort_order);
 
-    // Row cap for both query paths below. Read from the settings table ('librarySearchLimit')
-    // so a developer can tune it without recompiling; falls back to 1024 when the key is
-    // missing or not a positive integer.
-    let limit: i64 = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'librarySearchLimit'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(1024);
+    // Exact match compares against the tag list wrapped in delimiters (",tag1,tag2,") so a
+    // pattern of "%,<value>,%" only matches a whole tag, not a substring spanning two tags or a
+    // partial word within one; contains-match is the existing plain substring LIKE. SQLite's
+    // LIKE is case-insensitive for ASCII by default, which covers the "ignoring casing" ask.
+    let tag_col = if tag_exact { "(',' || v.tags || ',')" } else { "v.tags" };
+    let tag_pattern = |v: &str| if tag_exact { format!("%,{},%", v) } else { format!("%{}%", v) };
 
     let mut videos = Vec::new();
+    let total: i64;
 
     if free_text.is_empty() {
         // No free-text search term (e.g. a bare handle:/video:/tag_search: facet) — skip the
         // FTS5 MATCH entirely rather than passing it an empty/wildcard query, which FTS5
         // rejects as a syntax error and would otherwise fail the whole search.
-        let sql = format!(
-            "SELECT {columns}
-             FROM videos AS v
-             WHERE (?1 = '' OR v.handle LIKE ?2)
+        let where_sql = format!(
+            "(?1 = '' OR v.handle LIKE ?2)
                AND (?3 = '' OR v.video_id LIKE ?4)
-               AND (?5 = '' OR v.tags LIKE ?6)
+               AND (?5 = '' OR {tag_col} LIKE ?6)
                AND {video_type_where}
-             ORDER BY v.date_added DESC, v.rowid DESC
-             LIMIT {limit}"
+               AND {filter_where}"
+        );
+        let count_sql = format!("SELECT COUNT(*) FROM videos AS v WHERE {where_sql}");
+        total = conn.query_row(
+            &count_sql,
+            params![
+                handle_val, format!("%{}%", handle_val),
+                video_val, format!("%{}%", video_val),
+                tag_val, tag_pattern(tag_val)
+            ],
+            |row| row.get(0),
+        )?;
+
+        let sql = format!(
+            "SELECT {columns} FROM videos AS v WHERE {where_sql} ORDER BY {order} LIMIT ?7 OFFSET ?8"
         );
         let mut stmt = conn.prepare(&sql)?;
         let video_iter = stmt.query_map(
             params![
-                handle_val,
-                format!("%{}%", handle_val),
-                video_val,
-                format!("%{}%", video_val),
-                tag_val,
-                format!("%{}%", tag_val)
+                handle_val, format!("%{}%", handle_val),
+                video_val, format!("%{}%", video_val),
+                tag_val, tag_pattern(tag_val),
+                limit, offset
             ],
             |row| video_row(row, true),
         )?;
@@ -146,28 +208,44 @@ pub fn search_library_videos(
             .collect::<Vec<_>>()
             .join(" ");
 
+        let where_sql = format!(
+            "ftsVideos MATCH ?1
+               AND (?2 = '' OR v.handle LIKE ?3)
+               AND (?4 = '' OR v.video_id LIKE ?5)
+               AND (?6 = '' OR {tag_col} LIKE ?7)
+               AND {video_type_where}
+               AND {filter_where}"
+        );
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql}"
+        );
+        total = conn.query_row(
+            &count_sql,
+            params![
+                fts_query,
+                handle_val, format!("%{}%", handle_val),
+                video_val, format!("%{}%", video_val),
+                tag_val, tag_pattern(tag_val)
+            ],
+            |row| row.get(0),
+        )?;
+
         let sql = format!(
             "SELECT {columns}
              FROM videos AS v
              JOIN ftsVideos ON v.rowid = ftsVideos.rowid
-             WHERE ftsVideos MATCH ?1
-               AND (?2 = '' OR v.handle LIKE ?3)
-               AND (?4 = '' OR v.video_id LIKE ?5)
-               AND (?6 = '' OR v.tags LIKE ?7)
-               AND {video_type_where}
-             ORDER BY bm25(ftsVideos, 8.0, 10.0, 1.0)
-             LIMIT {limit}"
+             WHERE {where_sql}
+             ORDER BY {order}
+             LIMIT ?8 OFFSET ?9"
         );
         let mut stmt = conn.prepare(&sql)?;
         let video_iter = stmt.query_map(
             params![
                 fts_query,
-                handle_val,
-                format!("%{}%", handle_val),
-                video_val,
-                format!("%{}%", video_val),
-                tag_val,
-                format!("%{}%", tag_val)
+                handle_val, format!("%{}%", handle_val),
+                video_val, format!("%{}%", video_val),
+                tag_val, tag_pattern(tag_val),
+                limit, offset
             ],
             |row| video_row(row, true),
         )?;
@@ -176,7 +254,7 @@ pub fn search_library_videos(
         }
     }
 
-    Ok(videos)
+    Ok((videos, total))
 }
 
 // Rebuilds videos.tokens for one video from its transcript: splits into words, strips

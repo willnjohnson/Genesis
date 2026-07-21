@@ -80,7 +80,7 @@ export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
                         {showTag && (
                             <button
                                 onClick={() => {
-                                    onSearch(`${term.term}#`, 'tag');
+                                    onSearch(`"${term.term}"`, 'tag');
                                     onClose();
                                 }}
                                 className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"

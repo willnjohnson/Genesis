@@ -83,7 +83,7 @@ pub struct ChannelInfo {
 pub struct VideoResponse {
     pub videos: Vec<Video>,
     pub continuation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "totalCount", skip_serializing_if = "Option::is_none")]
     pub total_count: Option<i64>,
 }
 

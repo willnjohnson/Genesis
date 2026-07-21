@@ -120,17 +120,39 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
     })
 }
 
+// Hard cap on Library page size, independent of whatever the frontend asks for — keeps a rogue
+// or stale client from requesting a page large enough to reintroduce the "load the whole library
+// into memory at once" problem this pagination exists to avoid.
+const MAX_LIBRARY_PAGE_SIZE: i64 = 500;
+const DEFAULT_LIBRARY_PAGE_SIZE: i64 = 100;
+
 #[command]
 pub async fn fetch_saved_videos(
     app: tauri::AppHandle,
     video_type: Option<String>,
+    filter_kind: Option<String>,
+    sort_field: Option<String>,
+    sort_order: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
     include_content: Option<bool>,
 ) -> Result<VideoResponse, String> {
     let db_path = get_db_path(&app);
     db::init_db(&db_path).map_err(|e| e.to_string())?;
-    let videos = db::list_videos(&db_path, video_type.as_deref(), include_content.unwrap_or(false))
-        .map_err(|e| e.to_string())?;
-    Ok(VideoResponse { videos, continuation: None, total_count: None })
+    let limit = limit.unwrap_or(DEFAULT_LIBRARY_PAGE_SIZE).clamp(1, MAX_LIBRARY_PAGE_SIZE);
+    let offset = offset.unwrap_or(0).max(0);
+    let (videos, total_count) = db::list_videos(
+        &db_path,
+        video_type.as_deref(),
+        filter_kind.as_deref(),
+        sort_field.as_deref(),
+        sort_order.as_deref(),
+        limit,
+        offset,
+        include_content.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(VideoResponse { videos, continuation: None, total_count: Some(total_count) })
 }
 
 #[command]
@@ -138,12 +160,28 @@ pub async fn search_library(
     app: tauri::AppHandle,
     query: String,
     video_type: Option<String>,
+    filter_kind: Option<String>,
+    sort_field: Option<String>,
+    sort_order: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
 ) -> Result<VideoResponse, String> {
     let db_path = get_db_path(&app);
     db::init_db(&db_path).map_err(|e| e.to_string())?;
-    let videos = db::search_library_videos(&db_path, &query, video_type.as_deref())
-        .map_err(|e| e.to_string())?;
-    Ok(VideoResponse { videos, continuation: None, total_count: None })
+    let limit = limit.unwrap_or(DEFAULT_LIBRARY_PAGE_SIZE).clamp(1, MAX_LIBRARY_PAGE_SIZE);
+    let offset = offset.unwrap_or(0).max(0);
+    let (videos, total_count) = db::search_library_videos(
+        &db_path,
+        &query,
+        video_type.as_deref(),
+        filter_kind.as_deref(),
+        sort_field.as_deref(),
+        sort_order.as_deref(),
+        limit,
+        offset,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(VideoResponse { videos, continuation: None, total_count: Some(total_count) })
 }
 
 #[command]

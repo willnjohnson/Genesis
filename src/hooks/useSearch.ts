@@ -189,9 +189,12 @@ export function useSearch(hasApiKey: boolean) {
         
         const whitelist = ['handle', 'playlist', 'video', 'title_search', 'transcript_search', 'summary_search', 'term_search', 'definition_search', 'tag_search'];
         const facetRegex = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
-        const facets: { type: string; value: string }[] = [];
+        // `exact` (tag_search only): quoted value ("glucose") is an exact, case-insensitive tag
+        // match; bare value (glucose) is a substring "contains" match. Replaces the old
+        // trailing-`#` convention.
+        const facets: { type: string; value: string; exact: boolean }[] = [];
         let m;
-        
+
         // Use a more robust check for a single facet with spaces (same as App.tsx)
         const colonIndex = searchQuery.indexOf(':');
         const firstSpaceIndex = searchQuery.indexOf(' ');
@@ -201,8 +204,9 @@ export function useSearch(hasApiKey: boolean) {
                 const rest = searchQuery.slice(colonIndex + 1);
                 if (!new RegExp(`(${whitelist.join('|')}):`).test(rest)) {
                     let val = rest;
-                    if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
-                    facets.push({ type: potentialType, value: val });
+                    let exact = false;
+                    if (val.startsWith('"') && val.endsWith('"')) { val = val.slice(1, -1); exact = true; }
+                    facets.push({ type: potentialType, value: val, exact });
                 }
             }
         }
@@ -210,7 +214,7 @@ export function useSearch(hasApiKey: boolean) {
         // If not a single facet, or we need to catch others, use the regex
         if (facets.length === 0) {
             while ((m = facetRegex.exec(searchQuery)) !== null) {
-                facets.push({ type: m[1], value: normalizeText(m[2] || m[3] || "") });
+                facets.push({ type: m[1], value: normalizeText(m[2] || m[3] || ""), exact: m[2] !== undefined });
             }
         }
         
@@ -234,14 +238,11 @@ export function useSearch(hasApiKey: boolean) {
                     )) return false;
                 } else if (f.type === 'tag_search') {
                     if (!v.tags) return false;
-                    const isExactMatch = val.endsWith('#');
-                    let tagQuery = isExactMatch ? val.slice(0, -1) : val;
-                    if (tagQuery.startsWith('#')) tagQuery = tagQuery.substring(1);
                     const videoTags = v.tags.split(',').map(t => normalizeText(t.trim()));
-                    if (isExactMatch) {
-                        if (!videoTags.includes(tagQuery)) return false;
+                    if (f.exact) {
+                        if (!videoTags.includes(normalizeText(val))) return false;
                     } else {
-                        const searchTerms = tagQuery.split(' ').filter(Boolean);
+                        const searchTerms = val.split(' ').filter(Boolean);
                         if (!searchTerms.every(term => videoTags.some(tag => tag.includes(term)))) return false;
                     }
                 } else if (f.type === 'handle') {

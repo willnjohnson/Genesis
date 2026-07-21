@@ -2,10 +2,8 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
     getApiKey, getSetting, setDbPath, openExternalUrl,
-    type Video, type BiographyEntry, saveTags, getGlossaryTerms, getBiography,
-    searchLibrary
+    type Video, type BiographyEntry, saveTags, getBiography,
 } from "./api";
-import { normalizeText } from "./lib/utils";
 import { saveImageAs } from "./lib/save-image-as";
 import { SearchBar, type Facet } from "./components/SearchBar";
 import { VideoList } from "./components/VideoList";
@@ -24,7 +22,6 @@ import { useLibrary } from "./hooks/useLibrary";
 type ViewMode = 'search' | 'library' | 'glossary' | 'biography';
 
 const VALID_FACETS = ['handle', 'playlist', 'video', 'title_search', 'transcript_search', 'summary_search', 'term_search', 'definition_search', 'tag_search', 'person_search', 'bio_search'];
-const DEFAULT_FILTER_FACET = [{ type: 'title_search', value: '' }] as Facet[];
 const DEFAULT_GLOSSARY_FACET = [{ type: 'term_search', value: '' }] as Facet[];
 
 function getLibraryFacets(q: string, viewMode: ViewMode): Facet[] {
@@ -76,8 +73,6 @@ function App() {
     const [showGlossaryMenu, setShowGlossaryMenu] = useState(false);
     const [glossarySearchQuery, setGlossarySearchQuery] = useState("term_search:");
     const [biographySearchQuery, setBiographySearchQuery] = useState("person_search:");
-    const [initialLibrarySearch, setInitialLibrarySearch] = useState("");
-    const [initialLibraryFacets, setInitialLibraryFacets] = useState<Facet[]>(DEFAULT_FILTER_FACET);
     const [notification, setNotification] = useState<{ message: string; type: NotificationType } | null>(null);
     const [showScrollTop, setShowScrollTop] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
@@ -100,13 +95,6 @@ function App() {
     const [showBiography, setShowBiography] = useState(true);
     const [allowEditBio, setAllowEditBio] = useState(true);
 
-    const ftsTimerRef = useRef<number | null>(null);
-
-    // ── FTS Library Search state ──────────────────────────────────────────────
-    const [ftsSearchActive, setFtsSearchActive] = useState(false);
-    const [ftsResults, setFtsResults] = useState<Video[] | null>(null);
-    const [ftsLoading, setFtsLoading] = useState(false);
-
     // ── Sidebar / transcript state ───────────────────────────────────────────
     const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
     const [transcript, setTranscript] = useState("");
@@ -114,7 +102,6 @@ function App() {
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [cachedSummaries, setCachedSummaries] = useState<Record<string, string>>({});
     const [videoTags, setVideoTags] = useState<string[]>([]);
-    const [glossaryTerms, setGlossaryTerms] = useState<string[]>([]);
     const [sidebarInitialTab, setSidebarInitialTab] = useState<'transcript' | 'summary' | undefined>(undefined);
     const [selectedBiography, setSelectedBiography] = useState<BiographyEntry | null>(null);
 
@@ -130,77 +117,13 @@ function App() {
         setNotification,
     );
 
-    // ── Load glossary terms ────────────────────────────────────────────────
-    useEffect(() => {
-        getGlossaryTerms().then(terms => {
-            setGlossaryTerms(terms.map(t => t[0]));
-        }).catch(() => { });
-    }, []);
-
     // ── Computed: which videos to show in VideoList ──────────────────────────
+    // Library filtering/sorting/pagination all happen server-side now (see useLibrary's
+    // reload effect and db/search.rs's library_order_by/filter_kind_where), so this is just a
+    // pass-through per view mode rather than a second client-side filter pass.
     const displayedVideos = useMemo(() => {
-        if (viewMode === 'library') {
-            if (ftsSearchActive) {
-                return ftsResults || [];
-            }
-            const q = library.librarySearch;
-            if (!q) return library.libraryVideos;
-
-            const FACET_RE = /([a-z_]+):(?:"([^"]*)"|([^ ]*))/g;
-            const facets: { type: string; value: string }[] = [];
-            let m;
-            while ((m = FACET_RE.exec(q)) !== null) {
-                facets.push({ type: m[1] as any, value: normalizeText(m[2] ?? m[3] ?? "") });
-            }
-
-            const textParts = q.replace(FACET_RE, '').trim().split(' ').filter(Boolean).map(t => normalizeText(t));
-
-            return library.libraryVideos.filter(v => {
-                // Check facets
-                for (const f of facets) {
-                    if (f.value === "") continue; // Skip empty facets
-                    if (f.type === 'handle') {
-                        if (!normalizeText(v.handle || "").includes(f.value)) return false;
-                    } else if (f.type === 'video') {
-                        if (!normalizeText(v.id).includes(f.value)) return false;
-                    } else if (f.type === 'tag_search') {
-                        const tagValue = (f.value || "").trim();
-                        if (!tagValue) continue;
-                        if (!v.tags) return false;
-                        const isExactMatch = tagValue.endsWith('#');
-                        let tagQuery = isExactMatch ? tagValue.slice(0, -1) : tagValue;
-                        if (tagQuery.startsWith('#')) tagQuery = tagQuery.substring(1);
-
-                        const videoTags = v.tags.split(',').map(t => normalizeText(t.trim()));
-
-                        // User wants to keep glossary restriction
-                        const glossaryLower = glossaryTerms.map(t => normalizeText(t));
-                        const validTags = glossaryTerms.length > 0
-                            ? videoTags.filter(tag => glossaryLower.includes(tag))
-                            : videoTags;
-
-                        if (validTags.length === 0) return false;
-
-                        if (isExactMatch) {
-                            if (!validTags.includes(tagQuery)) return false;
-                        } else {
-                            const searchTerms = tagQuery.split(' ').filter(Boolean);
-                            if (!searchTerms.every(term => validTags.some(tag => tag.includes(term)))) return false;
-                        }
-                    }
-                }
-                // Check remaining text
-                if (textParts.length > 0) {
-                    if (!textParts.every(t =>
-                        normalizeText(v.title).includes(t) ||
-                        normalizeText(v.author || "").includes(t)
-                    )) return false;
-                }
-                return true;
-            });
-        }
-        return search.filteredVideos;
-    }, [viewMode, ftsSearchActive, ftsResults, library.librarySearch, library.libraryVideos, search.filteredVideos]);
+        return viewMode === 'library' ? library.libraryVideos : search.filteredVideos;
+    }, [viewMode, library.libraryVideos, search.filteredVideos]);
 
     // ── Init ─────────────────────────────────────────────────────────────────
     useEffect(() => {
@@ -329,53 +252,31 @@ function App() {
     }, []);
 
     // ── Load library when switching to Library mode ──────────────────────────
+    // Paging, sorting, filtering, and re-fetching on search-text change all happen inside
+    // useLibrary's own reactive effect now (see hooks/useLibrary.ts); this just flips it on.
+    // enterLibrary() is idempotent, so tabbing back into the Library after visiting Search
+    // doesn't re-fetch or reset anything — the search text, sort/filter, and loaded pages from
+    // before are left exactly as they were.
     useEffect(() => {
         if (viewMode === 'library') {
-            library.refreshLibrary();
+            library.enterLibrary();
         }
     }, [viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ── FTS-backed library search ────────────────────────────────────────────
+    // ── Preserve Library scroll position across tab switches ──────────────────
+    // Capture scrollY the moment we leave the Library tab, then restore it once we're back and
+    // the (already-loaded, unchanged) video grid has repainted at its old height.
+    const libraryScrollYRef = useRef(0);
+    const prevViewModeRef = useRef(viewMode);
     useEffect(() => {
-        if (viewMode !== 'library') {
-            setFtsSearchActive(false);
-            setFtsResults(null);
-            setFtsLoading(false);
-            return;
+        const cameFrom = prevViewModeRef.current;
+        if (cameFrom === 'library' && viewMode !== 'library') {
+            libraryScrollYRef.current = window.scrollY;
+        } else if (viewMode === 'library' && cameFrom !== 'library') {
+            requestAnimationFrame(() => window.scrollTo({ top: libraryScrollYRef.current }));
         }
-
-        if (!library.librarySearch.trim()) {
-            setFtsSearchActive(false);
-            setFtsResults(null);
-            setFtsLoading(false);
-            return;
-        }
-
-        if (ftsTimerRef.current) window.clearTimeout(ftsTimerRef.current);
-
-        setFtsLoading(true);
-        setFtsSearchActive(true);
-        setFtsResults(null);
-
-        let cancelled = false;
-        ftsTimerRef.current = window.setTimeout(() => {
-            searchLibrary(library.librarySearch)
-                .then(res => {
-                    if (!cancelled) setFtsResults(res.videos);
-                })
-                .catch(() => {
-                    if (!cancelled) setFtsResults([]);
-                })
-                .finally(() => {
-                    if (!cancelled) setFtsLoading(false);
-                });
-        }, 300);
-
-        return () => {
-            cancelled = true;
-            if (ftsTimerRef.current) window.clearTimeout(ftsTimerRef.current);
-        };
-    }, [viewMode, library.librarySearch]); // eslint-disable-line react-hooks/exhaustive-deps
+        prevViewModeRef.current = viewMode;
+    }, [viewMode]);
 
     // ── Refresh summarized count when entering Library (if plugin on) ─────────
     useEffect(() => {
@@ -521,10 +422,7 @@ function App() {
                             </button>
                         )}
                         <button
-                            onClick={() => {
-                                setViewMode('library');
-                                library.setLibrarySearch("");
-                            }}
+                            onClick={() => setViewMode('library')}
                             className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'library' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
                             title="Library"
                         >
@@ -598,13 +496,7 @@ function App() {
                                     return (
                                         <button
                                             key={mode}
-                                            onClick={() => {
-                                                if (mode === 'library') {
-                                                    setViewMode('library');
-                                                    library.setLibrarySearch("");
-                                                }
-                                                setViewMode(mode);
-                                            }}
+                                            onClick={() => setViewMode(mode)}
                                             className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all cursor-pointer capitalize ${viewMode === mode ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
                                         >
                                             {mode}
@@ -665,7 +557,7 @@ function App() {
                                 ? (search.videos.length > 0 ? search.handleInput : undefined)
                                 : (viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : undefined)))
                         }
-                        loading={search.loading || library.loading}
+                        loading={search.loading}
                         viewMode={viewMode}
                         initialFacets={
                             viewMode === 'glossary'
@@ -698,11 +590,6 @@ function App() {
                              searchQuery={glossarySearchQuery}
                              onSearchInLibrary={handleSearchInLibrary}
                              allowModification={allowModificationGlossary}
-                             onChange={() => {
-                                 getGlossaryTerms().then(terms => {
-                                     setGlossaryTerms(terms.map(t => t[0]));
-                                 }).catch(() => { });
-                             }}
                          />
                      ) : viewMode === 'biography' ? (
                           <BiographyView searchQuery={biographySearchQuery} onVideoSelect={handleSelectVideo} onViewMore={(handle) => { setViewMode('library'); library.setLibrarySearch(`handle:${handle.replace('@', '')}`); }} allowEditBio={allowEditBio} />
@@ -715,8 +602,6 @@ function App() {
                                 onSaveAll={displayedVideos.length > 0 ? library.handleSaveAll : undefined}
                                 saveProgress={library.saveProgress}
                                 compact={videoListMode === 'compact'}
-                                onLoadMore={search.isSearch && search.continuationToken ? search.handleLoadMore : undefined}
-                                loadingMore={search.loadingMore}
                             />
                             {search.continuationToken && !search.isSearch && (
                                 <div className="mt-16 text-center flex justify-center gap-4">
@@ -742,42 +627,28 @@ function App() {
                         </>
                     ) : (
                         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
-                            {library.loading && library.libraryVideos.length === 0 && !ftsSearchActive ? (
-                                <div className="flex flex-col items-center justify-center py-24 text-gray-400 space-y-4">
-                                    <div className="w-8 h-8 border-4 border-[#303030] border-t-red-600 rounded-full animate-spin" />
-                                    <p className="font-medium text-sm">Loading library...</p>
-                                </div>
-                            ) : ftsSearchActive && ftsResults === null ? (
-                                <div className="flex flex-col items-center justify-center py-24 text-gray-400 space-y-4">
-                                    <div className="w-8 h-8 border-4 border-[#303030] border-t-red-600 rounded-full animate-spin" />
-                                    <p className="font-medium text-sm">Searching library...</p>
-                                </div>
-                            ) : ftsSearchActive && ftsResults !== null && ftsResults.length === 0 ? (
-                                <div className="text-center text-gray-500 py-24">
-                                    <p className="text-xl font-bold text-white mb-2">No results</p>
-                                    <p className="text-sm">Try different search terms</p>
-                                </div>
-                            ) : library.libraryVideos.length === 0 && !ftsSearchActive ? (
-                                <div className="text-center text-gray-500 py-24">
-                                    <p className="text-xl font-bold text-white mb-2">Build your library</p>
-                                    <p className="text-sm">Find videos and save their transcripts here.</p>
-                                </div>
-                            ) : (
-                                <VideoList
-                                    videos={displayedVideos}
-                                    onSelect={handleSelectVideo}
-                                    onSelectWithTab={handleSelectVideo}
-                                    onDelete={library.handleDeleteVideo}
-                                    compact={videoListMode === 'compact'}
-                                    onSummarizeAll={effectivePluginSummarizeEnabled ? library.handleSummarizeAll : undefined}
-                                    summarizeProgress={library.summarizeProgress}
-                                    summarizedCount={library.summarizedCount}
-                                    totalCount={ftsSearchActive ? (ftsResults?.length ?? 0) : library.libraryVideos.length}
-                                    isLibrary={true}
-                                    allowDeletion={allowDeletionLibrary}
-                                    showSummarizeButton={showSummarizeButton}
-                                />
-                            )}
+                            <VideoList
+                                videos={displayedVideos}
+                                onSelect={handleSelectVideo}
+                                onSelectWithTab={handleSelectVideo}
+                                onDelete={library.handleDeleteVideo}
+                                compact={videoListMode === 'compact'}
+                                totalCount={library.totalCount}
+                                isLibrary={true}
+                                allowDeletion={allowDeletionLibrary}
+                                sortField={library.sortField}
+                                onSortFieldChange={library.setSortField}
+                                sortOrder={library.sortOrder}
+                                onToggleSortOrder={library.toggleSortOrder}
+                                filterKind={library.filterKind}
+                                onFilterKindChange={library.setFilterKind}
+                                onLoadMore={library.loadMore}
+                                loadingMore={library.loadingMore}
+                                hasMore={library.hasMore}
+                                loading={library.loading}
+                                emptyTitle={library.librarySearch.trim() ? "No results" : "Build your library"}
+                                emptyMessage={library.librarySearch.trim() ? "Try different search terms" : "Find videos and save their transcripts here."}
+                            />
                         </div>
                     )}
                 </div>
@@ -888,7 +759,7 @@ function App() {
                     ) : (
                         <>
                             <Sparkles className="w-4 h-4" />
-                            {library.summarizedCount > 0 ? `Summarized (${library.summarizedCount}/${library.libraryVideos.length})` : 'Summarize All'}
+                            {library.summarizedCount > 0 ? `Summarized (${library.summarizedCount}/${library.totalCount})` : 'Summarize All'}
                         </>
                     )}
                 </button>

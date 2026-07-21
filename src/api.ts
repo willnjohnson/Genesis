@@ -28,6 +28,18 @@ export interface SearchResponse {
     totalCount?: number;
 }
 
+export type LibrarySortField = 'date' | 'added' | 'popularity';
+export type LibrarySortOrder = 'asc' | 'desc';
+export type LibraryFilterKind = 'all' | 'transcript' | 'summary';
+
+export interface LibraryQueryOptions {
+    filterKind?: LibraryFilterKind;
+    sortField?: LibrarySortField;
+    sortOrder?: LibrarySortOrder;
+    limit?: number;
+    offset?: number;
+}
+
 export interface DbDetails {
     path: string;
     size_bytes: number;
@@ -82,12 +94,28 @@ export async function searchVideos(query: string, continuation?: string | null):
     return await invoke("search_videos", { query, continuation });
 }
 
-export async function getSavedVideos(videoType?: string, includeContent?: boolean): Promise<SearchResponse> {
-    return await invoke("fetch_saved_videos", { videoType, includeContent });
+export async function getSavedVideos(videoType?: string, includeContent?: boolean, opts?: LibraryQueryOptions): Promise<SearchResponse> {
+    return await invoke("fetch_saved_videos", {
+        videoType,
+        includeContent,
+        filterKind: opts?.filterKind,
+        sortField: opts?.sortField,
+        sortOrder: opts?.sortOrder,
+        limit: opts?.limit,
+        offset: opts?.offset,
+    });
 }
 
-export async function searchLibrary(query: string, videoType?: string): Promise<SearchResponse> {
-    return await invoke("search_library", { query, videoType });
+export async function searchLibrary(query: string, videoType?: string, opts?: LibraryQueryOptions): Promise<SearchResponse> {
+    return await invoke("search_library", {
+        query,
+        videoType,
+        filterKind: opts?.filterKind,
+        sortField: opts?.sortField,
+        sortOrder: opts?.sortOrder,
+        limit: opts?.limit,
+        offset: opts?.offset,
+    });
 }
 
 export async function deleteVideo(id: string): Promise<void> {
