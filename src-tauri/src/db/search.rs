@@ -16,7 +16,7 @@ pub(crate) fn video_columns_sql(alias: &str) -> String {
     let prefixed = cols.iter().map(|c| format!("{alias}{c}")).collect::<Vec<_>>().join(", ");
     format!(
         "{prefixed}, \
-         CASE WHEN {alias}transcript IS NOT NULL AND {alias}transcript != '' THEN 1 ELSE 0 END AS has_transcript, \
+         CASE WHEN {alias}transcript IS NOT NULL AND {alias}transcript != '' AND {alias}transcript != 'N/A' THEN 1 ELSE 0 END AS has_transcript, \
          CASE WHEN {alias}summary IS NOT NULL AND {alias}summary != '' THEN 1 ELSE 0 END AS has_summary"
     )
 }
@@ -57,21 +57,27 @@ pub(crate) fn video_row(row: &rusqlite::Row, include_content: bool) -> rusqlite:
 // `summaries::has_real_summary()`: true when there's non-whitespace content before any
 // "Channel Info: ..." footer that append_channel_info_footer() appends. Needed because the
 // `has_summary` column produced by video_columns_sql() above only checks non-empty, not "real".
+// SQLite's TRIM(X) with no second argument only strips literal space characters, not newlines —
+// a footer-only summary (e.g. "\n\nChannel Info: Name") leaves a "\n\n" remainder that TRIM
+// wouldn't touch, so this must pass an explicit strip-set covering space/newline/CR/tab or every
+// footer-only summary reads as "has real content" and both filter buttons below break.
 fn has_real_summary_sql(alias: &str) -> String {
     format!(
         "TRIM(SUBSTR(COALESCE({alias}summary, ''), 1, \
          CASE WHEN INSTR(COALESCE({alias}summary, ''), 'Channel Info:') > 0 \
               THEN INSTR(COALESCE({alias}summary, ''), 'Channel Info:') - 1 \
-              ELSE LENGTH(COALESCE({alias}summary, '')) END)) != ''"
+              ELSE LENGTH(COALESCE({alias}summary, '')) END), ' ' || CHAR(10) || CHAR(13) || CHAR(9)) != ''"
     )
 }
 
 // WHERE-clause fragment for the Library grid's All Videos / Transcript Only / With AI Summary
-// filter buttons (`filter_kind`: None/"all", "transcript", "summary").
+// filter buttons (`filter_kind`: None/"all", "transcript", "summary"). 'N/A' is the sentinel
+// clear_transcript_after_summary() writes once a real summary exists — it's not real transcript
+// content, so it must be excluded here the same way regenerate_tokens_from_transcript already does.
 pub(crate) fn filter_kind_where(alias: &str, filter_kind: Option<&str>) -> String {
     match filter_kind {
         Some("transcript") => format!(
-            "(({alias}transcript IS NOT NULL AND {alias}transcript != '') AND NOT ({}))",
+            "(({alias}transcript IS NOT NULL AND {alias}transcript != '' AND {alias}transcript != 'N/A') AND NOT ({}))",
             has_real_summary_sql(alias)
         ),
         Some("summary") => has_real_summary_sql(alias),
