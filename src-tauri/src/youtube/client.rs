@@ -3,6 +3,7 @@ use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT, CONTENT_TYPE};
 use html_escape;
 
 use super::identifiers::extract_handle_from_text;
+use crate::types::extract_handle_from_url;
 
 /// Decode HTML entities in a string (e.g., &amp; -> &, &#39; -> ')
 pub(crate) fn decode_html(text: &str) -> String {
@@ -177,6 +178,56 @@ pub fn extract_playlist_video_info(renderer: &Value) -> Option<Value> {
              view_count = info[0]["text"].as_str().unwrap_or("").to_string();
         }
     }
+
+    Some(serde_json::json!({
+        "id": video_id,
+        "title": title,
+        "thumbnail": thumbnail,
+        "publishedAt": published_at,
+        "viewCount": view_count,
+        "author": owner_text,
+        "handle": handle
+    }))
+}
+
+/// YouTube has been rolling out a ViewModel-based renderer (`lockupViewModel`) in place of
+/// `playlistVideoRenderer` for playlist/channel-uploads browse responses — same item, totally
+/// different JSON shape (video id under `contentId` instead of `videoId`, title nested under
+/// `metadata.lockupMetadataViewModel.title.content` instead of `title.runs[0].text`, etc).
+/// Mirrors extract_playlist_video_info's output shape so callers can treat either renderer the
+/// same way once extracted.
+pub fn extract_lockup_video_info(lockup: &Value) -> Option<Value> {
+    if lockup["contentType"].as_str() != Some("LOCKUP_CONTENT_TYPE_VIDEO") {
+        return None;
+    }
+    let video_id = lockup["contentId"].as_str()?;
+
+    let metadata = &lockup["metadata"]["lockupMetadataViewModel"];
+    let title = decode_html(metadata["title"]["content"].as_str().unwrap_or("Unknown"));
+
+    let thumbnail = lockup["contentImage"]["thumbnailViewModel"]["image"]["sources"]
+        .as_array()
+        .and_then(|sources| sources.last())
+        .and_then(|t| t["url"].as_str())
+        .unwrap_or("");
+
+    let rows = metadata["metadata"]["contentMetadataViewModel"]["metadataRows"].as_array();
+    let row_text = |row_idx: usize, part_idx: usize| -> Option<&str> {
+        rows?.get(row_idx)?["metadataParts"].as_array()?.get(part_idx)?["text"]["content"].as_str()
+    };
+
+    let owner_text = decode_html(row_text(0, 0).unwrap_or(""));
+    let view_count = row_text(1, 0).unwrap_or("").to_string();
+    let published_at = row_text(1, 1).unwrap_or("").to_string();
+
+    let handle = rows
+        .and_then(|r| r.first())
+        .and_then(|row| row["metadataParts"].as_array())
+        .and_then(|parts| parts.first())
+        .and_then(|part| part["text"]["commandRuns"].as_array())
+        .and_then(|runs| runs.first())
+        .and_then(|run| run["onTap"]["innertubeCommand"]["browseEndpoint"]["canonicalBaseUrl"].as_str())
+        .and_then(extract_handle_from_url);
 
     Some(serde_json::json!({
         "id": video_id,

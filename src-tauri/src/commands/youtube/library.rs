@@ -4,7 +4,20 @@ use crate::youtube::{YouTubeClient, ClientType, decode_html};
 use super::transcript::fetch_transcript_with_retries;
 
 #[command]
-pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option<String>) -> Result<Video, String> {
+pub async fn save_video(
+    app: tauri::AppHandle,
+    video_id: String,
+    summary: Option<String>,
+    title: Option<String>,
+    author: Option<String>,
+    handle: Option<String>,
+    thumbnail: Option<String>,
+    length_seconds: Option<i32>,
+    view_count: Option<String>,
+    published_at: Option<String>,
+    video_type: Option<String>,
+    transcript: Option<String>,
+) -> Result<Video, String> {
     use crate::types::{parse_view_count, extract_handle_from_url};
     let db_path = get_db_path(&app);
 
@@ -34,6 +47,58 @@ pub async fn save_video(app: tauri::AppHandle, video_id: String, summary: Option
             has_transcript: Some(has_transcript),
             has_summary: Some(has_summary),
         });
+    }
+
+    // The frontend already has this video's metadata + transcript from when it was first
+    // opened (search results, plus the transcript/handle fetch done at select-time) — use that
+    // directly instead of re-hitting YouTube. Without this, every Save click redundantly
+    // re-fetched from YouTube even though nothing new needed fetching, so a single flaky
+    // network/VPN hiccup on that redundant call turned one successful Save into many failed
+    // retries. Falls through to a fresh fetch below only when the caller didn't supply this
+    // (e.g. bulk_save_videos, which saves by id alone with no prior client-side fetch).
+    if let (Some(title_val), Some(transcript_val)) = (title.as_deref(), transcript.as_deref()) {
+        if !title_val.trim().is_empty() && !transcript_val.trim().is_empty() {
+            let author = author.unwrap_or_else(|| "Unknown".to_string());
+            let length = length_seconds.unwrap_or(0);
+            let video_type = video_type.unwrap_or_else(|| {
+                if length > 0 && length <= 60 { "short" } else { "standard" }.to_string()
+            });
+            let view_count = view_count.as_deref().map(parse_view_count).unwrap_or(0);
+            let published_at = published_at.unwrap_or_default();
+            let has_summary = summary.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+
+            if let Some(ref h) = handle {
+                let _ = db::upsert_biography_from_video(&db_path, h, &author);
+            }
+            db::save_video(&db_path, &video_id, title_val, &author, length, transcript_val, view_count, &published_at, handle.as_deref().unwrap_or(""), &video_type, summary.as_deref())
+                .map_err(|e| e.to_string())?;
+
+            let date_added = {
+                let conn = rusqlite::Connection::open(&db_path).ok();
+                conn.and_then(|c| {
+                    c.query_row("SELECT date_added FROM videos WHERE video_id = ?", rusqlite::params![video_id], |row| row.get::<_, Option<String>>(0)).ok().flatten()
+                })
+            };
+
+            return Ok(Video {
+                thumbnail: thumbnail.unwrap_or_else(|| format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", video_id)),
+                id: video_id,
+                title: title_val.to_string(),
+                published_at,
+                view_count: view_count.to_string(),
+                author: Some(author),
+                handle,
+                status: Some("saved".to_string()),
+                date_added,
+                length_seconds: Some(length),
+                video_type: Some(video_type),
+                transcript: Some(transcript_val.to_string()),
+                summary,
+                tags: None,
+                has_transcript: Some(true),
+                has_summary: Some(has_summary),
+            });
+        }
     }
 
     let client_web = YouTubeClient::new(ClientType::Web);
@@ -201,7 +266,7 @@ pub async fn check_video_exists(app: tauri::AppHandle, video_id: String) -> Resu
 pub async fn bulk_save_videos(app: tauri::AppHandle, video_ids: Vec<String>) -> Result<serde_json::Value, String> {
     let mut results = Vec::new();
     for id in video_ids {
-        match save_video(app.clone(), id, None).await {
+        match save_video(app.clone(), id, None, None, None, None, None, None, None, None, None, None).await {
             Ok(v) => results.push(serde_json::to_value(v).unwrap()),
             Err(e) => results.push(serde_json::json!({"error": e})),
         }

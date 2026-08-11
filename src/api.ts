@@ -20,6 +20,8 @@ export interface Video {
     tags?: string;
     hasTranscript?: boolean;
     hasSummary?: boolean;
+    lengthSeconds?: number;
+    videoType?: string;
 }
 
 export interface SearchResponse {
@@ -86,8 +88,24 @@ export async function getVideoInfo(id: string): Promise<Video> {
     return await invoke("fetch_video_info", { videoId: id });
 }
 
-export async function saveVideo(id: string, summary?: string | null): Promise<Video> {
-    return await invoke("save_video", { videoId: id, summary });
+export async function saveVideo(video: Video, transcript: string, summary?: string | null): Promise<Video> {
+    // Pass along what was already successfully fetched for this video (search results +
+    // the transcript/handle fetched when it was opened) so the backend can save directly
+    // instead of redundantly re-fetching from YouTube, which is flaky under some network/VPN
+    // conditions even though nothing here actually needs re-fetching.
+    return await invoke("save_video", {
+        videoId: video.id,
+        summary,
+        title: video.title,
+        author: video.author,
+        handle: video.handle,
+        thumbnail: video.thumbnail,
+        lengthSeconds: video.lengthSeconds,
+        viewCount: video.viewCount,
+        publishedAt: video.publishedAt,
+        videoType: video.videoType,
+        transcript,
+    });
 }
 
 export async function searchVideos(query: string, continuation?: string | null): Promise<SearchResponse> {

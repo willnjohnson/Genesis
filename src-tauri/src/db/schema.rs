@@ -168,6 +168,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
         ("showGlossarySearchInLibrary", "true"),
         ("showBiography", "true"),
         ("allowEditBio", "true"),
+        ("allowEditTranscriptOnNA", "true"),
         ("navigation_orientation", "horizontal"),
         ("librarySearchLimit", "1024"),
         ("hideShortsInSearch", "true"),

@@ -70,6 +70,23 @@ pub async fn resolve_channel(_app: tauri::AppHandle, query: String) -> Result<Ch
     }
 }
 
+/// Extracts a `Video` from a single playlist/channel-uploads browse item, trying both renderer
+/// shapes YouTube has served for this (legacy `playlistVideoRenderer`, or the newer
+/// `lockupViewModel` — see extract_lockup_video_info) since a given response only ever uses one
+/// but which one varies by rollout.
+fn extract_video_from_item(item: &Value) -> Option<Video> {
+    let v_json = if let Some(v_renderer) = item.get("playlistVideoRenderer") {
+        youtube::extract_playlist_video_info(v_renderer)
+    } else if let Some(lockup) = item.get("lockupViewModel") {
+        youtube::extract_lockup_video_info(lockup)
+    } else {
+        None
+    }?;
+    let mut v = serde_json::from_value::<Video>(v_json).ok()?;
+    v.date_added = None;
+    Some(v)
+}
+
 #[command]
 pub async fn fetch_videos(
     _app: tauri::AppHandle,
@@ -91,15 +108,20 @@ pub async fn fetch_videos(
 
     if let Some(tabs) = data["contents"]["twoColumnBrowseResultsRenderer"]["tabs"].as_array() {
         if let Some(contents) = tabs[0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"].as_array() {
-            if let Some(items) = contents[0]["itemSectionRenderer"]["contents"][0]["playlistVideoListRenderer"]["contents"].as_array() {
-                for item in items {
-                    if let Some(v_renderer) = item.get("playlistVideoRenderer") {
-                        if let Some(v_json) = youtube::extract_playlist_video_info(v_renderer) {
-                            if let Ok(mut v) = serde_json::from_value::<Video>(v_json) {
-                                v.date_added = None;
+            if let Some(section_items) = contents[0]["itemSectionRenderer"]["contents"].as_array() {
+                for item in section_items {
+                    // Legacy shape: the section's one item is a `playlistVideoListRenderer`
+                    // wrapper whose own `contents` holds the actual per-video renderers.
+                    if let Some(nested) = item["playlistVideoListRenderer"]["contents"].as_array() {
+                        for nested_item in nested {
+                            if let Some(v) = extract_video_from_item(nested_item) {
                                 videos.push(v);
                             }
                         }
+                    } else if let Some(v) = extract_video_from_item(item) {
+                        // Current shape (YouTube's `lockupViewModel` rollout): each section
+                        // item IS a video entry directly, no wrapper level.
+                        videos.push(v);
                     }
                 }
             }
@@ -109,13 +131,8 @@ pub async fn fetch_videos(
     if let Some(actions) = data["onResponseReceivedActions"].as_array() {
         if let Some(items) = actions[0]["appendContinuationItemsAction"]["continuationItems"].as_array() {
             for item in items {
-                if let Some(v_renderer) = item.get("playlistVideoRenderer") {
-                    if let Some(v_json) = youtube::extract_playlist_video_info(v_renderer) {
-                        if let Ok(mut v) = serde_json::from_value::<Video>(v_json) {
-                            v.date_added = None;
-                            videos.push(v);
-                        }
-                    }
+                if let Some(v) = extract_video_from_item(item) {
+                    videos.push(v);
                 }
             }
         }

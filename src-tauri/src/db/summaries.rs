@@ -59,6 +59,15 @@ pub fn save_summary(db_path: &str, video_id: &str, summary: &str) -> Result<()> 
     append_channel_info_footer(&conn, video_id)?;
     if has_real_summary(bare_summary) {
         clear_transcript_after_summary(&conn, video_id)?;
+    } else {
+        // The user wiped an existing summary back to empty: restore the transcript so they can
+        // view/edit/re-fetch it, but only the 'N/A' placeholder clear_transcript_after_summary
+        // itself wrote — never touch a transcript that's populated, or empty for some other
+        // reason (e.g. mid re-fetch already).
+        conn.execute(
+            "UPDATE videos SET transcript = '' WHERE transcript = 'N/A' AND video_id = ?1",
+            params![video_id],
+        )?;
     }
     Ok(())
 }

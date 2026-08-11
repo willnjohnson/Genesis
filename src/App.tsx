@@ -94,6 +94,7 @@ function App() {
     const [showSynthesizeUpload, setShowSynthesizeUpload] = useState(true);
     const [showBiography, setShowBiography] = useState(true);
     const [allowEditBio, setAllowEditBio] = useState(true);
+    const [allowEditTranscriptOnNA, setAllowEditTranscriptOnNA] = useState(true);
 
     // ── Sidebar / transcript state ───────────────────────────────────────────
     const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
@@ -179,6 +180,7 @@ function App() {
             const sSynUpload = await getSetting('showSynthesizeUpload').catch(() => 'true');
             const sBiography = await getSetting('showBiography').catch(() => 'true');
             const sAllowEditBio = await getSetting('allowEditBio').catch(() => 'true');
+            const sAllowEditTranscriptOnNA = await getSetting('allowEditTranscriptOnNA').catch(() => 'true');
 
             const showSearchVal = sSearch !== 'false';
             setShowSearch(showSearchVal);
@@ -192,6 +194,7 @@ function App() {
             setShowSynthesizeUpload(sSynUpload !== 'false');
             setShowBiography(sBiography !== 'false');
             setAllowEditBio(sAllowEditBio !== 'false');
+            setAllowEditTranscriptOnNA(sAllowEditTranscriptOnNA !== 'false');
 
             if (!showSearchVal) {
                 setViewMode('library');
@@ -665,7 +668,7 @@ function App() {
                 title={selectedVideo?.title || ""}
                 videoId={selectedVideo?.id}
                 handle={selectedVideo?.handle}
-                onSave={selectedVideo ? (summary) => library.handleSaveVideo(selectedVideo, summary) : undefined}
+                onSave={selectedVideo ? (summary) => library.handleSaveVideo(selectedVideo, summary, transcript) : undefined}
                 onDelete={() => library.handleDeleteFromSidebar(selectedVideo)}
                 onRefetch={selectedVideo ? () => handleSelectVideo(selectedVideo) : undefined}
                 hasApiKey={hasApiKey}
@@ -686,6 +689,7 @@ function App() {
                 onSearchInLibrary={handleSearchInLibrary}
                 initialTab={sidebarInitialTab}
                 showBiography={showBiography}
+                allowEditTranscriptOnNA={allowEditTranscriptOnNA}
             />
 
             <SettingsModal

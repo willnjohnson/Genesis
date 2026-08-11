@@ -45,6 +45,7 @@ interface Props {
     onSearchInLibrary?: (term: string, mode: 'tag' | 'library') => void;
     initialTab?: 'transcript' | 'summary';
     showBiography?: boolean;
+    allowEditTranscriptOnNA?: boolean;
 }
 
 /**
@@ -56,7 +57,7 @@ interface Props {
  * directly, since the two panes are asymmetric (only the summary pane supports image hover-to-
  * delete) rather than a clean shared abstraction.
  */
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true }: Props) {
+export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true }: Props) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
@@ -216,7 +217,13 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             const displaySummary = saved || editedSummary;
             setSummary(displaySummary);
             if (onCacheSummary) onCacheSummary(videoId, displaySummary);
+            // getSummary() filters out footer-only/empty summaries, so a null `saved` here means
+            // the user wiped the summary back to empty — keep hasExistingSummary in sync (it was
+            // otherwise never reset after an edit), and jump back to the Transcript tab since the
+            // backend just restored the transcript from its "N/A" placeholder for this case.
+            setHasExistingSummary(!!saved);
             setIsEditingSummary(false);
+            if (!saved) setShowSummary(false);
             if (onRefetch) onRefetch();
         } catch (e: any) {
             console.error("Failed to save summary:", e);
@@ -434,14 +441,26 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         setIsEditingTranscript(false);
     }, []);
 
+    // Error sentinels are always short, app-generated strings (see App.tsx), so gate the
+    // substring match on length too — otherwise a real transcript that happens to mention
+    // "No transcript" in its actual spoken content would false-positive here.
     const isTranscriptInvalid = !transcript ||
-        transcript.includes("No transcript available") ||
-        transcript.includes("Failed to load") ||
-        transcript.includes("Could not load");
+        (transcript.length < 150 && (
+            transcript.includes("No transcript") ||
+            transcript.includes("Failed to load") ||
+            transcript.includes("Could not load")
+        ));
 
     // Transcript never loaded because no API key is set: going "back" would just show that
     // error, so hide the button when an AI summary is available instead.
     const isTranscriptMissingApiKey = !!transcript && transcript.includes("API key missing");
+
+    // "N/A" is the placeholder left behind once a video's real transcript has been cleared in
+    // favor of its AI summary (see the auto-switch effect above and clear_transcript_after_summary
+    // server-side) — with allowEditTranscriptOnNA disabled, editing that placeholder is misleading
+    // since the summary is the source of truth, so hide the pencil in exactly that case.
+    const hideTranscriptEditButton = allowEditTranscriptOnNA === false &&
+        transcript?.trim() === "N/A" && hasExistingSummary;
 
     return (
         <>
@@ -613,7 +632,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                     !isEditingTranscript && !isEditingSummary && (pluginSummarizeEnabled || hasExistingSummary) && (
                                                         <button
                                                             onClick={handleSummarize}
-                                                            disabled={loadingSummary || loading || !transcript || transcript.includes("No transcript") || transcript.includes("Failed to load") || checkingSummary}
+                                                            disabled={loadingSummary || loading || isTranscriptInvalid || checkingSummary}
                                                             title={hasExistingSummary ? "View AI Summary from database" : `Generate AI summary with ${summarizeProvider === 'cloud' ? 'Venice' : 'Ollama'}`}
                                                             className="summarize-btn flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg hover:from-purple-500 hover:to-blue-500 transition-all text-[10px] font-bold uppercase tracking-wider disabled:opacity-30 disabled:cursor-default cursor-pointer"
                                                         >
@@ -651,7 +670,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         {showFindReplace ? 'Close Find' : 'Find & Replace'}
                                                     </button>
                                                 )}
-                                                {!showSummary && !isEditingTranscript && pluginPhotosynthesisEnabled && (
+                                                {!showSummary && !isEditingTranscript && pluginPhotosynthesisEnabled && !hideTranscriptEditButton && (
                                                     <button
                                                         onClick={() => {
                                                             setIsEditingTranscript(true);

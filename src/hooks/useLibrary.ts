@@ -138,10 +138,10 @@ export function useLibrary(
         setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc');
     }, []);
 
-    const handleSaveVideo = useCallback(async (video: Video, summary?: string | null) => {
+    const handleSaveVideo = useCallback(async (video: Video, summary?: string | null, transcript?: string) => {
         if (!video) return;
         try {
-            const result = await saveVideo(video.id, summary);
+            const result = await saveVideo(video, transcript ?? video.transcript ?? '', summary);
             if (result.status === 'exists') {
                 setNotification({ message: `"${video.title.substring(0, 30)}..." already exists in DB.`, type: "info" });
             } else {
