@@ -172,6 +172,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
         ("navigation_orientation", "horizontal"),
         ("librarySearchLimit", "1024"),
         ("hideShortsInSearch", "true"),
+        ("setTranscriptAfterSummarizeToNA", "false"),
     ];
 
     for (key, val) in defaults.iter() {

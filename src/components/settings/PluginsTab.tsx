@@ -397,6 +397,7 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
     const [summarizeTab, setSummarizeTab] = useState<'local' | 'cloud'>('local');
     const [summarizeProvider, setSummarizeProvider] = useState<string>('local');
     const [showCustomPrompt, setShowCustomPrompt] = useState(true);
+    const [clearTranscriptOnSummarize, setClearTranscriptOnSummarize] = useState(false);
 
     useEffect(() => {
         if (summarizeTab === 'local' && !showSummarizeOllama) {
@@ -410,6 +411,7 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
         import("../../api").then(({ getSetting }) => {
             getSetting('summarize_provider').then(p => setSummarizeProvider(p || 'local'));
             getSetting('showCustomPrompt').then(v => setShowCustomPrompt(v !== 'false'));
+            getSetting('setTranscriptAfterSummarizeToNA').then(v => setClearTranscriptOnSummarize(v === 'true'));
         });
     }, []);
 
@@ -465,6 +467,28 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
                                             className={`w-10 h-5 rounded-full transition-colors cursor-pointer ${showCustomPrompt ? 'bg-blue-600' : 'bg-[#333333]'}`}
                                         >
                                             <div className={`w-4 h-4 bg-white rounded-full transition-transform ${showCustomPrompt ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                                        </button>
+                                    </div>
+
+                                    {/* Clear Transcript After Summarizing Toggle */}
+                                    <div className="flex items-center justify-between mb-4">
+                                        <div className="flex items-center gap-2">
+                                            <span
+                                                className="text-xs font-bold text-white"
+                                                title="When enabled, a video's transcript is replaced with 'N/A' once it has a real AI summary, to free up database space. When disabled, the full transcript is kept."
+                                            >
+                                                Clear Transcript After Summarizing
+                                            </span>
+                                        </div>
+                                        <button
+                                            onClick={async () => {
+                                                const newValue = !clearTranscriptOnSummarize;
+                                                setClearTranscriptOnSummarize(newValue);
+                                                await setSetting('setTranscriptAfterSummarizeToNA', newValue.toString());
+                                            }}
+                                            className={`w-10 h-5 rounded-full transition-colors cursor-pointer ${clearTranscriptOnSummarize ? 'bg-blue-600' : 'bg-[#333333]'}`}
+                                        >
+                                            <div className={`w-4 h-4 bg-white rounded-full transition-transform ${clearTranscriptOnSummarize ? 'translate-x-5' : 'translate-x-0.5'}`} />
                                         </button>
                                     </div>
 

@@ -1,6 +1,7 @@
 use crate::Video;
 use rusqlite::{params, Connection, Result};
 use super::summaries::{append_channel_info_footer, clean_blockquote_lines, clear_transcript_after_summary, has_real_summary};
+use super::settings::get_setting_bool;
 use super::search::{regenerate_tokens_from_transcript, video_row, video_columns_sql, filter_kind_where, library_order_by};
 
 /// Pages the Library grid: optionally filtered to one `video_type` ("short"/"standard") and one
@@ -91,7 +92,7 @@ pub fn save_video(
     // at insert time, so it needs the same quote-marker cleanup applied on later saves.
     clean_blockquote_lines(&conn, video_id)?;
     append_channel_info_footer(&conn, video_id)?;
-    if summary.map(has_real_summary).unwrap_or(false) {
+    if summary.map(has_real_summary).unwrap_or(false) && get_setting_bool(&conn, "setTranscriptAfterSummarizeToNA") {
         clear_transcript_after_summary(&conn, video_id)?;
     }
     Ok(())

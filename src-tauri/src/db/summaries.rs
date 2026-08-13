@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, Result};
+use super::settings::get_setting_bool;
 
 // True if `summary` has real AI-generated content beyond the auto-appended "Channel Info: ..."
 // footer (see append_channel_info_footer) — the footer alone must never be mistaken for an
@@ -58,7 +59,9 @@ pub fn save_summary(db_path: &str, video_id: &str, summary: &str) -> Result<()> 
     // from the current biography/author data every time.
     append_channel_info_footer(&conn, video_id)?;
     if has_real_summary(bare_summary) {
-        clear_transcript_after_summary(&conn, video_id)?;
+        if get_setting_bool(&conn, "setTranscriptAfterSummarizeToNA") {
+            clear_transcript_after_summary(&conn, video_id)?;
+        }
     } else {
         // The user wiped an existing summary back to empty: restore the transcript so they can
         // view/edit/re-fetch it, but only the 'N/A' placeholder clear_transcript_after_summary

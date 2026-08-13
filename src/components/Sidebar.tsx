@@ -410,12 +410,15 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             const result = await summarizeTranscript(transcript, handle, videoId);
             let displaySummary = result;
 
-            if (videoId && existsInDb) {
+            if (videoId) {
                 try {
                     await saveSummary(videoId, result);
                     // save_summary appends a "Channel Info:" footer server-side; re-fetch so
                     // what's displayed matches what's actually persisted, instead of showing
-                    // the raw pre-footer text the summarizer returned.
+                    // the raw pre-footer text the summarizer returned. If the video hasn't been
+                    // saved to the library yet, saveSummary's UPDATE is a harmless no-op (no row
+                    // to persist to) and getSummary returns nothing, so displaySummary just stays
+                    // the freshly generated result.
                     const saved = await getSummary(videoId);
                     if (saved) displaySummary = saved;
                 } catch (e) {
@@ -433,7 +436,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         } finally {
             setLoadingSummary(false);
         }
-    }, [transcript, showSummary, hasExistingSummary, summary, videoId, existsInDb, onSummaryGenerated, onCacheSummary, handle]);
+    }, [transcript, showSummary, hasExistingSummary, summary, videoId, onSummaryGenerated, onCacheSummary, handle]);
 
     const handleBackToTranscript = useCallback(() => {
         setShowSummary(false);
