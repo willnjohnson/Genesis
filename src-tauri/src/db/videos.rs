@@ -1,4 +1,4 @@
-use crate::Video;
+use crate::{Video, types::normalize_published_at};
 use rusqlite::{params, Connection, Result};
 use super::summaries::{append_channel_info_footer, clean_blockquote_lines, clear_transcript_after_summary, has_real_summary};
 use super::settings::get_setting_bool;
@@ -71,6 +71,7 @@ pub fn save_video(
     summary: Option<&str>,
 ) -> Result<()> {
     let video_id = video_id.trim();
+    let published_at = normalize_published_at(published_at);
     let conn = Connection::open(db_path)?;
     conn.execute(
         "INSERT INTO videos (video_id, title, author, length_seconds, transcript, view_count, published_at, handle, video_type, summary)

@@ -3,7 +3,7 @@ use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT, CONTENT_TYPE};
 use html_escape;
 
 use super::identifiers::extract_handle_from_text;
-use crate::types::extract_handle_from_url;
+use crate::types::{extract_handle_from_url, normalize_published_at};
 
 /// Decode HTML entities in a string (e.g., &amp; -> &, &#39; -> ')
 pub(crate) fn decode_html(text: &str) -> String {
@@ -129,7 +129,7 @@ pub fn extract_video_basic_info(renderer: &Value) -> Option<Value> {
         .and_then(|t| t["url"].as_str())
         .unwrap_or("");
 
-    let published_text = renderer["publishedTimeText"]["simpleText"].as_str().unwrap_or("");
+    let published_text = normalize_published_at(renderer["publishedTimeText"]["simpleText"].as_str().unwrap_or(""));
 
     let mut view_count_text = renderer["viewCountText"]["simpleText"].as_str().unwrap_or("").to_string();
     if view_count_text.is_empty() {
@@ -173,7 +173,7 @@ pub fn extract_playlist_video_info(renderer: &Value) -> Option<Value> {
     if let Some(info) = renderer["videoInfo"]["runs"].as_array() {
         if info.len() >= 3 {
              view_count = info[0]["text"].as_str().unwrap_or("").to_string();
-             published_at = info[2]["text"].as_str().unwrap_or("").to_string();
+             published_at = normalize_published_at(info[2]["text"].as_str().unwrap_or(""));
         } else if !info.is_empty() {
              view_count = info[0]["text"].as_str().unwrap_or("").to_string();
         }
@@ -218,7 +218,7 @@ pub fn extract_lockup_video_info(lockup: &Value) -> Option<Value> {
 
     let owner_text = decode_html(row_text(0, 0).unwrap_or(""));
     let view_count = row_text(1, 0).unwrap_or("").to_string();
-    let published_at = row_text(1, 1).unwrap_or("").to_string();
+    let published_at = normalize_published_at(row_text(1, 1).unwrap_or(""));
 
     let handle = rows
         .and_then(|r| r.first())

@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use regex::Regex;
+use chrono::{Duration, Utc};
+use std::sync::OnceLock;
 
 /// Parse view count string (e.g., "1.5M", "100K") into i64
 pub fn parse_view_count(view_count_str: &str) -> i64 {
@@ -88,6 +91,54 @@ pub struct VideoResponse {
     pub continuation: Option<String>,
     #[serde(rename = "totalCount", skip_serializing_if = "Option::is_none")]
     pub total_count: Option<i64>,
+}
+
+fn relative_date_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^(?:streamed|premiered)?\s*(\d+)\s*(\w+)\s*ago$").unwrap()
+    })
+}
+
+/// Normalizes a `published_at` value from YouTube into a proper ISO-8601 datetime string.
+///
+/// Handles:
+/// - Already-valid dates (ISO 8601, RFC 3339, simple YYYY-MM-DD) — returned as-is
+/// - Relative dates from web scraping: "1 month ago", "Streamed 2 years ago", etc.
+///   Approximates months as 30 days and years as 365 days.
+/// - Falls back to the raw string if nothing matches
+pub fn normalize_published_at(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if trimmed.len() >= 10
+        && trimmed.chars().take(4).all(|c| c.is_ascii_digit())
+        && trimmed.contains('-')
+    {
+        return trimmed.to_string();
+    }
+
+    if let Some(caps) = relative_date_re().captures(trimmed) {
+        let num: i64 = caps[1].parse().unwrap_or(0);
+        let unit = caps[2].to_lowercase();
+        let now = Utc::now();
+        let duration = match unit.as_str() {
+            "sec" | "secs" | "second" | "seconds" => Duration::seconds(num),
+            "min" | "mins" | "minute" | "minutes" => Duration::minutes(num),
+            "hr" | "hrs" | "hour" | "hours" => Duration::hours(num),
+            "day" | "days" => Duration::days(num),
+            "week" | "weeks" | "wk" | "wks" => Duration::days(num * 7),
+            "month" | "months" | "mo" | "mos" => Duration::days(num * 30),
+            "year" | "years" | "yr" | "yrs" => Duration::days(num * 365),
+            _ => return trimmed.to_string(),
+        };
+        let approx = now - duration;
+        return approx.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    }
+
+    trimmed.to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

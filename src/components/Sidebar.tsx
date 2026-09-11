@@ -445,12 +445,13 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             setHasExistingSummary(true);
             onSummaryGenerated?.();
             if (videoId && onCacheSummary) onCacheSummary(videoId, displaySummary);
+            onRefetch?.();
         } catch (err) {
             setSummaryError(err instanceof Error ? err.message : String(err));
         } finally {
             setLoadingSummary(false);
         }
-    }, [transcript, showSummary, hasExistingSummary, summary, videoId, onSummaryGenerated, onCacheSummary, handle]);
+    }, [transcript, showSummary, hasExistingSummary, summary, videoId, onSummaryGenerated, onCacheSummary, onRefetch, handle]);
 
     const handleBackToTranscript = useCallback(() => {
         setShowSummary(false);
