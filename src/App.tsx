@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
-    getApiKey, getSetting, setDbPath, openExternalUrl,
+    getApiKey, getSetting, setDbPath, openExternalUrl, bulkUpdateVideoWdbs,
     type Video, type BiographyEntry, saveTags, getBiography,
 } from "./api";
 import { saveImageAs } from "./lib/save-image-as";
@@ -12,10 +12,12 @@ import { BRAND } from "./branding";
 import { Notification, type NotificationType } from "./components/Notification";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SettingsModal } from "./components/SettingsModal";
-import { Settings, ChevronUp, LayoutGrid, List, ChevronDown, Sparkles, Search, BookMarked, BookA, UserSearch } from "lucide-react";
+import { Settings, ChevronUp, LayoutGrid, List, ChevronDown, Sparkles, Search, BookMarked, BookA, UserSearch, HardDrive, MousePointerClick } from "lucide-react";
 import { GlossaryView } from "./components/GlossaryView";
 import { BiographyView } from "./components/BiographyView";
 import { BiographyModal } from "./components/BiographyView";
+import { WdbsTreePanel } from "./components/WdbsTreePanel";
+import { BulkAssignMenu } from "./components/BulkAssignMenu";
 import { useSearch } from "./hooks/useSearch";
 import { useLibrary } from "./hooks/useLibrary";
 
@@ -52,8 +54,13 @@ function getLibraryQuery(q: string, viewMode: ViewMode): string {
     // Check if q starts with a facet prefix and has exactly one colon
     const colonIndex = q.indexOf(':');
     const firstSpaceIndex = q.indexOf(' ');
+    // Only treat this as a bare "facetname:value" display-unwrap when what's actually before the
+    // colon is one of this mode's known facet names — otherwise a bare leading ':' (a Warp Drive
+    // designator, e.g. ":UAP floating" in Library mode — see db/search.rs) would have its colon
+    // eaten here even though it isn't a facet at all.
+    const isKnownFacetPrefix = colonIndex > 0 && whitelist.includes(q.slice(0, colonIndex));
 
-    if (colonIndex !== -1 && (firstSpaceIndex === -1 || firstSpaceIndex > colonIndex)) {
+    if (isKnownFacetPrefix && (firstSpaceIndex === -1 || firstSpaceIndex > colonIndex)) {
         const rest = q.slice(colonIndex + 1);
         const whitelistPattern = `(${whitelist.join('|')})`;
         if (!new RegExp(`${whitelistPattern}:`).test(rest)) {
@@ -71,6 +78,21 @@ function App() {
     // ── App-level state ─────────────────────────────────────────────────────
     const [viewMode, setViewMode] = useState<ViewMode>('search');
     const [showGlossaryMenu, setShowGlossaryMenu] = useState(false);
+    // Toggleable Drive/Warp Drive side panel inside the Library/Portal grid (see
+    // components/WdbsTreePanel.tsx) — replaced the standalone Drive/Warp Drive tab this app used
+    // to have.
+    const [showDrivePanel, setShowDrivePanel] = useState(false);
+    // Human-readable label of library.wdbsFilter, for the empty-state message below — the panel
+    // only tracks the encoded path, not the display segment shown in the tree.
+    const [driveFilterLabel, setDriveFilterLabel] = useState('');
+    // Bulk Assign Mode: click a card to select it (no checkboxes), right-click to assign the
+    // whole selection to a Warp Drive category at once — see BulkAssignMenu.tsx. Only offered
+    // while the Drive panel is open, since assigning implies picking a destination category.
+    const [bulkAssignMode, setBulkAssignMode] = useState(false);
+    const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
+    const [bulkAssignMenu, setBulkAssignMenu] = useState<{ x: number; y: number; videoIds: string[] } | null>(null);
+    const [bulkAssigning, setBulkAssigning] = useState(false);
+    const [bulkAssignError, setBulkAssignError] = useState<string | null>(null);
     const [glossarySearchQuery, setGlossarySearchQuery] = useState("term_search:");
     const [biographySearchQuery, setBiographySearchQuery] = useState("person_search:");
     const [notification, setNotification] = useState<{ message: string; type: NotificationType } | null>(null);
@@ -93,8 +115,10 @@ function App() {
     const [showSynthesizePixabay, setShowSynthesizePixabay] = useState(true);
     const [showSynthesizeUpload, setShowSynthesizeUpload] = useState(true);
     const [showBiography, setShowBiography] = useState(true);
+    const [showDrive, setShowDrive] = useState(true);
     const [allowEditBio, setAllowEditBio] = useState(true);
     const [allowEditTranscriptOnNA, setAllowEditTranscriptOnNA] = useState(true);
+    const [allowEditWDBS, setAllowEditWDBS] = useState(false);
 
     // ── Sidebar / transcript state ───────────────────────────────────────────
     const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
@@ -179,8 +203,10 @@ function App() {
             const sSynPixabay = await getSetting('showSynthesizePixabay').catch(() => 'true');
             const sSynUpload = await getSetting('showSynthesizeUpload').catch(() => 'true');
             const sBiography = await getSetting('showBiography').catch(() => 'true');
+            const sDrive = await getSetting('showDrive').catch(() => 'true');
             const sAllowEditBio = await getSetting('allowEditBio').catch(() => 'true');
             const sAllowEditTranscriptOnNA = await getSetting('allowEditTranscriptOnNA').catch(() => 'true');
+            const sAllowEditWDBS = await getSetting('allowEditWDBS').catch(() => 'false');
 
             const showSearchVal = sSearch !== 'false';
             setShowSearch(showSearchVal);
@@ -193,8 +219,10 @@ function App() {
             setShowSynthesizePixabay(sSynPixabay !== 'false');
             setShowSynthesizeUpload(sSynUpload !== 'false');
             setShowBiography(sBiography !== 'false');
+            setShowDrive(sDrive !== 'false');
             setAllowEditBio(sAllowEditBio !== 'false');
             setAllowEditTranscriptOnNA(sAllowEditTranscriptOnNA !== 'false');
+            setAllowEditWDBS(sAllowEditWDBS === 'true');
 
             if (!showSearchVal) {
                 setViewMode('library');
@@ -393,6 +421,62 @@ function App() {
         });
     };
 
+    const handleToggleBulkSelect = useCallback((video: Video) => {
+        setBulkSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(video.id)) next.delete(video.id); else next.add(video.id);
+            return next;
+        });
+    }, []);
+
+    // Standard file-manager-style right-click: if the card is already part of the selection, the
+    // menu applies to the whole selection; otherwise it applies to just this card (replacing
+    // whatever was selected before), so a single video can be reassigned without a separate
+    // select-then-right-click step.
+    const handleBulkContextMenu = useCallback((video: Video, x: number, y: number) => {
+        setBulkAssignError(null);
+        setBulkSelectedIds(prev => {
+            const targetIds = prev.has(video.id) ? Array.from(prev) : [video.id];
+            setBulkAssignMenu({ x, y, videoIds: targetIds });
+            return prev.has(video.id) ? prev : new Set([video.id]);
+        });
+    }, []);
+
+    const handleBulkAssign = useCallback(async (wdbs: string) => {
+        if (!bulkAssignMenu) return;
+        setBulkAssigning(true);
+        setBulkAssignError(null);
+        try {
+            const result = await bulkUpdateVideoWdbs(bulkAssignMenu.videoIds, wdbs);
+            const label = wdbs.trim() || "unassigned";
+            if (result.failed.length === 0) {
+                setNotification({ message: `Assigned ${result.succeeded.length} video${result.succeeded.length === 1 ? '' : 's'} to ${label}.`, type: "success" });
+                setBulkSelectedIds(new Set());
+                setBulkAssignMenu(null);
+            } else if (result.succeeded.length === 0) {
+                setBulkAssignError(result.failed[0][1]);
+            } else {
+                setNotification({ message: `Assigned ${result.succeeded.length} video${result.succeeded.length === 1 ? '' : 's'} to ${label}; ${result.failed.length} failed.`, type: "info" });
+                setBulkSelectedIds(new Set());
+                setBulkAssignMenu(null);
+            }
+            library.refreshLibrary();
+        } catch (e: any) {
+            setBulkAssignError(typeof e === "string" ? e : e?.message ?? "Bulk assign failed.");
+        } finally {
+            setBulkAssigning(false);
+        }
+    }, [bulkAssignMenu, library, setNotification]);
+
+    // "No videos are tagged under X yet" is only true when the category itself is being shown
+    // unfiltered — with a search or filter (transcript/summary) active, the category can easily
+    // be non-empty while still returning zero results for that combination, so the message needs
+    // to say that instead of implying the category has nothing in it.
+    const libraryEmptyMessage = library.wdbsFilter
+        ? (library.librarySearch.trim() || library.filterKind !== 'all'
+            ? `Nothing in "${driveFilterLabel}" matches the current search/filter.`
+            : `No videos are tagged under "${driveFilterLabel}" yet.`)
+        : (library.librarySearch.trim() ? "Try different search terms" : "Find videos and save their transcripts here.");
 
     return (
         <div className="min-h-screen bg-[#0f0f0f] text-white font-sans selection:bg-red-500/30 selection:text-white pb-20 select-none">
@@ -427,7 +511,7 @@ function App() {
                         <button
                             onClick={() => setViewMode('library')}
                             className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'library' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
-                            title="Library"
+                            title={BRAND.libraryLabel}
                         >
                             <BookMarked className="w-5 h-5" />
                         </button>
@@ -496,13 +580,16 @@ function App() {
                             <div className="flex gap-3">
                                 {(['search', 'library'] as ViewMode[]).map(mode => {
                                     if (mode === 'search' && !showSearch) return null;
+                                    // 'library' renders as BRAND.libraryLabel ("Portal" for Kinesis, "Library"
+                                    // for Genesis) — the ViewMode value itself stays 'library' either way.
+                                    const label = mode === 'library' ? BRAND.libraryLabel : 'Search';
                                     return (
                                         <button
                                             key={mode}
                                             onClick={() => setViewMode(mode)}
-                                            className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all cursor-pointer capitalize ${viewMode === mode ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
+                                            className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all cursor-pointer ${viewMode === mode ? 'bg-white text-black' : 'bg-[#272727] text-white hover:bg-[#3f3f3f]'}`}
                                         >
-                                            {mode}
+                                            {label}
                                         </button>
                                     );
                                 })}
@@ -516,7 +603,7 @@ function App() {
                                         <ChevronDown className="w-5 h-5" />
                                     </button>
                                     {showGlossaryMenu && (
-                                        <div className="absolute top-full right-0 mt-2 w-32 bg-[#272727] border border-[#3f3f3f] rounded-lg shadow-xl z-51 overflow-hidden">
+                                        <div className="absolute top-full right-0 mt-2 w-36 bg-[#272727] border border-[#3f3f3f] rounded-lg shadow-xl z-51 overflow-hidden">
                                             <button
                                                 onClick={() => { setGlossarySearchQuery(""); setViewMode('glossary'); setShowGlossaryMenu(false); }}
                                                 className={`w-full text-left px-4 py-2 text-sm hover:bg-[#3f3f3f] cursor-pointer ${viewMode === 'glossary' ? 'text-white font-bold' : 'text-gray-300'}`}
@@ -552,32 +639,59 @@ function App() {
                         </div>
                     )}
 
-                    <SearchBar
-                        key={viewMode}
-                        onSearch={viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : handleSearch))}
-                        onLiveFilter={
-                            viewMode === 'search'
-                                ? (search.videos.length > 0 ? search.handleInput : undefined)
-                                : (viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : undefined)))
-                        }
-                        loading={search.loading}
-                        viewMode={viewMode}
-                        initialFacets={
-                            viewMode === 'glossary'
-                                ? getLibraryFacets(glossarySearchQuery, 'glossary')
-                                : viewMode === 'biography'
-                                    ? getLibraryFacets(biographySearchQuery, 'biography')
-                                    : (viewMode === 'library' ? (library.librarySearch ? getLibraryFacets(library.librarySearch, 'library') : []) : search.activeFacets as Facet[])
-                        }
-                        initialQuery={
-                            viewMode === 'glossary'
-                                ? getLibraryQuery(glossarySearchQuery, 'glossary')
-                                : viewMode === 'biography'
-                                    ? getLibraryQuery(biographySearchQuery, 'biography')
-                                : (viewMode === 'library' ? getLibraryQuery(library.librarySearch, 'library') : search.activeText)
-                        }
-                         placeholder={viewMode === 'glossary' ? "Look up Glossary Terms" : (viewMode === 'biography' ? "Look up Person" : (viewMode === 'library' ? "Look up Videos and Transcripts" : "Search YouTube handle, playlist URL, or video URL"))}
-                    />
+                    <div className="flex items-center gap-3">
+                        {viewMode === 'library' && showDrive && (
+                            <button
+                                onClick={() => setShowDrivePanel(prev => {
+                                    const next = !prev;
+                                    // "Toggling off will reset library videos to its default full
+                                    // results thing" — clearing the category filter (and, via
+                                    // setWdbsFilter, any leftover search text) does that. Bulk
+                                    // Assign Mode only exists while this panel is open, so it (and
+                                    // any in-progress selection) goes with it.
+                                    if (!next) {
+                                        library.setWdbsFilter(null);
+                                        setBulkAssignMode(false);
+                                        setBulkSelectedIds(new Set());
+                                        setBulkAssignMenu(null);
+                                    }
+                                    return next;
+                                })}
+                                className={`shrink-0 p-2.5 mb-4 rounded-lg border transition-all cursor-pointer ${showDrivePanel ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#606060]'}`}
+                                title={`Toggle ${BRAND.driveLabel}`}
+                            >
+                                <HardDrive className="w-5 h-5" />
+                            </button>
+                        )}
+                        <div className="flex-1 min-w-0">
+                            <SearchBar
+                                key={viewMode}
+                                onSearch={viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : handleSearch))}
+                                onLiveFilter={
+                                    viewMode === 'search'
+                                        ? (search.videos.length > 0 ? search.handleInput : undefined)
+                                        : (viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : undefined)))
+                                }
+                                loading={search.loading}
+                                viewMode={viewMode}
+                                initialFacets={
+                                    viewMode === 'glossary'
+                                        ? getLibraryFacets(glossarySearchQuery, 'glossary')
+                                        : viewMode === 'biography'
+                                            ? getLibraryFacets(biographySearchQuery, 'biography')
+                                            : (viewMode === 'library' ? (library.librarySearch ? getLibraryFacets(library.librarySearch, 'library') : []) : search.activeFacets as Facet[])
+                                }
+                                initialQuery={
+                                    viewMode === 'glossary'
+                                        ? getLibraryQuery(glossarySearchQuery, 'glossary')
+                                        : viewMode === 'biography'
+                                            ? getLibraryQuery(biographySearchQuery, 'biography')
+                                        : (viewMode === 'library' ? getLibraryQuery(library.librarySearch, 'library') : search.activeText)
+                                }
+                                 placeholder={viewMode === 'glossary' ? "Look up Glossary Terms" : (viewMode === 'biography' ? "Look up Person" : (viewMode === 'library' ? "Look up Videos and Transcripts" : "Search YouTube handle, playlist URL, or video URL"))}
+                            />
+                        </div>
+                    </div>
                 </header>
                 {search.error && (
                     <div className="mt-8 text-center animate-in fade-in duration-300">
@@ -629,30 +743,73 @@ function App() {
                             )}
                         </>
                     ) : (
-                        <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
-                            <VideoList
-                                videos={displayedVideos}
-                                onSelect={handleSelectVideo}
-                                onSelectWithTab={handleSelectVideo}
-                                onDelete={library.handleDeleteVideo}
-                                compact={videoListMode === 'compact'}
-                                totalCount={library.totalCount}
-                                isLibrary={true}
-                                allowDeletion={allowDeletionLibrary}
-                                sortField={library.sortField}
-                                onSortFieldChange={library.setSortField}
-                                sortOrder={library.sortOrder}
-                                onToggleSortOrder={library.toggleSortOrder}
-                                filterKind={library.filterKind}
-                                onFilterKindChange={library.setFilterKind}
-                                onLoadMore={library.loadMore}
-                                loadingMore={library.loadingMore}
-                                hasMore={library.hasMore}
-                                loading={library.loading}
-                                emptyTitle={library.librarySearch.trim() ? "No results" : "Build your library"}
-                                emptyMessage={library.librarySearch.trim() ? "Try different search terms" : "Find videos and save their transcripts here."}
-                            />
+                        <div className="animate-in fade-in slide-in-from-bottom-2 duration-400 flex flex-col lg:flex-row gap-6">
+                            {showDrivePanel && (
+                                <div className="lg:w-80 shrink-0">
+                                    <WdbsTreePanel
+                                        selectedPath={library.wdbsFilter ?? undefined}
+                                        onSelect={(path, label) => {
+                                            library.setWdbsFilter(path);
+                                            setDriveFilterLabel(label);
+                                        }}
+                                    />
+                                    {allowEditWDBS && (
+                                        <button
+                                            onClick={() => setBulkAssignMode(prev => {
+                                                const next = !prev;
+                                                if (!next) setBulkSelectedIds(new Set());
+                                                return next;
+                                            })}
+                                            className={`mt-3 w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${bulkAssignMode ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#606060]'}`}
+                                            title={`Select videos, then right-click to assign them to a ${BRAND.driveLabel} category`}
+                                        >
+                                            <MousePointerClick className="w-3.5 h-3.5" />
+                                            {bulkAssignMode ? `Bulk Assign Mode (${bulkSelectedIds.size} selected)` : "Bulk Assign Mode"}
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+                            <div className="flex-1 min-w-0">
+                                <VideoList
+                                    videos={displayedVideos}
+                                    onSelect={handleSelectVideo}
+                                    onSelectWithTab={handleSelectVideo}
+                                    onDelete={library.handleDeleteVideo}
+                                    compact={videoListMode === 'compact'}
+                                    totalCount={library.totalCount}
+                                    isLibrary={true}
+                                    allowDeletion={allowDeletionLibrary}
+                                    sortField={library.sortField}
+                                    onSortFieldChange={library.setSortField}
+                                    sortOrder={library.sortOrder}
+                                    onToggleSortOrder={library.toggleSortOrder}
+                                    filterKind={library.filterKind}
+                                    onFilterKindChange={library.setFilterKind}
+                                    onLoadMore={library.loadMore}
+                                    loadingMore={library.loadingMore}
+                                    hasMore={library.hasMore}
+                                    loading={library.loading}
+                                    emptyTitle={library.wdbsFilter ? "No videos" : (library.librarySearch.trim() ? "No results" : `Build your ${BRAND.libraryLabel}`)}
+                                    emptyMessage={libraryEmptyMessage}
+                                    bulkAssignMode={bulkAssignMode}
+                                    bulkSelectedIds={bulkSelectedIds}
+                                    onToggleBulkSelect={handleToggleBulkSelect}
+                                    onBulkContextMenu={handleBulkContextMenu}
+                                />
+                            </div>
                         </div>
+                    )}
+
+                    {bulkAssignMenu && (
+                        <BulkAssignMenu
+                            x={bulkAssignMenu.x}
+                            y={bulkAssignMenu.y}
+                            count={bulkAssignMenu.videoIds.length}
+                            onAssign={handleBulkAssign}
+                            onClose={() => { setBulkAssignMenu(null); setBulkAssignError(null); }}
+                            assigning={bulkAssigning}
+                            error={bulkAssignError}
+                        />
                     )}
                 </div>
             </div>
@@ -690,11 +847,34 @@ function App() {
                 initialTab={sidebarInitialTab}
                 showBiography={showBiography}
                 allowEditTranscriptOnNA={allowEditTranscriptOnNA}
+                wdbs={selectedVideo?.wdbs}
+                allowEditWDBS={allowEditWDBS}
+                onWdbsUpdated={(newWdbs) => {
+                    setSelectedVideo(prev => prev ? { ...prev, wdbs: newWdbs } : prev);
+                    library.refreshLibrary();
+                }}
             />
 
             <SettingsModal
                 isOpen={showSettings}
-                onClose={() => setShowSettings(false)}
+                onClose={() => {
+                    setShowSettings(false);
+                    // allowEditWDBS has a live toggle in PluginsTab (unlike most other
+                    // settings-table-only flags) but no dedicated onChange callback plumbed
+                    // through — re-reading it on close is simpler than adding one just for this.
+                    getSetting('allowEditWDBS').then(v => {
+                        const enabled = v === 'true';
+                        setAllowEditWDBS(enabled);
+                        if (!enabled) {
+                            // Bulk Assign Mode's toggle button disappears when editing is
+                            // disabled — exit the mode too so the grid doesn't stay stuck
+                            // in bulk-select with no visible way out.
+                            setBulkAssignMode(false);
+                            setBulkSelectedIds(new Set());
+                            setBulkAssignMenu(null);
+                        }
+                    });
+                }}
                 onStatusChange={setHasApiKey}
                 onVideoListModeChange={setVideoListMode}
                 currentVideoListMode={videoListMode}

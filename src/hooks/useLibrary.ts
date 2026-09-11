@@ -1,19 +1,22 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import {
     getSavedVideos, searchLibrary, saveVideo, deleteVideo, bulkSaveVideos,
-    summarizeAllVideos, getSummarizedCount,
+    summarizeAllVideos, getSummarizedCount, getVideosByWdbs,
     type Video, type LibrarySortField, type LibrarySortOrder, type LibraryFilterKind
 } from "../api";
 import { type NotificationType } from "../components/Notification";
+import { BRAND } from "../branding";
 
-const PAGE_SIZE = 100;
+// Bumped from 100 -> 300 per the search revision doc ("empirically verified to work great in
+// the Kinesis app").
+const PAGE_SIZE = 300;
 // Debounces both text-search keystrokes and sort/filter button clicks into a single request,
 // mirroring the FTS search debounce this replaced. Short enough that a button click still feels
 // instant.
 const RELOAD_DEBOUNCE_MS = 250;
 
 /**
- * Owns the saved-videos library: paged loading from the DB (100 rows at a time, sorted/filtered
+ * Owns the saved-videos library: paged loading from the DB (300 rows at a time, sorted/filtered
  * server-side by `sortField`/`sortOrder`/`filterKind` so a several-thousand-video library never
  * has to be pulled into memory or re-sorted client-side — see db/search.rs's `library_order_by`/
  * `filter_kind_where`), "load more" pagination (`loadMore`, appends the next page), saving
@@ -33,6 +36,13 @@ export function useLibrary(
     const [libraryVideos, setLibraryVideos] = useState<Video[]>([]);
     const [totalCount, setTotalCount] = useState(0);
     const [librarySearch, setLibrarySearch] = useState("");
+    // The Drive/Warp Drive side panel's selected category (see App.tsx's toggle button and
+    // components/WdbsTreePanel.tsx) — `null` means browsing the Library/Portal grid normally.
+    // NOT mutually exclusive with free-text search: while a category is selected, `librarySearch`
+    // narrows *within* it (see fetchPage below) rather than escaping to a library-wide search —
+    // only explicitly clearing the category (setWdbsFilter(null), e.g. the toggle button turning
+    // the panel off) resets back to the plain, unfiltered Library/Portal view.
+    const [wdbsFilter, setWdbsFilterState] = useState<string | null>(null);
     const [sortField, setSortField] = useState<LibrarySortField>('date');
     const [sortOrder, setSortOrder] = useState<LibrarySortOrder>('desc');
     const [filterKind, setFilterKind] = useState<LibraryFilterKind>('all');
@@ -60,10 +70,22 @@ export function useLibrary(
 
     const fetchPage = useCallback((offset: number) => {
         const opts = { filterKind, sortField, sortOrder, limit: PAGE_SIZE, offset };
+        // Search text always narrows *within* the selected category when one's active, rather
+        // than escaping to a library-wide search — see wdbsFilter above.
+        if (wdbsFilter) return getVideosByWdbs(wdbsFilter, librarySearch, opts);
         return librarySearch.trim()
             ? searchLibrary(librarySearch, undefined, opts)
             : getSavedVideos(undefined, false, opts);
-    }, [librarySearch, filterKind, sortField, sortOrder]);
+    }, [librarySearch, wdbsFilter, filterKind, sortField, sortOrder]);
+
+    // Explicitly clearing the category (passing `null` — e.g. the toggle button turning the
+    // panel off) also resets any search text, per "reset to the default full results" — but
+    // selecting a category leaves whatever search text is already there in place, now scoped to
+    // that category instead of the whole library.
+    const setWdbsFilter = useCallback((path: string | null) => {
+        if (path === null) setLibrarySearch("");
+        setWdbsFilterState(path);
+    }, []);
 
     // Enters the Library view. Idempotent: if it's already enabled (the user is just switching
     // back from another tab, not visiting for the first time), this is a no-op — the current
@@ -101,7 +123,7 @@ export function useLibrary(
                 if (pluginSummarizeEnabled) refreshSummarizedCount();
             } catch {
                 if (requestIdRef.current === myRequestId) {
-                    setNotification({ message: "Failed to load library", type: "error" });
+                    setNotification({ message: `Failed to load ${BRAND.libraryLabel}`, type: "error" });
                 }
             } finally {
                 if (requestIdRef.current === myRequestId) setLoading(false);
@@ -109,7 +131,7 @@ export function useLibrary(
         }, RELOAD_DEBOUNCE_MS);
         return () => window.clearTimeout(timer);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enabled, librarySearch, sortField, sortOrder, filterKind, reloadNonce, fetchPage]);
+    }, [enabled, librarySearch, wdbsFilter, sortField, sortOrder, filterKind, reloadNonce, fetchPage]);
 
     const hasMore = libraryVideos.length < totalCount;
 
@@ -145,7 +167,7 @@ export function useLibrary(
             if (result.status === 'exists') {
                 setNotification({ message: `"${video.title.substring(0, 30)}..." already exists in DB.`, type: "info" });
             } else {
-                setNotification({ message: `Saved "${video.title.substring(0, 30)}..." to library.`, type: "success" });
+                setNotification({ message: `Saved "${video.title.substring(0, 30)}..." to ${BRAND.libraryLabel}.`, type: "success" });
                 // Re-fetch page 1 in the background so the new video lands in its correct sorted
                 // position and the total count picks it up, rather than guessing where a naive
                 // client-side prepend would belong under the active sort.
@@ -211,7 +233,7 @@ export function useLibrary(
     const handleSummarizeAll = useCallback(async () => {
         if (summarizeProgress || !pluginSummarizeEnabled) return;
         if (libraryVideos.length === 0 && totalCount === 0) {
-            setNotification({ message: "No videos in library to summarize", type: "info" });
+            setNotification({ message: `No videos in ${BRAND.libraryLabel} to summarize`, type: "info" });
             return;
         }
         try {
@@ -236,6 +258,8 @@ export function useLibrary(
         hasMore,
         librarySearch,
         setLibrarySearch,
+        wdbsFilter,
+        setWdbsFilter,
         sortField,
         setSortField,
         sortOrder,
@@ -260,7 +284,8 @@ export function useLibrary(
         handleSaveAll,
         handleSummarizeAll,
     }), [
-        libraryVideos, totalCount, hasMore, librarySearch, sortField, sortOrder, toggleSortOrder,
+        libraryVideos, totalCount, hasMore, librarySearch, setLibrarySearch, wdbsFilter, setWdbsFilter,
+        sortField, sortOrder, toggleSortOrder,
         filterKind, loading, loadingMore, loadMore, saveProgress, summarizeProgress, summarizedCount,
         confirmDelete, enterLibrary, refreshLibrary, refreshSummarizedCount, handleSaveVideo,
         handleDeleteVideo, handleDeleteFromSidebar, confirmDeleteAction, handleSaveAll, handleSummarizeAll,

@@ -87,6 +87,17 @@ pub fn save_video(
             summary=COALESCE(excluded.summary, videos.summary)",
         params![video_id, title, author, length, transcript, view_count, published_at, handle, video_type, summary],
     )?;
+    // The production database's own INSERT trigger defaults a new video's WDBS to the raw "θψ"
+    // prefix marker when it can't infer anything smarter (see the schema handoff doc). Since
+    // "θψ" is alphabetic and also the universal prefix every real WDBS value starts with, FTS5
+    // indexes it as a literal searchable term that matches every video — normalizing it to ":"
+    // (punctuation, not indexed at all) right after save keeps new videos from re-introducing the
+    // problem the one-time migration in schema.rs::init_db already cleaned up for existing ones.
+    // Cheap: video_id is the primary key, so this never scans the table.
+    let _ = conn.execute(
+        "UPDATE videos SET WDBS = ':' WHERE video_id = ?1 AND WDBS = 'θψ'",
+        params![video_id],
+    );
     regenerate_tokens_from_transcript(&conn, video_id)?;
     // Covers the "summarize before saving" workflow: a real summary can already be provided
     // at insert time, so it needs the same quote-marker cleanup applied on later saves.
@@ -245,6 +256,26 @@ pub fn save_tags(db_path: &str, video_id: &str, tags: &str) -> Result<()> {
     conn.execute(
         "UPDATE videos SET tags = ?1 WHERE video_id = ?2",
         params![tags, video_id],
+    )?;
+    Ok(())
+}
+
+/// Updates a video's Warp Drive (WDBS) value. `encoded_wdbs` must already be in storage encoding
+/// (θψ prefix, underscores — see commands::wdbs::encode_wdbs_display for the ':'/'-' -> 'θψ'/'_'
+/// transform), or `":"` to clear it back to unassigned (see commands::wdbs::update_wdbs for why
+/// ":" specifically). Deliberately takes `&str`, not `Option<&str>`: the production database's
+/// WDBS column is NOT NULL (every video is always tied to at least "Universe"), so clearing must
+/// write a real value rather than SQL NULL — a bare NULL trips that constraint even though "no
+/// drive assigned" is otherwise a perfectly valid state. Returns whatever error SQLite raises as-is
+/// (including a validating trigger's
+/// RAISE(ABORT, ...) against the production tblWDBS schema) — the caller is responsible for
+/// turning that into a user-friendly message (see commands::wdbs::update_wdbs), since this layer
+/// has no way to know why a given value was rejected.
+pub fn update_video_wdbs(db_path: &str, video_id: &str, encoded_wdbs: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "UPDATE videos SET WDBS = ?1 WHERE video_id = ?2",
+        params![encoded_wdbs, video_id],
     )?;
     Ok(())
 }

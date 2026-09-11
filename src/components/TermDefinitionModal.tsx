@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import React, { useEffect, useState } from 'react';
 import { openExternalUrl, getSetting } from '../api';
+import { BRAND } from '../branding';
 
 interface GlossaryTerm {
     term: string;
@@ -98,7 +99,7 @@ export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
                                 className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
                             >
                                 <Search className="w-3.5 h-3.5" />
-                                Search in Library
+                                Search in {BRAND.libraryLabel}
                             </button>
                         )}
                     </div>

@@ -2,6 +2,7 @@ import { Search, AtSign, Youtube, ListVideo, Filter, X, Lightbulb, History, Cloc
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { addSearchHistory, getSearchHistory, type HistoryEntry } from '../api';
 import { decodeHtmlEntities } from '../lib/utils';
+import { BRAND } from '../branding';
 
 export interface Facet {
     type: SearchFacet;
@@ -431,7 +432,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                     <h4 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 border-b border-[#333] pb-2">Search Tips</h4>
                                 <div className="space-y-4">
                                     <div className="flex flex-col gap-1">
-                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-tighter">{isGlossary ? "Glossary Mode" : isLibrary ? "Library Mode" : "Paste Mode"}</span>
+                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-tighter">{isGlossary ? "Glossary Mode" : isLibrary ? `${BRAND.libraryLabel} Mode` : "Paste Mode"}</span>
                                         <p className="text-[12px] text-gray-300">
                                             {isGlossary ? "Filter your glossary terms." : isLibrary ? "Filter your saved videos using facets." : "Paste any YouTube URL directly into the search bar."}
                                         </p>

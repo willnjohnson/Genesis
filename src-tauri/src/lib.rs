@@ -8,7 +8,14 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.3.4";
+// Mirrors branding.ts's BRAND.driveLabel — user-facing error strings in commands::wdbs reference
+// this instead of hardcoding "Warp Drive" so they stay correct for Genesis too.
+#[cfg(feature = "genesis")]
+pub(crate) const DRIVE_LABEL: &str = "Drive";
+#[cfg(not(feature = "genesis"))]
+pub(crate) const DRIVE_LABEL: &str = "Warp Drive";
+
+const VERSION: &str = "0.3.5";
 
 fn get_window_title() -> String {
     format!("{} v{}", APP_NAME, VERSION)
@@ -159,6 +166,14 @@ pub fn run() {
             commands::check_video_exists,
             commands::bulk_save_videos,
             commands::search_videos,
+            commands::update_wdbs,
+            commands::get_wdbs_tree,
+            commands::fetch_videos_by_wdbs,
+            commands::get_wdbs_suggestions,
+            commands::get_video_wdbs_links,
+            commands::add_video_wdbs_link,
+            commands::remove_video_wdbs_link,
+            commands::bulk_update_wdbs,
             // AI / Summarize / Ollama / Venice
             commands::check_ollama,
             commands::check_model_pulled,

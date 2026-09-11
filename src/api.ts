@@ -22,6 +22,9 @@ export interface Video {
     hasSummary?: boolean;
     lengthSeconds?: number;
     videoType?: string;
+    // Warp Drive taxonomy designator, in storage encoding (e.g. "θψUAP_GERB_PND") — empty/absent
+    // means unassigned ("Universe"). See updateVideoWdbs for the user-facing ":UAP-GERB-PND" form.
+    wdbs?: string;
 }
 
 export interface SearchResponse {
@@ -449,6 +452,106 @@ export async function deleteCustomPrompt(handle: string): Promise<void> {
 
 export async function getUniqueHandles(): Promise<string[]> {
     return await invoke("get_unique_handles");
+}
+
+/// Converts a video's stored WDBS value (storage encoding, e.g. "θψUAP_GERB_PND") into the
+/// human-facing Warp Drive designator form (":UAP-GERB-PND") for display in an edit control.
+/// Mirrors the encoding update_wdbs applies in reverse; returns '' for unassigned ("Universe").
+export function decodeWdbs(stored: string | undefined | null): string {
+    if (!stored || !stored.startsWith('θψ')) return '';
+    const body = stored.slice(2);
+    // A bare "θψ" with nothing after it (e.g. a production default-population trigger's
+    // "no specific drive yet" sentinel) has no real designator to show — without this check
+    // it would decode to a bare ":", which passed the caller's `|| "N/A"` fallback because ":"
+    // is a non-empty, truthy string.
+    if (!body) return '';
+    return ':' + body.replace(/_/g, '-');
+}
+
+/// The inverse of decodeWdbs — mirrors the ':' -> 'θψ' / '-' -> '_' transform update_wdbs applies
+/// server-side, so a caller that just successfully saved a display-format value (e.g.
+/// Sidebar.tsx's handleSaveWdbs) can optimistically update local state without waiting on a
+/// refetch. Returns '' for a blank/cleared input.
+export function encodeWdbs(display: string): string {
+    const trimmed = display.trim();
+    if (!trimmed.startsWith(':') || trimmed.length < 2) return '';
+    return 'θψ' + trimmed.slice(1).replace(/-/g, '_');
+}
+
+// Updates a video's canonical Warp Drive (the one shown by decodeWdbs(video.wdbs)), or clears it
+// back to unassigned ("N/A") when `wdbs` is empty. To have the video additionally show up under
+// OTHER Warp Drives without changing this one, see add/removeVideoWdbsLink below.
+export async function updateVideoWdbs(videoId: string, wdbs: string): Promise<void> {
+    await invoke("update_wdbs", { videoId, wdbs });
+}
+
+// One node of the Warp Drive taxonomy tree (see components/WdbsTreePanel.tsx). `path` is the
+// storage-encoded prefix to pass to getVideosByWdbs; `count` includes every distinct video at
+// this node and everywhere beneath it (canonical assignment or symlink — see
+// add/removeVideoWdbsLink). There is deliberately no "Universe"/unassigned node — that's what
+// the Library/Portal grid is already for.
+export interface WdbsNode {
+    segment: string;
+    path: string;
+    count: number;
+    children: WdbsNode[];
+}
+
+export async function getWdbsTree(): Promise<WdbsNode[]> {
+    return await invoke("get_wdbs_tree");
+}
+
+// `wdbsPath` is a WdbsNode.path value (or any encoded prefix) — selects that category and
+// everything nested beneath it.
+// `query` narrows the category's videos via the same FTS5 search the Library/Portal grid's own
+// search box uses, just scoped to this category instead of the whole library — pass '' for none.
+export async function getVideosByWdbs(wdbsPath: string, query: string, opts?: LibraryQueryOptions): Promise<SearchResponse> {
+    return await invoke("fetch_videos_by_wdbs", {
+        wdbsPrefix: wdbsPath,
+        query,
+        filterKind: opts?.filterKind,
+        sortField: opts?.sortField,
+        sortOrder: opts?.sortOrder,
+        limit: opts?.limit,
+        offset: opts?.offset,
+    });
+}
+
+// Every Warp Drive path currently assigned to at least one video (storage-encoded) — decode with
+// decodeWdbs() before showing as autocomplete suggestions in a Warp Drive editor.
+export async function getWdbsSuggestions(): Promise<string[]> {
+    return await invoke("get_wdbs_suggestions");
+}
+
+// A video's symlinked (non-canonical) Warp Drives, storage-encoded.
+export async function getVideoWdbsLinks(videoId: string): Promise<string[]> {
+    return await invoke("get_video_wdbs_links", { videoId });
+}
+
+// Links a video to an additional Warp Drive (":UAP-GERB-VVV" display format) without touching
+// its canonical one. Resolves to the storage-encoded value that was added.
+export async function addVideoWdbsLink(videoId: string, wdbs: string): Promise<string> {
+    return await invoke("add_video_wdbs_link", { videoId, wdbs });
+}
+
+// `wdbs` must be the storage-encoded value (as returned by addVideoWdbsLink/getVideoWdbsLinks),
+// not the ":..." display form.
+export async function removeVideoWdbsLink(videoId: string, wdbs: string): Promise<void> {
+    await invoke("remove_video_wdbs_link", { videoId, wdbs });
+}
+
+export interface BulkWdbsResult {
+    succeeded: string[];
+    // [videoId, errorMessage] pairs — one bad video can't abort the whole batch, so a partial
+    // result is reported instead of an all-or-nothing failure.
+    failed: [string, string][];
+}
+
+// Assigns every video in `videoIds` to `wdbs` (display format, ":UAP-GERB-VVV") in one round
+// trip, or clears them all back to unassigned when `wdbs` is empty — see App.tsx's Bulk Assign
+// Mode in the Library/Portal grid.
+export async function bulkUpdateVideoWdbs(videoIds: string[], wdbs: string): Promise<BulkWdbsResult> {
+    return await invoke("bulk_update_wdbs", { videoIds, wdbs });
 }
 
 export interface PixabayImage {

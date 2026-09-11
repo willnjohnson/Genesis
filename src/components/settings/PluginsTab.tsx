@@ -1,13 +1,21 @@
-import { Cpu, Check, Save, Terminal, Lightbulb } from "lucide-react";
+import { Cpu, Check, Save, Terminal, Lightbulb, FolderTree } from "lucide-react";
 import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import {
-    setSetting,
+    setSetting, getSetting,
     checkOllama, checkModelPulled, pullModel, deleteModel, installOllama,
     getOllamaPrompt, setOllamaPrompt as saveOllamaPrompt,
     getVeniceApiKey, getVenicePrompt, setVenicePrompt as saveVenicePromptCmd,
 } from "../../api";
+import { BRAND } from "../../branding";
+
+// Kept in sync with the backend default (venice.rs's DEFAULT_VENICE_MODEL / schema.rs's
+// "venice_model" seed value). Venice renames/deprecates models over time (e.g. "GLM 5.1" vs
+// "GLM 5.2"), which is exactly why this is a free-text field rather than a hardcoded dropdown —
+// the user can switch models the moment Venice changes its lineup, without waiting on an app
+// update.
+const DEFAULT_VENICE_MODEL = "zai-org-glm-5";
 
 // ─── Shared sub-components ───────────────────────────────────────────────────
 
@@ -268,11 +276,35 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
     const [keyInput, setKeyInput] = useState('');
     const [prompt, setPrompt] = useState('');
     const [promptDirty, setPromptDirty] = useState(false);
+    const [model, setModel] = useState(DEFAULT_VENICE_MODEL);
+    const [modelInput, setModelInput] = useState('');
+    const [modelSaved, setModelSaved] = useState(false);
 
     useEffect(() => {
         getVeniceApiKey().then(k => setHasKey(!!k));
         getVenicePrompt().then(setPrompt);
+        getSetting('venice_model').then(m => {
+            const resolved = m && m.trim() ? m : DEFAULT_VENICE_MODEL;
+            setModel(resolved);
+            setModelInput(resolved);
+        });
     }, []);
+
+    const handleSaveModel = async () => {
+        const next = modelInput.trim() || DEFAULT_VENICE_MODEL;
+        setLoading(true);
+        try {
+            await setSetting('venice_model', next);
+            setModel(next);
+            setModelInput(next);
+            setModelSaved(true);
+            window.setTimeout(() => setModelSaved(false), 1500);
+        } catch {
+            alert("Failed to save Venice model.");
+        } finally {
+            setLoading(false);
+        }
+    };
 
     const handleSaveKey = async () => {
         const key = keyInput.trim();
@@ -364,6 +396,34 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
                 </div>
             </div>
 
+            {/* Model */}
+            <div className="bg-black/20 p-4 rounded-lg border border-[#303030]">
+                <div className="flex items-center gap-2 mb-3">
+                    <span className="text-xs font-bold text-white">Venice Model</span>
+                    <TooltipLightbulb />
+                </div>
+                <p className="text-[10px] text-[#aaaaaa] mb-3">
+                    Venice periodically renames or retires models (e.g. an older GLM release in favor of a newer one). If summaries start failing, check Venice's current model list and update this.
+                </p>
+                <div className="flex items-center gap-2">
+                    <input
+                        type="text"
+                        placeholder={DEFAULT_VENICE_MODEL}
+                        value={modelInput}
+                        onChange={(e) => setModelInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleSaveModel(); }}
+                        className="flex-1 bg-[#1a1a1a] border border-[#303030] hover:border-[#505050] outline-none rounded-lg px-3 py-2 text-[11px] text-white placeholder-[#444] transition-colors font-mono"
+                    />
+                    <button
+                        onClick={handleSaveModel}
+                        disabled={loading || !modelInput.trim() || modelInput.trim() === model}
+                        className="bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-3 py-1.5 rounded-md font-semibold text-[10px] transition-colors cursor-pointer disabled:opacity-50 shrink-0"
+                    >
+                        {modelSaved ? <Check className="w-3.5 h-3.5" /> : "Save"}
+                    </button>
+                </div>
+            </div>
+
             {/* Prompt */}
             <PromptEditor
                 label="Cloud Prompt Template (Default)"
@@ -372,6 +432,52 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
                 onSave={handleSavePrompt}
                 dirty={promptDirty}
             />
+        </div>
+    );
+}
+
+// ─── Warp Drive editing toggle ────────────────────────────────────────────────
+
+// Self-contained (loads/saves its own setting directly) rather than threaded through
+// SettingsModal's props, mirroring the "Clear Transcript After Summarizing" toggle above.
+// Gates the pencil/"Also in" editing controls in Sidebar.tsx's Warp Drive section — off by
+// default (see schema.rs's "allowEditWDBS" seed value) since taxonomy edits are eventually meant
+// to be restricted to IKLAO Admin Users once the IKLAO Cloud is stood up, but there's no such
+// auth yet, so this is how to turn editing on in the meantime.
+function WarpDriveSection() {
+    const [allowEdit, setAllowEdit] = useState(false);
+
+    useEffect(() => {
+        getSetting('allowEditWDBS').then(v => setAllowEdit(v === 'true'));
+    }, []);
+
+    const toggle = async () => {
+        const next = !allowEdit;
+        setAllowEdit(next);
+        await setSetting('allowEditWDBS', next.toString());
+    };
+
+    return (
+        <div className="bg-[#121212] border border-[#303030] rounded-xl p-5 hover:border-[#404040] transition-all">
+            <div className="flex items-start justify-between">
+                <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                        <div className="p-2 text-gray-400"><FolderTree className="w-4 h-4" /></div>
+                        <h4 className="text-sm font-bold text-white">{BRAND.driveLabel} Editing</h4>
+                    </div>
+                    <p className="text-[11px] text-[#aaaaaa] leading-relaxed max-w-sm">
+                        Lets you assign, change, and symlink a saved video's {BRAND.driveLabel} designator from its detail panel. Off by default.
+                    </p>
+                </div>
+                <div className="ml-6 shrink-0">
+                    <button
+                        onClick={toggle}
+                        className={`px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer ${allowEdit ? 'bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white font-semibold' : 'bg-red-600 text-white hover:bg-red-500'}`}
+                    >
+                        {allowEdit ? 'Disable' : 'Enable'}
+                    </button>
+                </div>
+            </div>
         </div>
     );
 }
@@ -428,6 +534,7 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
                     Extend the app with modular functionalities powered by external services.
                 </p>
                 <div className="space-y-4">
+                    <WarpDriveSection />
                     {plugins.map(plugin => (
                         <div key={plugin.id} className="bg-[#121212] border border-[#303030] rounded-xl p-5 hover:border-[#404040] transition-all">
                             <div className="flex items-start justify-between">

@@ -1,6 +1,6 @@
-import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff } from 'lucide-react';
+import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus } from 'lucide-react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort } from '../api';
+import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink } from '../api';
 import { saveImageAs } from '../lib/save-image-as';
 import { handleMarkdownKeyDown } from '../lib/markdown-editor';
 import { useFindReplace } from './sidebar/useFindReplace';
@@ -10,6 +10,7 @@ import { VideoTagsPanel } from './sidebar/VideoTagsPanel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { TermDefinitionModal } from './TermDefinitionModal';
+import { BRAND } from '../branding';
 
 interface GlossaryTerm {
     term: string;
@@ -46,6 +47,9 @@ interface Props {
     initialTab?: 'transcript' | 'summary';
     showBiography?: boolean;
     allowEditTranscriptOnNA?: boolean;
+    wdbs?: string;
+    allowEditWDBS?: boolean;
+    onWdbsUpdated?: (wdbs: string) => void;
 }
 
 /**
@@ -57,7 +61,7 @@ interface Props {
  * directly, since the two panes are asymmetric (only the summary pane supports image hover-to-
  * delete) rather than a clean shared abstraction.
  */
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true }: Props) {
+export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated }: Props) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
@@ -95,6 +99,16 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [imageToSaveLocally, setImageToSaveLocally] = useState("");
     const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
     const [embedPort, setEmbedPort] = useState<number | null>(null);
+    const [isEditingWdbs, setIsEditingWdbs] = useState(false);
+    const [wdbsInput, setWdbsInput] = useState('');
+    const [wdbsError, setWdbsError] = useState<string | null>(null);
+    const [savingWdbs, setSavingWdbs] = useState(false);
+    const [wdbsSuggestions, setWdbsSuggestions] = useState<string[]>([]);
+    const [wdbsLinks, setWdbsLinks] = useState<string[]>([]);
+    const [isAddingLink, setIsAddingLink] = useState(false);
+    const [linkInput, setLinkInput] = useState('');
+    const [linkError, setLinkError] = useState<string | null>(null);
+    const [savingLink, setSavingLink] = useState(false);
 
     const transcriptEditRef = useRef<HTMLTextAreaElement>(null);
     const summaryEditRef = useRef<HTMLTextAreaElement>(null);
@@ -465,6 +479,79 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const hideTranscriptEditButton = allowEditTranscriptOnNA === false &&
         transcript?.trim() === "N/A" && hasExistingSummary;
 
+    // "Also in" (symlinks) only makes sense once there's a canonical WDBS to be "also" alongside
+    // — see the "Also in" section below, and update_wdbs's own symlink cleanup when this becomes
+    // false (clearing the canonical value removes any symlinks server-side too).
+    const hasPrimaryWdbs = !!decodeWdbs(wdbs);
+
+    // Autocomplete suggestions (existing Warp Drive paths) are shared by the primary editor and
+    // the "link to another Warp Drive" adder below — loaded once, not per-video.
+    useEffect(() => {
+        getWdbsSuggestions().then(paths => setWdbsSuggestions(paths.map(decodeWdbs).filter(Boolean))).catch(() => {});
+    }, []);
+
+    // Reset any in-progress WDBS edit whenever a different video is opened, so leftover input/
+    // error state from one video's edit doesn't leak into the next one's panel. Symlinked Warp
+    // Drives are re-fetched per video too, since they aren't part of the Video object itself.
+    useEffect(() => {
+        setIsEditingWdbs(false);
+        setWdbsInput(decodeWdbs(wdbs));
+        setWdbsError(null);
+        setIsAddingLink(false);
+        setLinkInput('');
+        setLinkError(null);
+        if (videoId && existsInDb) {
+            getVideoWdbsLinks(videoId).then(setWdbsLinks).catch(() => setWdbsLinks([]));
+        } else {
+            setWdbsLinks([]);
+        }
+    }, [videoId, wdbs, existsInDb]);
+
+    const handleSaveWdbs = useCallback(async () => {
+        if (!videoId) return;
+        setSavingWdbs(true);
+        setWdbsError(null);
+        try {
+            await updateVideoWdbs(videoId, wdbsInput.trim());
+            setIsEditingWdbs(false);
+            onWdbsUpdated?.(encodeWdbs(wdbsInput));
+        } catch (e: any) {
+            // update_wdbs already turns a SQLite trigger rejection into a plain-language message
+            // (see commands::wdbs::update_wdbs) — surface it as-is.
+            setWdbsError(typeof e === "string" ? e : e?.message ?? "Failed to update WDBS.");
+        } finally {
+            setSavingWdbs(false);
+        }
+    }, [videoId, wdbsInput, onWdbsUpdated]);
+
+    const handleAddLink = useCallback(async () => {
+        if (!videoId || !linkInput.trim()) return;
+        setSavingLink(true);
+        setLinkError(null);
+        try {
+            const encoded = await addVideoWdbsLink(videoId, linkInput.trim());
+            setWdbsLinks(prev => prev.includes(encoded) ? prev : [...prev, encoded]);
+            setLinkInput('');
+            setIsAddingLink(false);
+        } catch (e: any) {
+            setLinkError(typeof e === "string" ? e : e?.message ?? "Failed to link WDBS.");
+        } finally {
+            setSavingLink(false);
+        }
+    }, [videoId, linkInput]);
+
+    const handleRemoveLink = useCallback(async (encoded: string) => {
+        if (!videoId) return;
+        // Optimistic: symlinks are low-stakes bookkeeping, and waiting on the round trip before
+        // updating the chip list would make removal feel laggy for no real benefit.
+        setWdbsLinks(prev => prev.filter(l => l !== encoded));
+        try {
+            await removeVideoWdbsLink(videoId, encoded);
+        } catch {
+            setWdbsLinks(prev => prev.includes(encoded) ? prev : [...prev, encoded]);
+        }
+    }, [videoId]);
+
     return (
         <>
             {isOpen && (
@@ -572,6 +659,144 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                     </button>
                                                 </div>
                                             </div>
+
+                                            {existsInDb && (
+                                                <>
+                                                <datalist id="wdbs-suggestions">
+                                                    {wdbsSuggestions.map(s => <option key={s} value={s} />)}
+                                                </datalist>
+                                                <div className="mt-3 flex items-center gap-2 text-xs">
+                                                    <span className="text-[#666666] uppercase font-bold tracking-wider text-[10px] shrink-0">WDBS:</span>
+                                                    {isEditingWdbs ? (
+                                                        <>
+                                                            <input
+                                                                type="text"
+                                                                autoFocus
+                                                                list="wdbs-suggestions"
+                                                                value={wdbsInput}
+                                                                onChange={(e) => setWdbsInput(e.target.value)}
+                                                                onKeyDown={(e) => {
+                                                                    if (e.key === 'Enter') handleSaveWdbs();
+                                                                    if (e.key === 'Escape') { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(wdbs)); setWdbsError(null); }
+                                                                }}
+                                                                placeholder=":UAP-GERB-VVV"
+                                                                disabled={savingWdbs}
+                                                                className="flex-1 min-w-0 bg-[#1a1a1a] border border-[#333] focus:border-red-600/50 outline-none rounded-md px-2 py-1 text-[11px] text-white placeholder-[#555] font-mono transition-colors disabled:opacity-50"
+                                                            />
+                                                            <button
+                                                                onClick={handleSaveWdbs}
+                                                                disabled={savingWdbs}
+                                                                title="Save"
+                                                                className="text-green-500 hover:text-green-400 transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
+                                                            >
+                                                                <Check className="w-3.5 h-3.5" />
+                                                            </button>
+                                                            <button
+                                                                onClick={() => { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(wdbs)); setWdbsError(null); }}
+                                                                disabled={savingWdbs}
+                                                                title="Cancel"
+                                                                className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
+                                                            >
+                                                                <X className="w-3.5 h-3.5" />
+                                                            </button>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <span className="text-[#aaaaaa] font-mono truncate">{decodeWdbs(wdbs) || "N/A"}</span>
+                                                            {allowEditWDBS && (
+                                                                <button
+                                                                    onClick={() => setIsEditingWdbs(true)}
+                                                                    title="Edit WDBS"
+                                                                    className="text-gray-500 hover:text-blue-400 transition-colors cursor-pointer p-1 shrink-0"
+                                                                >
+                                                                    <Pencil className="w-3.5 h-3.5" />
+                                                                </button>
+                                                            )}
+                                                        </>
+                                                    )}
+                                                </div>
+                                                {wdbsError && (
+                                                    <div className="mt-1.5 text-[10px] text-red-400 bg-red-900/20 border border-red-500/30 rounded-md px-2 py-1.5">
+                                                        {wdbsError}
+                                                    </div>
+                                                )}
+
+                                                {/* Symbolic links: lets a video additionally show up under OTHER Warp
+                                                    Drive categories (see components/WdbsTreePanel.tsx) without touching
+                                                    its canonical one above. Hidden entirely until a canonical WDBS
+                                                    is actually assigned — there's nothing to be "also in" without one. */}
+                                                {hasPrimaryWdbs && (allowEditWDBS || wdbsLinks.length > 0) && (
+                                                    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+                                                        <span className="text-[#666666] uppercase font-bold tracking-wider text-[10px] shrink-0">Also in:</span>
+                                                        {wdbsLinks.map(link => (
+                                                            <span
+                                                                key={link}
+                                                                className="flex items-center gap-1 bg-[#1a1a1a] border border-[#333] rounded-md pl-2 pr-1 py-0.5 text-[11px] text-[#aaaaaa] font-mono"
+                                                            >
+                                                                {decodeWdbs(link)}
+                                                                {allowEditWDBS && (
+                                                                    <button
+                                                                        onClick={() => handleRemoveLink(link)}
+                                                                        title="Remove link"
+                                                                        className="text-gray-500 hover:text-red-400 transition-colors cursor-pointer p-0.5"
+                                                                    >
+                                                                        <X className="w-3 h-3" />
+                                                                    </button>
+                                                                )}
+                                                            </span>
+                                                        ))}
+                                                        {allowEditWDBS && (isAddingLink ? (
+                                                            <>
+                                                                <input
+                                                                    type="text"
+                                                                    autoFocus
+                                                                    list="wdbs-suggestions"
+                                                                    value={linkInput}
+                                                                    onChange={(e) => setLinkInput(e.target.value)}
+                                                                    onKeyDown={(e) => {
+                                                                        if (e.key === 'Enter') handleAddLink();
+                                                                        if (e.key === 'Escape') { setIsAddingLink(false); setLinkInput(''); setLinkError(null); }
+                                                                    }}
+                                                                    placeholder=":MWD-INS-RES"
+                                                                    disabled={savingLink}
+                                                                    className="min-w-0 w-32 bg-[#1a1a1a] border border-[#333] focus:border-red-600/50 outline-none rounded-md px-2 py-1 text-[11px] text-white placeholder-[#555] font-mono transition-colors disabled:opacity-50"
+                                                                />
+                                                                <button
+                                                                    onClick={handleAddLink}
+                                                                    disabled={savingLink || !linkInput.trim()}
+                                                                    title="Add link"
+                                                                    className="text-green-500 hover:text-green-400 transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
+                                                                >
+                                                                    <Check className="w-3.5 h-3.5" />
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => { setIsAddingLink(false); setLinkInput(''); setLinkError(null); }}
+                                                                    disabled={savingLink}
+                                                                    title="Cancel"
+                                                                    className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
+                                                                >
+                                                                    <X className="w-3.5 h-3.5" />
+                                                                </button>
+                                                            </>
+                                                        ) : (
+                                                            <button
+                                                                onClick={() => setIsAddingLink(true)}
+                                                                title="Link to another WDBS"
+                                                                className="flex items-center gap-1 text-gray-500 hover:text-blue-400 transition-colors cursor-pointer px-1.5 py-0.5 rounded-md border border-dashed border-[#333] hover:border-blue-400/50 text-[11px]"
+                                                            >
+                                                                <Plus className="w-3 h-3" />
+                                                                Link
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {linkError && (
+                                                    <div className="mt-1.5 text-[10px] text-red-400 bg-red-900/20 border border-red-500/30 rounded-md px-2 py-1.5">
+                                                        {linkError}
+                                                    </div>
+                                                )}
+                                                </>
+                                            )}
 
                                             {existsInDb && (
                                                 <VideoTagsPanel
@@ -1127,7 +1352,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         {showPromptEditor ? 'Hide' : 'Show'}
                                                     </button>
                                                 ) : (
-                                                    <span className="text-[9px] text-[#666666] uppercase font-bold">(Save to Library to Edit)</span>
+                                                    <span className="text-[9px] text-[#666666] uppercase font-bold">(Save to {BRAND.libraryLabel} to Edit)</span>
                                                 )}
                                             </div>
                                         </div>
@@ -1147,7 +1372,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             <button
                                                 onClick={onDelete}
                                                 disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
-                                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to delete" : "Delete from Library"}
+                                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to delete" : `Delete from ${BRAND.libraryLabel}`}
                                                 className={`flex-1 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                                             >
                                                 <Trash2 className="w-3.5 h-3.5" />
@@ -1157,7 +1382,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             <button
                                                 onClick={handleOnSave}
                                                 disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
-                                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to save" : "Save to Library"}
+                                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to save" : `Save to ${BRAND.libraryLabel}`}
                                                 className={`flex-1 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                                             >
                                                 <Save className="w-3.5 h-3.5" />

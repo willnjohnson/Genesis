@@ -23,22 +23,36 @@ pub type BiographyRow = (
 /// Ensures a biography row exists for `handle`, seeding it with `display_name`. If a row already
 /// exists, `display_name` is only applied when the existing one is empty — this never overwrites
 /// a display name a user has already set (e.g. via manual edit), only fills in a blank one.
-pub fn upsert_biography_from_video(db_path: &str, handle: &str, display_name: &str) -> Result<()> {
+///
+/// `channel_id`/`subscriber_count` are only ever written on the INSERT branch (first time this
+/// handle is seen) — the ON CONFLICT branch intentionally omits them from its SET list, so they
+/// are never touched again on a later save. channel_id is YouTube's immutable channel ID, which
+/// must be captured at the outset since (unlike handle) it can't be recovered later once missed;
+/// subscriber_count is meant to be kept in sync by a separate backend routine going forward, not
+/// by Kinesis's own video-save flow. See commands::youtube::library::ensure_biography_seeded for
+/// the caller that resolves these before calling in.
+pub fn upsert_biography_from_video(
+    db_path: &str,
+    handle: &str,
+    display_name: &str,
+    channel_id: Option<&str>,
+    subscriber_count: i64,
+) -> Result<()> {
     let conn = Connection::open(db_path)?;
     let cleaned_handle = handle.trim();
     if cleaned_handle.is_empty() {
         return Ok(());
     }
     conn.execute(
-        "INSERT INTO biographies (handle, display_name)
-         VALUES (?1, ?2)
+        "INSERT INTO biographies (handle, display_name, channel_id, subscriber_count)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(handle) DO UPDATE SET
            display_name = CASE
              WHEN biographies.display_name IS NULL OR TRIM(biographies.display_name) = ''
              THEN excluded.display_name
              ELSE biographies.display_name
            END",
-        params![cleaned_handle, display_name.trim()],
+        params![cleaned_handle, display_name.trim(), channel_id.unwrap_or("").trim(), subscriber_count],
     )?;
     Ok(())
 }

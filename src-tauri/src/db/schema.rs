@@ -22,13 +22,24 @@ const DEFAULT_STOPWORDS: &[&str] = &[
     "yourselves",
 ];
 
-fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
+pub(crate) fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
         params![table_name],
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+// Used to idempotently ALTER TABLE ... ADD COLUMN for columns introduced after a database was
+// first created — SQLite has no "ADD COLUMN IF NOT EXISTS", so callers check this first.
+fn column_exists(conn: &Connection, table_name: &str, column_name: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|name| name.eq_ignore_ascii_case(column_name));
+    Ok(exists)
 }
 
 pub fn init_db(db_path: &str) -> Result<()> {
@@ -77,6 +88,17 @@ pub fn init_db(db_path: &str) -> Result<()> {
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosPublishedAt ON videos(published_at)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosViewCount ON videos(view_count)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosVideoType ON videos(video_type)", []);
+
+    // Warp Drive taxonomy: `WDBS` indirectly ties a video to a row in `tblWDBS` (the Warp Drive
+    // repository). `tblWDBS` itself, plus the computed/IMMUTABLE `fkWDBS` column that directly
+    // enforces that reference, are owned entirely by the hand-maintained production database this
+    // app is expected to run against — Kinesis itself never creates them (see the "internal use
+    // only" note in the schema handoff doc). `WDBS` is added here as a plain nullable column so
+    // Kinesis keeps working end-to-end (search, display, edit) against a from-scratch database
+    // too, without trying to reproduce the taxonomy machinery.
+    if !column_exists(&conn, "videos", "WDBS")? {
+        conn.execute("ALTER TABLE videos ADD COLUMN WDBS TEXT", [])?;
+    }
 
     // Create StopWords table: common words culled out of generated FTS tokens
     conn.execute(
@@ -127,10 +149,23 @@ pub fn init_db(db_path: &str) -> Result<()> {
             tiktok TEXT NOT NULL DEFAULT '',
             twitch TEXT NOT NULL DEFAULT '',
             reddit TEXT NOT NULL DEFAULT '',
-            discord TEXT NOT NULL DEFAULT ''
+            discord TEXT NOT NULL DEFAULT '',
+            channel_id TEXT NOT NULL DEFAULT '',
+            subscriber_count INTEGER NOT NULL DEFAULT 9999
         )",
         [],
     )?;
+    // channel_id/subscriber_count were added after some databases already existed; ADD COLUMN
+    // backfills them onto those. channel_id is the YouTube channel's immutable ID (captured once,
+    // at the creator's first save, since handles can change but this can't); subscriber_count
+    // seeds at 9999 as an "unknown/needs backfill" sentinel until the (future) backend routine
+    // that keeps it continually in sync takes over.
+    if !column_exists(&conn, "biographies", "channel_id")? {
+        conn.execute("ALTER TABLE biographies ADD COLUMN channel_id TEXT NOT NULL DEFAULT ''", [])?;
+    }
+    if !column_exists(&conn, "biographies", "subscriber_count")? {
+        conn.execute("ALTER TABLE biographies ADD COLUMN subscriber_count INTEGER NOT NULL DEFAULT 9999", [])?;
+    }
 
     // Create search_history table
     conn.execute(
@@ -153,6 +188,33 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     )?;
 
+    // Warp Drive "symbolic links": a video's single canonical Warp Drive lives in videos.WDBS
+    // (owned by the production tblWDBS/fkWDBS schema — see above), but a video can additionally
+    // show up under any number of OTHER Warp Drive categories without changing that canonical
+    // value. This table is entirely Kinesis's own bookkeeping (not part of the production
+    // schema), so unlike WDBS/fkWDBS it's fully created and owned here regardless of whether
+    // tblWDBS is present. See db/wdbs.rs for how this and videos.WDBS are merged when building
+    // the Drive/Warp Drive tree and paging a category's videos.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS video_wdbs_links (
+            video_id TEXT NOT NULL,
+            wdbs     TEXT NOT NULL,
+            PRIMARY KEY (video_id, wdbs)
+        )",
+        [],
+    )?;
+    // Cleans up symlink rows when their video is deleted. Independent of the tblWDBS-gated
+    // trigger block further down — this table has nothing to do with the deprecated FTS
+    // triggers or the production schema, so it's always created.
+    let _ = conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_kinesis_wdbs_links_cascade_del
+        AFTER DELETE ON videos
+        BEGIN
+            DELETE FROM video_wdbs_links WHERE video_id = OLD.video_id;
+        END",
+        [],
+    );
+
     // Initialize default settings if they don't exist
     let defaults = [
         ("showSearch", "true"),
@@ -167,12 +229,18 @@ pub fn init_db(db_path: &str) -> Result<()> {
         ("showGlossarySearchByTag", "true"),
         ("showGlossarySearchInLibrary", "true"),
         ("showBiography", "true"),
+        ("showDrive", "true"),
         ("allowEditBio", "true"),
         ("allowEditTranscriptOnNA", "true"),
         ("navigation_orientation", "horizontal"),
         ("librarySearchLimit", "1024"),
         ("hideShortsInSearch", "true"),
         ("setTranscriptAfterSummarizeToNA", "false"),
+        // Off by default: WDBS taxonomy editing is meant to be gated to bona fide IKLAO Admin
+        // Users once the IKLAO Cloud is stood up. Until then it's an opt-in switch (mirrors
+        // allowEditBio's "settings-table flag, no dedicated UI toggle yet" convention).
+        ("allowEditWDBS", "false"),
+        ("venice_model", "zai-org-glm-5"),
     ];
 
     for (key, val) in defaults.iter() {
@@ -182,54 +250,105 @@ pub fn init_db(db_path: &str) -> Result<()> {
         )?;
     }
 
-    // Create FTS5 virtual table for library video search — idempotent and cheap even when it
-    // already exists, so this stays unconditional.
-    let _ = conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS ftsVideos USING fts5(title, summary, tokens, content='videos')",
-        [],
-    );
+    // One-time normalization of the "unassigned Warp Drive" placeholder from "θψ" to ":". "θψ" is
+    // made of ordinary alphabetic Unicode characters, so FTS5's tokenizer indexes it as a real
+    // searchable term — since it's also the universal prefix every real WDBS value starts with, a
+    // Library/Portal search for it matched every video regardless of whether one was assigned.
+    // ":" is punctuation, which the tokenizer doesn't index at all, so it can't leak into search
+    // results that way. This only ever needs to run once (it's a full-table scan with no index on
+    // WDBS), so it's gated behind a settings flag rather than repeated on every launch/search —
+    // db::videos::save_video separately normalizes each newly-saved video's row on the spot,
+    // since the production database's own INSERT trigger still writes the "θψ" default going
+    // forward and this app has no way to change that trigger itself.
+    let migrated_placeholder: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'migratedWdbsPlaceholder' AND value = 'true'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if migrated_placeholder == 0 {
+        let _ = conn.execute("UPDATE videos SET WDBS = ':' WHERE WDBS = 'θψ'", []);
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('migratedWdbsPlaceholder', 'true')",
+            [],
+        )?;
+    }
 
-    // FTS sync + biography-cascade triggers. CREATE TRIGGER IF NOT EXISTS is idempotent and
-    // cheap (catalog lookup only, no data scan), so — like the FTS5 table create above — this
-    // stays unconditional.
+    // Create FTS5 virtual table for library video search — idempotent and cheap even when it
+    // already exists, so this stays unconditional. `wdbs` is indexed alongside title/summary/
+    // tokens so a Warp Drive designator search (":UAP floating" — see db/search.rs) can match
+    // against it directly via FTS5 MATCH.
     let _ = conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_ftsVideos_BeforeDEL
-        BEFORE DELETE ON videos
-        BEGIN
-            INSERT INTO ftsVideos(ftsVideos, rowid, title, summary, tokens)
-            VALUES ('delete', OLD.rowid, OLD.title, OLD.summary, OLD.tokens);
-        END",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS ftsVideos USING fts5(title, summary, tokens, wdbs, content='videos')",
         [],
     );
-    let _ = conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_ftsVideos_AfterDEL
-        AFTER DELETE ON videos
-        BEGIN
-            DELETE FROM biographies
-            WHERE lower(biographies.handle) = lower(OLD.handle)
-            AND OLD.handle IS NOT NULL
-            AND (SELECT COUNT(*) FROM videos
-                 WHERE lower(videos.handle) = lower(OLD.handle)) = 0;
-        END",
-        [],
-    );
-    let _ = conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_ftsVideos_AfterINS
-        AFTER INSERT ON videos
-        BEGIN
-            INSERT INTO ftsVideos(rowid, title, summary, tokens) VALUES (new.rowid, new.title, new.summary, new.tokens);
-        END",
-        [],
-    );
-    let _ = conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_ftsVideos_AfterUPD
-        AFTER UPDATE ON videos
-        BEGIN
-            INSERT INTO ftsVideos(ftsVideos, rowid, title, summary, tokens) VALUES ('delete', old.rowid, old.title, old.summary, old.tokens);
-            INSERT INTO ftsVideos(rowid, title, summary, tokens) VALUES (new.rowid, new.title, new.summary, new.tokens);
-        END",
-        [],
-    );
+    // Backfills `wdbs` onto an ftsVideos table created before this column existed. FTS5 has
+    // supported ALTER TABLE ADD COLUMN since SQLite 3.31; this is a harmless no-op (swallowed
+    // "duplicate column" error) on a table the CREATE above just built with wdbs already in it.
+    let _ = conn.execute("ALTER TABLE ftsVideos ADD COLUMN wdbs", []);
+
+    // ACTION REQUIRED (per Kinesis DB schema update): trg_ftsVideos_AfterDEL/AfterINS/BeforeDEL/
+    // AfterUPD are deprecated — the hand-maintained production database now owns FTS-sync and
+    // WDBS referential-integrity via its own 10-trigger schema (see tblWDBS/fkWDBS above), and
+    // these four app-created triggers must be permanently dropped so they don't fight the new
+    // ones. Unconditional and idempotent: a DB that never had them just no-ops here.
+    let _ = conn.execute("DROP TRIGGER IF EXISTS trg_ftsVideos_AfterDEL", []);
+    let _ = conn.execute("DROP TRIGGER IF EXISTS trg_ftsVideos_AfterINS", []);
+    let _ = conn.execute("DROP TRIGGER IF EXISTS trg_ftsVideos_BeforeDEL", []);
+    let _ = conn.execute("DROP TRIGGER IF EXISTS trg_ftsVideos_AfterUPD", []);
+
+    // Compatibility path for databases that DON'T have the production tblWDBS/10-trigger schema
+    // (i.e. a from-scratch or pre-WDBS database created by this app itself, not the hand-
+    // maintained one). Without this, such a database would silently lose FTS-sync-on-write and
+    // biography cascade-delete entirely once the four deprecated triggers above are dropped.
+    // Recreated under new names (not the deprecated ones) so they can never collide with
+    // whatever the production schema's own 10 triggers are named. Skipped entirely when tblWDBS
+    // is present, since that schema already does this (and more) itself — running both would
+    // double-insert into ftsVideos on every write.
+    if !table_exists(&conn, "tblWDBS")? {
+        let _ = conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS trg_kinesis_fts_before_del
+            BEFORE DELETE ON videos
+            BEGIN
+                INSERT INTO ftsVideos(ftsVideos, rowid, title, summary, tokens, wdbs)
+                VALUES ('delete', OLD.rowid, OLD.title, OLD.summary, OLD.tokens, OLD.WDBS);
+            END",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS trg_kinesis_biography_cascade_del
+            AFTER DELETE ON videos
+            BEGIN
+                DELETE FROM biographies
+                WHERE lower(biographies.handle) = lower(OLD.handle)
+                AND OLD.handle IS NOT NULL
+                AND (SELECT COUNT(*) FROM videos
+                     WHERE lower(videos.handle) = lower(OLD.handle)) = 0;
+            END",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS trg_kinesis_fts_after_ins
+            AFTER INSERT ON videos
+            BEGIN
+                INSERT INTO ftsVideos(rowid, title, summary, tokens, wdbs)
+                VALUES (new.rowid, new.title, new.summary, new.tokens, new.WDBS);
+            END",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS trg_kinesis_fts_after_upd
+            AFTER UPDATE ON videos
+            BEGIN
+                INSERT INTO ftsVideos(ftsVideos, rowid, title, summary, tokens, wdbs)
+                VALUES ('delete', old.rowid, old.title, old.summary, old.tokens, old.WDBS);
+                INSERT INTO ftsVideos(rowid, title, summary, tokens, wdbs)
+                VALUES (new.rowid, new.title, new.summary, new.tokens, new.WDBS);
+            END",
+            [],
+        );
+    }
 
     Ok(())
 }

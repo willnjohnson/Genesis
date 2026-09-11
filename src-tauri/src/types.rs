@@ -69,6 +69,9 @@ pub struct Video {
     pub has_transcript: Option<bool>,
     #[serde(rename = "hasSummary")]
     pub has_summary: Option<bool>,
+    // Warp Drive taxonomy designator, in storage encoding (e.g. "θψUAP_GERB_PND") — None/empty
+    // means unassigned ("Universe"). See db::update_video_wdbs / commands::update_wdbs.
+    pub wdbs: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

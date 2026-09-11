@@ -62,6 +62,25 @@ async fn fetch_video_details(client: &reqwest::Client, api_key: &str, video_ids:
     }
 }
 
+/// Looks up a channel's current subscriber count via the YouTube Data API. Returns `None` (the
+/// caller falls back to the 9999 "unknown" sentinel) whenever the request fails, the channel
+/// doesn't exist, or the channel has hidden its subscriber count — the Data API simply omits the
+/// field in that case rather than erroring. The digit-filter mirrors sanitize_int in
+/// commands::youtube::library: defends against a stray non-numeric character in the response
+/// tripping up the parse.
+pub(crate) async fn fetch_subscriber_count(api_key: &str, channel_id: &str) -> Option<i64> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://youtube.googleapis.com/youtube/v3/channels?part=statistics&id={}&key={}",
+        channel_id, api_key
+    );
+    let res = client.get(&url).send().await.ok()?;
+    let data: Value = res.json().await.ok()?;
+    let raw = data["items"][0]["statistics"]["subscriberCount"].as_str()?;
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() { None } else { digits.parse::<i64>().ok() }
+}
+
 #[command]
 pub async fn resolve_channel(_app: tauri::AppHandle, query: String) -> Result<ChannelInfo, String> {
     match youtube::extract_channel_id(&query).await? {
@@ -205,7 +224,7 @@ pub async fn fetch_channel_videos_v3(
                     author: snippet["channelTitle"].as_str().map(|s| decode_html(s)),
                     handle: None, status: None, date_added: None,
                     length_seconds: None, video_type: None, transcript: None,
-                    summary: None, tags: None, has_transcript: None, has_summary: None,
+                    summary: None, tags: None, has_transcript: None, has_summary: None, wdbs: None,
                 });
             }
         }
@@ -262,7 +281,7 @@ pub async fn fetch_video_info(_app: tauri::AppHandle, video_id: String) -> Resul
         view_count: parse_view_count(details["viewCount"].as_str().unwrap_or("0")).to_string(),
         author, handle, status: None, date_added: None,
         length_seconds: None, video_type: None, transcript: None,
-        summary: None, tags: None, has_transcript: None, has_summary: None,
+        summary: None, tags: None, has_transcript: None, has_summary: None, wdbs: None,
     })
 }
 
@@ -341,7 +360,7 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
                         author: channel_title,
                         handle: None, status: None, date_added: None,
                         length_seconds: None, video_type: None, transcript: None,
-                        summary: None, tags: None, has_transcript: None, has_summary: None,
+                        summary: None, tags: None, has_transcript: None, has_summary: None, wdbs: None,
                     });
                 }
             }

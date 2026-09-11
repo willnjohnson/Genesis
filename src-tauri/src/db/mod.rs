@@ -6,6 +6,7 @@ pub mod settings;
 pub mod glossary;
 pub mod biography;
 pub mod custom_prompts;
+pub mod wdbs;
 
 pub use schema::*;
 pub use videos::*;
@@ -15,3 +16,4 @@ pub use settings::*;
 pub use glossary::*;
 pub use biography::*;
 pub use custom_prompts::*;
+pub use wdbs::*;

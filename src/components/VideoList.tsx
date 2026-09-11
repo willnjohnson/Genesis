@@ -72,6 +72,14 @@ interface Props {
     onLoadMore?: () => void;
     loadingMore?: boolean;
     hasMore?: boolean;
+    // Bulk Assign Mode (Library/Portal grid only — see App.tsx's Drive panel toggle). When
+    // active, clicking a card toggles its membership in `bulkSelectedIds` instead of opening it,
+    // and right-clicking calls `onBulkContextMenu` instead of the thumbnail's normal
+    // "Save Image As" — see VideoCard below.
+    bulkAssignMode?: boolean;
+    bulkSelectedIds?: Set<string>;
+    onToggleBulkSelect?: (video: Video) => void;
+    onBulkContextMenu?: (video: Video, x: number, y: number) => void;
 }
 
 export function VideoList({
@@ -81,6 +89,7 @@ export function VideoList({
     filterKind: filterProp, onFilterKindChange,
     onLoadMore, loadingMore = false, hasMore = false,
     loading = false, emptyTitle, emptyMessage,
+    bulkAssignMode = false, bulkSelectedIds, onToggleBulkSelect, onBulkContextMenu,
 }: Props) {
     const [internalSortField, setInternalSortField] = useState<SortField>('date');
     const [internalSortOrder, setInternalSortOrder] = useState<SortOrder>('desc');
@@ -348,6 +357,10 @@ export function VideoList({
                                             onDelete={onDelete}
                                             allowDeletion={allowDeletion}
                                             onSaveImageAs={handleSaveImageAs}
+                                            bulkAssignMode={bulkAssignMode}
+                                            selected={bulkSelectedIds?.has(video.id) ?? false}
+                                            onToggleSelect={onToggleBulkSelect ? () => onToggleBulkSelect(video) : undefined}
+                                            onBulkContextMenu={onBulkContextMenu ? (x, y) => onBulkContextMenu(video, x, y) : undefined}
                                         />
                                     ))}
                                 </div>
@@ -375,21 +388,32 @@ interface VideoCardProps {
     onDelete?: (video: Video) => void;
     allowDeletion: boolean;
     onSaveImageAs: (url: string) => void;
+    bulkAssignMode?: boolean;
+    selected?: boolean;
+    onToggleSelect?: () => void;
+    onBulkContextMenu?: (x: number, y: number) => void;
 }
 
-function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowDeletion, onSaveImageAs }: VideoCardProps) {
+function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowDeletion, onSaveImageAs, bulkAssignMode = false, selected = false, onToggleSelect, onBulkContextMenu }: VideoCardProps) {
     return (
         <div
-            className="group flex flex-col gap-2 cursor-pointer"
-            onClick={() => onSelect(video)}
+            className={`group flex flex-col gap-2 cursor-pointer rounded-lg transition-all ${selected ? 'ring-2 ring-red-500 ring-offset-2 ring-offset-[#0f0f0f]' : ''}`}
+            onClick={() => bulkAssignMode ? onToggleSelect?.() : onSelect(video)}
+            onContextMenu={bulkAssignMode ? (e) => { e.preventDefault(); onBulkContextMenu?.(e.clientX, e.clientY); } : undefined}
         >
             <div className={`${compact ? 'aspect-[16/9]' : 'aspect-video'} w-full rounded-lg overflow-hidden bg-[#272727] relative`}>
+                {bulkAssignMode && (
+                    <div className={`absolute inset-0 z-10 transition-colors ${selected ? 'bg-red-600/25' : 'bg-black/0 group-hover:bg-black/10'}`} />
+                )}
                 <img
                     src={video.thumbnail}
                     alt={video.title}
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                     loading="lazy"
-                    onContextMenu={(e) => {
+                    // Left unattached (rather than attached-but-no-op) in bulk mode so the event
+                    // bubbles untouched to the card's own onContextMenu above, instead of this
+                    // handler's e.stopPropagation() intercepting it.
+                    onContextMenu={bulkAssignMode ? undefined : (e) => {
                         e.preventDefault();
                         e.stopPropagation();
                         onSaveImageAs(video.thumbnail);

@@ -2,6 +2,53 @@ use tauri::command;
 use crate::{get_db_path, db, types::*};
 use crate::youtube::{YouTubeClient, ClientType, decode_html};
 use super::transcript::fetch_transcript_with_retries;
+use super::metadata::fetch_subscriber_count;
+
+/// Strips anything but ASCII digits before parsing — YouTube has, rarely, been observed to
+/// return numeric fields (video length, view count) with stray thousands-separator commas
+/// ("1,234") on malformed/incomplete fetches. Silently parsing that with `.parse::<i32>()` alone
+/// would fail and fall back to 0, quietly corrupting the value; stripping non-digits first
+/// recovers the real number instead. Also matters now that the production `videos` table runs in
+/// SQLite STRICT mode, where inserting non-numeric text into an INTEGER column is a hard error
+/// rather than a silently-coerced one.
+fn sanitize_int(raw: &str) -> i32 {
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    digits.parse::<i32>().unwrap_or(0)
+}
+
+/// Falls back to 9999 (an easy-to-spot "unknown/needs backfill" sentinel — see the schema
+/// handoff doc) whenever the YouTube Data API doesn't return a usable subscriber count: no API
+/// key configured, the request fails, the channel hides its count, or channel_id couldn't be
+/// resolved at all.
+const UNKNOWN_SUBSCRIBER_COUNT: i64 = 9999;
+
+/// Seeds a biography row the first time a given handle is saved, resolving and capturing
+/// YouTube's immutable channel ID and current subscriber count at that moment — both are cheap
+/// to skip on every subsequent save (upsert_biography_from_video's ON CONFLICT branch never
+/// touches them again anyway), so this only does the extra channel-id/subscriber-count network
+/// work when the handle is genuinely new. `known_channel_id` lets a caller that already extracted
+/// the channel ID from a player response (the fresh-fetch path below) skip the redundant
+/// channel-page scrape that `youtube::extract_channel_id` would otherwise need to do.
+async fn ensure_biography_seeded(db_path: &str, handle: &str, author: &str, known_channel_id: Option<&str>) {
+    let already_exists = db::get_biography_by_handle(db_path, handle).ok().flatten().is_some();
+    if already_exists {
+        let _ = db::upsert_biography_from_video(db_path, handle, author, None, UNKNOWN_SUBSCRIBER_COUNT);
+        return;
+    }
+
+    let channel_id = match known_channel_id {
+        Some(id) if !id.trim().is_empty() => Some(id.to_string()),
+        _ => crate::youtube::extract_channel_id(handle).await.ok().flatten(),
+    };
+
+    let api_key = db::get_setting(db_path, "api_key").ok().flatten();
+    let subscriber_count = match (&channel_id, &api_key) {
+        (Some(cid), Some(key)) => fetch_subscriber_count(key, cid).await.unwrap_or(UNKNOWN_SUBSCRIBER_COUNT),
+        _ => UNKNOWN_SUBSCRIBER_COUNT,
+    };
+
+    let _ = db::upsert_biography_from_video(db_path, handle, author, channel_id.as_deref(), subscriber_count);
+}
 
 #[command]
 pub async fn save_video(
@@ -46,6 +93,7 @@ pub async fn save_video(
             tags: Some(v_data.11),
             has_transcript: Some(has_transcript),
             has_summary: Some(has_summary),
+            wdbs: None,
         });
     }
 
@@ -58,6 +106,16 @@ pub async fn save_video(
     // (e.g. bulk_save_videos, which saves by id alone with no prior client-side fetch).
     if let (Some(title_val), Some(transcript_val)) = (title.as_deref(), transcript.as_deref()) {
         if !title_val.trim().is_empty() && !transcript_val.trim().is_empty() {
+            // A valid, non-empty handle is required before Kinesis will save a video — YouTube
+            // occasionally returns malformed/missing metadata on a fetch (rare, per the schema
+            // handoff doc), and saving with a blank handle would silently orphan the video from
+            // the Biography feature. Surfacing this as an error (rather than saving with handle
+            // = "") forces the caller to refetch instead.
+            let handle = match handle.as_deref().map(str::trim) {
+                Some(h) if !h.is_empty() => h.to_string(),
+                _ => return Err("YouTube did not return a valid channel handle for this video. Please refetch it and try again.".to_string()),
+            };
+
             let author = author.unwrap_or_else(|| "Unknown".to_string());
             let length = length_seconds.unwrap_or(0);
             let video_type = video_type.unwrap_or_else(|| {
@@ -67,10 +125,8 @@ pub async fn save_video(
             let published_at = published_at.unwrap_or_default();
             let has_summary = summary.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
 
-            if let Some(ref h) = handle {
-                let _ = db::upsert_biography_from_video(&db_path, h, &author);
-            }
-            db::save_video(&db_path, &video_id, title_val, &author, length, transcript_val, view_count, &published_at, handle.as_deref().unwrap_or(""), &video_type, summary.as_deref())
+            ensure_biography_seeded(&db_path, &handle, &author, None).await;
+            db::save_video(&db_path, &video_id, title_val, &author, length, transcript_val, view_count, &published_at, &handle, &video_type, summary.as_deref())
                 .map_err(|e| e.to_string())?;
 
             let date_added = {
@@ -87,7 +143,7 @@ pub async fn save_video(
                 published_at,
                 view_count: view_count.to_string(),
                 author: Some(author),
-                handle,
+                handle: Some(handle),
                 status: Some("saved".to_string()),
                 date_added,
                 length_seconds: Some(length),
@@ -97,6 +153,7 @@ pub async fn save_video(
                 tags: None,
                 has_transcript: Some(true),
                 has_summary: Some(has_summary),
+                wdbs: None,
             });
         }
     }
@@ -111,9 +168,14 @@ pub async fn save_video(
     }
 
     let mut handle: Option<String> = None;
+    // Captured alongside handle resolution since it's already sitting right here in the player
+    // response — YouTube's immutable channel ID, needed for ensure_biography_seeded below so it
+    // doesn't have to redundantly re-scrape the channel page to get the same value.
+    let mut known_channel_id: Option<String> = None;
     if let Some(authors) = details["author"].as_array() {
         if let Some(first) = authors.first() {
             if let Some(channel_id) = first["channel_id"].as_str() {
+                known_channel_id = Some(channel_id.to_string());
                 handle = crate::youtube::extract_handle_from_channel_id(channel_id).await.ok().flatten();
             }
         }
@@ -141,7 +203,15 @@ pub async fn save_video(
         if handle.is_none() { handle = try_handle; }
     }
 
-    let length = details["lengthSeconds"].as_str().unwrap_or("0").parse::<i32>().unwrap_or(0);
+    // A valid, non-empty handle is required before Kinesis will save a video (see the fast-path
+    // branch above for the full rationale) — force a refetch rather than saving one with a blank
+    // handle and silently orphaning it from the Biography feature.
+    let handle = match handle.as_deref().map(str::trim) {
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => return Err("YouTube did not return a valid channel handle for this video. Please refetch it and try again.".to_string()),
+    };
+
+    let length = sanitize_int(details["lengthSeconds"].as_str().unwrap_or("0"));
     let view_count = parse_view_count(details["viewCount"].as_str().unwrap_or("0"));
     let published_at = player_web["microformat"]["playerMicroformatRenderer"]["publishDate"].as_str().unwrap_or("");
     let video_type = if length > 0 && length <= 60 { "short" } else { "standard" };
@@ -152,10 +222,8 @@ pub async fn save_video(
 
     // Upsert the biography row before saving the video so save_video's channel-info footer
     // (joined against biographies.handle) can find it on this very first save.
-    if let Some(ref h) = handle {
-        let _ = db::upsert_biography_from_video(&db_path, h, &author);
-    }
-    db::save_video(&db_path, &video_id, &title, &author, length, &transcript, view_count, published_at, handle.as_deref().unwrap_or(""), video_type, summary.as_deref())
+    ensure_biography_seeded(&db_path, &handle, &author, known_channel_id.as_deref()).await;
+    db::save_video(&db_path, &video_id, &title, &author, length, &transcript, view_count, published_at, &handle, video_type, summary.as_deref())
         .map_err(|e| e.to_string())?;
 
     let date_added = {
@@ -172,7 +240,7 @@ pub async fn save_video(
         published_at: published_at.to_string(),
         view_count: view_count.to_string(),
         author: Some(author.to_string()),
-        handle,
+        handle: Some(handle),
         status: Some("saved".to_string()),
         date_added,
         length_seconds: Some(length),
@@ -182,6 +250,7 @@ pub async fn save_video(
         tags: None,
         has_transcript: Some(true),
         has_summary: Some(has_summary),
+        wdbs: None,
     })
 }
 
@@ -189,7 +258,9 @@ pub async fn save_video(
 // or stale client from requesting a page large enough to reintroduce the "load the whole library
 // into memory at once" problem this pagination exists to avoid.
 const MAX_LIBRARY_PAGE_SIZE: i64 = 500;
-const DEFAULT_LIBRARY_PAGE_SIZE: i64 = 100;
+// Bumped from 100 -> 300 per the search revision doc ("empirically verified to work great in the
+// Kinesis app").
+const DEFAULT_LIBRARY_PAGE_SIZE: i64 = 300;
 
 #[command]
 pub async fn fetch_saved_videos(

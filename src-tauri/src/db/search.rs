@@ -11,7 +11,7 @@ use super::summaries::has_real_summary;
 pub(crate) fn video_columns_sql(alias: &str) -> String {
     let cols = [
         "video_id", "title", "author", "handle", "length_seconds", "transcript",
-        "view_count", "published_at", "video_type", "date_added", "tags", "summary",
+        "view_count", "published_at", "video_type", "date_added", "tags", "summary", "WDBS",
     ];
     let prefixed = cols.iter().map(|c| format!("{alias}{c}")).collect::<Vec<_>>().join(", ");
     format!(
@@ -48,7 +48,8 @@ pub(crate) fn video_row(row: &rusqlite::Row, include_content: bool) -> rusqlite:
         transcript: if include_content { row.get::<_, Option<String>>(5).unwrap_or(None) } else { None },
         tags: row.get::<_, Option<String>>(10).unwrap_or(None),
         summary: if include_content { raw_summary.clone() } else { None },
-        has_transcript: Some(row.get::<_, i64>(12).unwrap_or(0) > 0),
+        wdbs: row.get::<_, Option<String>>(12).unwrap_or(None),
+        has_transcript: Some(row.get::<_, i64>(13).unwrap_or(0) > 0),
         has_summary: Some(raw_summary.as_deref().map(has_real_summary).unwrap_or(false)),
     })
 }
@@ -85,6 +86,38 @@ pub(crate) fn filter_kind_where(alias: &str, filter_kind: Option<&str>) -> Strin
     }
 }
 
+// Builds an FTS5 MATCH expression from free-text search words: each word gets a trailing '*' for
+// prefix matching, and words containing FTS5-special characters get quoted. A word starting with
+// ':' is a Warp Drive designator (e.g. ":UAP", either leftmost by convention or anywhere in the
+// query — see the search revision doc) and gets translated into the storage encoding the WDBS
+// column actually uses (':' -> 'θψ', '-' -> '_'), e.g. ":UAP-GERB-VVV" -> "θψUAP_GERB_VVV*". A
+// bare ':' means "Universe" (no restriction), which is redundant with an unfiltered search, so
+// it's dropped rather than turned into a dead θψ* term. Shared by search_library_videos and
+// db::wdbs::list_videos_by_wdbs (searching within one Warp Drive category — see App.tsx's Drive
+// panel toggle). Returns "" when there's nothing left to match on, which callers must treat as
+// "skip the FTS5 MATCH entirely" — FTS5 rejects an empty MATCH string as a syntax error rather
+// than treating it as "match everything".
+pub(crate) fn build_fts_query(free_text: &str) -> String {
+    free_text
+        .split_whitespace()
+        .filter_map(|w| {
+            if let Some(rest) = w.strip_prefix(':') {
+                if rest.is_empty() {
+                    return None;
+                }
+                let encoded = rest.replace('-', "_");
+                return Some(format!("θψ{}*", encoded));
+            }
+            Some(if w.chars().any(|c| matches!(c, '"' | '*' | '(' | ')' | '-' | '+' | '~' | ' ')) {
+                format!("\"{}\"*", w.replace('"', "\"\""))
+            } else {
+                format!("{}*", w)
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ORDER BY clause for the Library grid's Date Added / Date Bookmarked / Views sort buttons.
 // `sort_field`: "added" -> date_added (bookmark time), "popularity" -> view_count, otherwise
 // (None/"date") -> published_at (YouTube's publish date). Ties break on rowid so pagination
@@ -100,7 +133,7 @@ pub(crate) fn library_order_by(alias: &str, sort_field: Option<&str>, sort_order
 }
 
 /// Paged/sorted/filtered library search. Returns `(videos for this page, total matching count)`.
-/// `limit`/`offset` drive Library grid pagination (100 rows per page, "load more" on scroll);
+/// `limit`/`offset` drive Library grid pagination (300 rows per page, "load more" on scroll);
 /// `filter_kind`/`sort_field`/`sort_order` mirror the grid's filter/sort buttons so results stay
 /// consistent with whatever the user had selected, including while a free-text search is active.
 pub fn search_library_videos(
@@ -160,13 +193,16 @@ pub fn search_library_videos(
     let tag_col = if tag_exact { "(',' || v.tags || ',')" } else { "v.tags" };
     let tag_pattern = |v: &str| if tag_exact { format!("%,{},%", v) } else { format!("%{}%", v) };
 
+    let fts_query = build_fts_query(free_text);
+
     let mut videos = Vec::new();
     let total: i64;
 
-    if free_text.is_empty() {
-        // No free-text search term (e.g. a bare handle:/video:/tag_search: facet) — skip the
-        // FTS5 MATCH entirely rather than passing it an empty/wildcard query, which FTS5
-        // rejects as a syntax error and would otherwise fail the whole search.
+    if fts_query.is_empty() {
+        // No free-text search term left to match on (e.g. a bare handle:/video:/tag_search:
+        // facet, or a query of just ":") — skip the FTS5 MATCH entirely rather than passing it
+        // an empty/wildcard query, which FTS5 rejects as a syntax error and would otherwise fail
+        // the whole search.
         let where_sql = format!(
             "(?1 = '' OR v.handle LIKE ?2)
                AND (?3 = '' OR v.video_id LIKE ?4)
@@ -202,18 +238,6 @@ pub fn search_library_videos(
             videos.push(video?);
         }
     } else {
-        let fts_query = free_text
-            .split_whitespace()
-            .map(|w| {
-                if w.chars().any(|c| matches!(c, '"' | '*' | '(' | ')' | '-' | '+' | '~' | ' ')) {
-                    format!("\"{}\"*", w.replace('"', "\"\""))
-                } else {
-                    format!("{}*", w)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-
         let where_sql = format!(
             "ftsVideos MATCH ?1
                AND (?2 = '' OR v.handle LIKE ?3)

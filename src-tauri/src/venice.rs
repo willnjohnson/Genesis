@@ -15,9 +15,13 @@ pub struct VeniceRequest {
     pub messages: Vec<VeniceMessage>,
 }
 
-async fn call_venice_api(client: &reqwest::Client, api_key: &str, prompt: &str) -> Result<String, String> {
+// Fallback used whenever the `venice_model` setting is unset — kept in sync with schema.rs's
+// default seed value for that key.
+const DEFAULT_VENICE_MODEL: &str = "zai-org-glm-5";
+
+async fn call_venice_api(client: &reqwest::Client, api_key: &str, model: &str, prompt: &str) -> Result<String, String> {
     let request_body = VeniceRequest {
-        model: "zai-org-glm-5".to_string(),
+        model: model.to_string(),
         messages: vec![VeniceMessage {
             role: "user".to_string(),
             content: prompt.to_string(),
@@ -98,8 +102,16 @@ pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Op
         format!("{}\n\nTranscript:\n{}", prompt_template, transcript)
     };
 
+    // Configurable per Settings (enhancement #3: models get renamed/deprecated on Venice's end
+    // over time — e.g. "GLM 5.1" vs "GLM 5.2" — so this shouldn't be a hardcoded constant the
+    // user has no way to update themselves).
+    let model = db::get_setting(&db_path, "venice_model")
+        .unwrap_or(None)
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_VENICE_MODEL.to_string());
+
     let client = reqwest::Client::new();
-    call_venice_api(&client, &api_key, &prompt).await
+    call_venice_api(&client, &api_key, &model, &prompt).await
 }
 
 #[derive(Debug, Serialize, Deserialize)]

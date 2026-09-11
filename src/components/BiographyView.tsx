@@ -269,7 +269,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
 
             {editing && (
                 <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200" onClick={() => setEditing(null)}>
-                    <form onSubmit={saveEdit} onClick={(e) => e.stopPropagation()} className="bg-white dark:bg-[#0f0f0f] border border-gray-200 dark:border-[#303030] rounded-2xl w-full max-w-3xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+                    <form onSubmit={saveEdit} onClick={(e) => e.stopPropagation()} className="bg-white dark:bg-[#0f0f0f] border border-gray-200 dark:border-[#303030] rounded-2xl w-full max-w-4xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
                 <div className="px-6 py-4 border-b border-gray-200 dark:border-[#303030] flex items-center justify-between bg-gray-100 dark:bg-[#141414]">
                             <div className="text-black dark:text-gray-200">
                                 <h2 className="text-lg font-bold">Edit Bio</h2>
@@ -288,9 +288,9 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                                     value={editing?.bio || ''}
                                     onChange={(e) => setEditing(prev => ({ ...prev, bio: e.target.value }))}
                                     onKeyDown={(e) => handleMarkdownKeyDown(e, editing?.bio || '', (val) => setEditing(prev => ({ ...prev, bio: val })))}
-                                    rows={12}
+                                    rows={16}
                                     className="w-full bg-gray-100 dark:bg-[#121212] border border-gray-300 dark:border-[#333] text-black dark:text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all resize-none placeholder-gray-500 dark:placeholder-gray-600"
-                                    placeholder="Describe who this person is (Markdown supported)..."
+                                    placeholder="Describe who this person is (Markdown supported)... Tip: paste your existing YouTube channel description here as a starting point."
                                 />
                             </div>
 
@@ -388,7 +388,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200" onClick={onClose}>
-            <div onClick={(e) => e.stopPropagation()} className="bg-white dark:bg-[#0f0f0f] border border-gray-200 dark:border-[#303030] rounded-2xl w-full max-w-6xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 h-[90vh]">
+            <div onClick={(e) => e.stopPropagation()} className="bg-white dark:bg-[#0f0f0f] border border-gray-200 dark:border-[#303030] rounded-2xl w-full max-w-7xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 h-[90vh]">
                         <div className="px-6 py-4 border-b border-gray-200 dark:border-[#303030] flex items-center justify-between bg-gray-100 dark:bg-[#141414]">
                     <div className="flex items-center gap-3 pr-4 overflow-hidden">
                         <FileText className="w-5 h-5 text-gray-400 shrink-0" />
@@ -411,7 +411,10 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                       {/* Main Content: Bio */}
                        <div className="flex-1 border-b lg:border-b-0 lg:border-r border-gray-200 dark:border-[#272727] overflow-y-auto p-6">
                            <h3 className="text-lg font-bold text-black dark:text-white mb-4">About</h3>
-                           <div className="leading-relaxed prose dark:prose-invert prose-lg max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
+                           {/* Font size/markdown look-and-feel kept in parity with the video Summary panel
+                               (prose-sm — see Sidebar.tsx) rather than the previous prose-lg, which read
+                               oversized next to it. */}
+                           <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
                                <ReactMarkdown
                                    remarkPlugins={[remarkGfm]}
                                    components={{
@@ -439,8 +442,9 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                            </div>
                       </div>
 
-                       {/* Sidebar Content: Latest Videos */}
-                       <div className="w-full lg:w-96 bg-gray-50 dark:bg-[#0f0f0f] flex flex-col p-6 space-y-4">
+                       {/* Sidebar Content: Latest Videos — kept narrower than the About panel gets wide
+                           (was w-96) so About has more horizontal room for markdown text. */}
+                       <div className="w-full lg:w-80 bg-gray-50 dark:bg-[#0f0f0f] flex flex-col p-6 space-y-4">
                           <div className="flex items-center justify-between mb-4">
                               <h3 className="text-lg font-bold text-black dark:text-white">Latest Videos</h3>
                              {videos.length > 0 && (
