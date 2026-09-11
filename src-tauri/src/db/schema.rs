@@ -80,6 +80,20 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     )?;
 
+    // `tags`/`tokens` were added to the CREATE TABLE above after some databases already existed
+    // (same situation as WDBS/channel_id/subscriber_count elsewhere in this file); ADD COLUMN
+    // backfills them onto those. Without this, any database created before these columns existed
+    // has no way to ever gain them (CREATE TABLE IF NOT EXISTS is a no-op once the table is
+    // there), and save_tags/regenerate_tokens_from_transcript — plus the compatibility FTS
+    // triggers below, which reference new.tokens/old.tokens on every insert/update — fail outright
+    // with "no such column: tokens" the first time anything touches that video.
+    if !column_exists(&conn, "videos", "tags")? {
+        conn.execute("ALTER TABLE videos ADD COLUMN tags TEXT DEFAULT ''", [])?;
+    }
+    if !column_exists(&conn, "videos", "tokens")? {
+        conn.execute("ALTER TABLE videos ADD COLUMN tokens TEXT DEFAULT ''", [])?;
+    }
+
     // Indexes backing the Library grid's sort/filter options. Without these, sorting a
     // several-thousand-row library by e.g. view count is a full table scan + temp-b-tree sort
     // on every query, even with a small LIMIT (verified via EXPLAIN QUERY PLAN). IF NOT EXISTS
@@ -275,6 +289,21 @@ pub fn init_db(db_path: &str) -> Result<()> {
         )?;
     }
 
+    // Backfills `wdbs` onto an ftsVideos table created (by an earlier version of this app) before
+    // that column existed. Unlike ordinary tables, FTS5 virtual tables reject ALTER TABLE ADD
+    // COLUMN outright ("virtual tables may not be altered") — there is no in-place way to add a
+    // column to one. A prior version of this migration tried `ALTER TABLE ftsVideos ADD COLUMN
+    // wdbs` anyway and swallowed the resulting error, so on any database whose ftsVideos table
+    // predates this column, it silently never gained `wdbs` — and every subsequent write (the
+    // compatibility triggers below insert into ftsVideos on every video insert/update/delete)
+    // failed with "table ftsVideos has no column named wdbs", most visibly when assigning a Warp
+    // Drive value. The only real fix is to drop and recreate the table, then ask FTS5 to rebuild
+    // its index from the content table — `rebuild` matches columns by name (case-insensitively),
+    // so it correctly backfills `wdbs` from the existing `videos.WDBS` values.
+    let fts_missing_wdbs = table_exists(&conn, "ftsVideos")? && !column_exists(&conn, "ftsVideos", "wdbs")?;
+    if fts_missing_wdbs {
+        conn.execute("DROP TABLE ftsVideos", [])?;
+    }
     // Create FTS5 virtual table for library video search — idempotent and cheap even when it
     // already exists, so this stays unconditional. `wdbs` is indexed alongside title/summary/
     // tokens so a Warp Drive designator search (":UAP floating" — see db/search.rs) can match
@@ -283,10 +312,9 @@ pub fn init_db(db_path: &str) -> Result<()> {
         "CREATE VIRTUAL TABLE IF NOT EXISTS ftsVideos USING fts5(title, summary, tokens, wdbs, content='videos')",
         [],
     );
-    // Backfills `wdbs` onto an ftsVideos table created before this column existed. FTS5 has
-    // supported ALTER TABLE ADD COLUMN since SQLite 3.31; this is a harmless no-op (swallowed
-    // "duplicate column" error) on a table the CREATE above just built with wdbs already in it.
-    let _ = conn.execute("ALTER TABLE ftsVideos ADD COLUMN wdbs", []);
+    if fts_missing_wdbs {
+        conn.execute("INSERT INTO ftsVideos(ftsVideos) VALUES('rebuild')", [])?;
+    }
 
     // ACTION REQUIRED (per Kinesis DB schema update): trg_ftsVideos_AfterDEL/AfterINS/BeforeDEL/
     // AfterUPD are deprecated — the hand-maintained production database now owns FTS-sync and
