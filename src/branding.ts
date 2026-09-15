@@ -24,6 +24,13 @@ interface BrandConfig {
     // way to browse saved videos alongside the grid's flat/search view. "Warp Drive" for Kinesis
     // matches the Metabolic Warp Drive branding; Genesis keeps the plainer "Drive".
     driveLabel: string;
+    // UI-facing label for a video's individual WDBS value (see components/Sidebar.tsx) — the
+    // internal name "WDBS" and the db/api layer are unaffected, this only renames what the user
+    // sees next to a single video's taxonomy code.
+    wdbsLabel: string;
+    // UI-facing label for the "Also in" symlink feature (see components/Sidebar.tsx) that lets a
+    // video additionally show up under other WDBS categories without changing its canonical one.
+    linkLabel: string;
 }
 
 const BRANDS: Record<Brand, BrandConfig> = {
@@ -36,7 +43,9 @@ const BRANDS: Record<Brand, BrandConfig> = {
         dbName: 'genesis_data.db',
         storageKey: 'genesis_db_path',
         libraryLabel: 'Library',
-        driveLabel: 'Drive'
+        driveLabel: 'Drive',
+        wdbsLabel: 'Linktag',
+        linkLabel: 'Symlink'
     },
     kinesis: {
         id: 'kinesis',
@@ -47,7 +56,9 @@ const BRANDS: Record<Brand, BrandConfig> = {
         dbName: 'kinesis_data.db',
         storageKey: 'kinesis_db_path',
         libraryLabel: 'Portal',
-        driveLabel: 'Warp Drive'
+        driveLabel: 'Warp Drive',
+        wdbsLabel: 'Warp',
+        linkLabel: 'Weft'
     }
 };
 

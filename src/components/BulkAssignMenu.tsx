@@ -71,7 +71,7 @@ export function BulkAssignMenu({ x, y, count, onAssign, onClose, assigning = fal
                     type="text"
                     list="bulk-assign-wdbs-suggestions"
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
+                    onChange={(e) => setInput(e.target.value.toUpperCase())}
                     placeholder=":UAP-GERB-VVV"
                     disabled={assigning}
                     className="flex-1 min-w-0 bg-[#121212] border border-[#333] focus:border-red-600/50 outline-none rounded-md px-2 py-1.5 text-[11px] text-white placeholder-[#555] font-mono transition-colors disabled:opacity-50"

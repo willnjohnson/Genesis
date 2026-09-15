@@ -475,7 +475,9 @@ export function decodeWdbs(stored: string | undefined | null): string {
 export function encodeWdbs(display: string): string {
     const trimmed = display.trim();
     if (!trimmed.startsWith(':') || trimmed.length < 2) return '';
-    return 'θψ' + trimmed.slice(1).replace(/-/g, '_');
+    // Uppercased to mirror what commands::wdbs::encode_wdbs_display stores server-side, so this
+    // optimistic local update matches what a refetch would actually return.
+    return 'θψ' + trimmed.slice(1).toUpperCase().replace(/-/g, '_');
 }
 
 // Updates a video's canonical Warp Drive (the one shown by decodeWdbs(video.wdbs)), or clears it
@@ -521,6 +523,14 @@ export async function getVideosByWdbs(wdbsPath: string, query: string, opts?: Li
 // decodeWdbs() before showing as autocomplete suggestions in a Warp Drive editor.
 export async function getWdbsSuggestions(): Promise<string[]> {
     return await invoke("get_wdbs_suggestions");
+}
+
+// A video's current canonical Warp Drive (WDBS), storage-encoded — null if unassigned or if the
+// video isn't saved locally. A Video object opened from Search comes straight from the YouTube
+// API and never carries its own `wdbs` field, even if that video is already saved with one, so
+// Sidebar.tsx looks this up once it confirms the video exists in the database.
+export async function getVideoWdbs(videoId: string): Promise<string | null> {
+    return await invoke("get_video_wdbs", { videoId });
 }
 
 // A video's symlinked (non-canonical) Warp Drives, storage-encoded.

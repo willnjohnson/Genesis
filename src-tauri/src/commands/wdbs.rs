@@ -3,17 +3,21 @@ use tauri::command;
 use crate::{get_db_path, db, types::*, DRIVE_LABEL};
 
 /// Transforms a Warp Drive designator from user-facing display format (":UAP-GERB-VVV") into the
-/// storage encoding the WDBS column actually uses — ':' and '-' become 'θψ' and '_' respectively,
-/// e.g. ":UAP-GERB-VVV" -> "θψUAP_GERB_VVV". Returns `Ok(None)` for a blank/cleared input, or an
-/// `Err` with a plain-language message if the input isn't in the expected ":..." shape (shared by
-/// update_wdbs and add_video_wdbs_link so both editors reject malformed input the same way).
+/// storage encoding the wdbs column actually uses — ':' and '-' become 'θψ' and '_' respectively,
+/// e.g. ":UAP-GERB-VVV" -> "θψUAP_GERB_VVV". Uppercases the designator body so a value is stored
+/// consistently regardless of the case it was typed in (the input fields also uppercase live, but
+/// this is the one place every save path — update_wdbs, add_video_wdbs_link, bulk_update_wdbs —
+/// actually goes through, so it's enforced here too). Returns `Ok(None)` for a blank/cleared
+/// input, or an `Err` with a plain-language message if the input isn't in the expected ":..."
+/// shape (shared by update_wdbs and add_video_wdbs_link so both editors reject malformed input
+/// the same way).
 pub(crate) fn encode_wdbs_display(raw: &str) -> Result<Option<String>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
     match trimmed.strip_prefix(':') {
-        Some(rest) if !rest.is_empty() => Ok(Some(format!("θψ{}", rest.replace('-', "_")))),
+        Some(rest) if !rest.is_empty() => Ok(Some(format!("θψ{}", rest.to_uppercase().replace('-', "_")))),
         Some(_) => Ok(None),
         None => Err(format!(
             "{} designators must start with ':' (e.g. \":UAP-GERB-VVV\"). \"{}\" doesn't.",
@@ -22,14 +26,14 @@ pub(crate) fn encode_wdbs_display(raw: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Updates a video's canonical Warp Drive (WDBS) designator, or clears it back to unassigned
+/// Updates a video's canonical Warp Drive (wdbs) designator, or clears it back to unassigned
 /// ("N/A") when given an empty string. Clearing writes ":" — the storage encoding of tblWDBS's
 /// root entry — rather than an empty string, SQL NULL, or the column's own "θψ" default: the
-/// production database's WDBS column is NOT NULL, and its validating trigger
+/// production database's wdbs column is NOT NULL, and its validating trigger
 /// (trgVideosBeforeUPD_Videos_ValidateWDBS) requires ANY non-null value to resolve to a real
 /// tblWDBS row, so only a value that's actually registered there will be accepted (see
 /// db::update_video_wdbs). ":" specifically (not "θψ") because "θψ" is alphabetic and also the
-/// universal prefix every real WDBS value starts with, so FTS5 indexes it as a literal searchable
+/// universal prefix every real wdbs value starts with, so FTS5 indexes it as a literal searchable
 /// term that matches every video regardless of assignment — ":" is punctuation, which the
 /// tokenizer doesn't index at all. Setting a real designator first ensures it — and every level
 /// above it — exists in tblWDBS (see db::ensure_wdbs_path_exists), so a genuinely new category
@@ -45,7 +49,11 @@ pub(crate) fn encode_wdbs_display(raw: &str) -> Result<Option<String>, String> {
 #[command]
 pub async fn update_wdbs(app: tauri::AppHandle, video_id: String, wdbs: String) -> Result<(), String> {
     let db_path = get_db_path(&app);
-    let trimmed = wdbs.trim();
+    // Uppercased before both encoding and tblWDBS registration, so the two stay in sync — the
+    // trigger that validates a video's wdbs resolves against tblWDBS's own case (see
+    // encode_wdbs_display), and SQLite TEXT comparison is case-sensitive by default.
+    let trimmed = wdbs.trim().to_uppercase();
+    let trimmed = trimmed.as_str();
     let encoded = encode_wdbs_display(trimmed)?;
     let is_clearing = encoded.is_none();
 
@@ -129,6 +137,18 @@ pub async fn get_wdbs_suggestions(app: tauri::AppHandle) -> Result<Vec<String>, 
     db::list_all_wdbs_paths(&db_path).map_err(|e| e.to_string())
 }
 
+/// A video's current canonical Warp Drive (WDBS), storage-encoded — `None` if unassigned or if
+/// the video isn't in the local database at all. Exists so a video opened from Search (whose
+/// `Video` object comes straight from the YouTube API and so never carries a `wdbs` value, even
+/// when that same video is already saved locally — see commands::youtube::metadata) can still
+/// have its real designator looked up once the Sidebar confirms it's in the database, instead of
+/// always showing "N/A" the way it would if it only ever trusted the object it was opened with.
+#[command]
+pub async fn get_video_wdbs(app: tauri::AppHandle, video_id: String) -> Result<Option<String>, String> {
+    let db_path = get_db_path(&app);
+    Ok(db::get_video_wdbs_primary(&db_path, &video_id).unwrap_or(None))
+}
+
 /// A video's symlinked (non-canonical) Warp Drives, storage-encoded.
 #[command]
 pub async fn get_video_wdbs_links(app: tauri::AppHandle, video_id: String) -> Result<Vec<String>, String> {
@@ -145,7 +165,8 @@ pub async fn get_video_wdbs_links(app: tauri::AppHandle, video_id: String) -> Re
 #[command]
 pub async fn add_video_wdbs_link(app: tauri::AppHandle, video_id: String, wdbs: String) -> Result<String, String> {
     let db_path = get_db_path(&app);
-    let trimmed = wdbs.trim();
+    let trimmed = wdbs.trim().to_uppercase();
+    let trimmed = trimmed.as_str();
     let encoded = encode_wdbs_display(trimmed)?
         .ok_or_else(|| format!("Enter a {} designator to link, e.g. \":UAP-GERB-VVV\".", DRIVE_LABEL))?;
 
@@ -186,7 +207,8 @@ pub struct BulkWdbsResult {
 #[command]
 pub async fn bulk_update_wdbs(app: tauri::AppHandle, video_ids: Vec<String>, wdbs: String) -> Result<BulkWdbsResult, String> {
     let db_path = get_db_path(&app);
-    let trimmed = wdbs.trim();
+    let trimmed = wdbs.trim().to_uppercase();
+    let trimmed = trimmed.as_str();
     let encoded = encode_wdbs_display(trimmed)?;
     let is_clearing = encoded.is_none();
 

@@ -79,6 +79,14 @@ interface Props {
     bulkAssignMode?: boolean;
     bulkSelectedIds?: Set<string>;
     onToggleBulkSelect?: (video: Video) => void;
+    // Shift-click range select (file-manager-style): replaces the whole selection with "the
+    // selection as it was right before the last plain click" plus that click's card's range to
+    // the shift-clicked target forced to match the card's own resulting state — see
+    // handleBulkCardClick below for why it's a full replace rather than an incremental add/
+    // remove: repeated shift-clicks (1, shift+18, shift+19, shift+5, ...) need each one to
+    // re-derive the range from that same fixed anchor, so a shift+5 after a shift+19 correctly
+    // *shrinks* the selection back down instead of leaving 6-19 stuck on from the earlier click.
+    onBulkSelectRange?: (nextSelectedIds: Set<string>) => void;
     onBulkContextMenu?: (video: Video, x: number, y: number) => void;
 }
 
@@ -89,7 +97,7 @@ export function VideoList({
     filterKind: filterProp, onFilterKindChange,
     onLoadMore, loadingMore = false, hasMore = false,
     loading = false, emptyTitle, emptyMessage,
-    bulkAssignMode = false, bulkSelectedIds, onToggleBulkSelect, onBulkContextMenu,
+    bulkAssignMode = false, bulkSelectedIds, onToggleBulkSelect, onBulkSelectRange, onBulkContextMenu,
 }: Props) {
     const [internalSortField, setInternalSortField] = useState<SortField>('date');
     const [internalSortOrder, setInternalSortOrder] = useState<SortOrder>('desc');
@@ -171,6 +179,64 @@ export function VideoList({
         }
         return out;
     }, [sortedVideos, columns]);
+
+    // Bulk Assign Mode's shift-click range select. `sortedVideos`' order is exactly the visual
+    // order (it's what `rows` above is chunked from), so a shift-click just needs the anchor and
+    // target's positions in it — no need to walk the row/column grid itself.
+    //
+    // A shift-click range is always computed as `bulkBaseSelectionRef` (the selection exactly as
+    // it stood right after the anchor's own plain-click toggle, before any shift-clicks) with the
+    // anchor→target range forced to `bulkAnchorSelectedRef` (whatever the anchor's own toggle
+    // just made it). Recomputing from that same fixed base every time — rather than incrementally
+    // mutating whatever the previous shift-click left behind — is what lets repeated shift-clicks
+    // *shrink* a range back down: select 1, shift+18 selects 1-18, shift+19 extends to 1-19,
+    // shift+5 needs to drop 6-19 back off, which only works if it's re-deriving "base + [1,5]"
+    // rather than adding [1,5] onto whatever 1-19 already was. All three refs reset (to null/true/
+    // empty) whenever Bulk Assign Mode itself turns off, so a stale anchor from a previous session
+    // can't leak into a fresh one.
+    const bulkAnchorIdRef = useRef<string | null>(null);
+    const bulkAnchorSelectedRef = useRef(true);
+    const bulkBaseSelectionRef = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        if (!bulkAssignMode) {
+            bulkAnchorIdRef.current = null;
+            bulkAnchorSelectedRef.current = true;
+            bulkBaseSelectionRef.current = new Set();
+        }
+    }, [bulkAssignMode]);
+
+    const videoIndexById = useMemo(() => {
+        const m = new Map<string, number>();
+        sortedVideos.forEach((v, i) => m.set(v.id, i));
+        return m;
+    }, [sortedVideos]);
+
+    const handleBulkCardClick = useCallback((video: Video, e: React.MouseEvent) => {
+        if (e.shiftKey && bulkAnchorIdRef.current && onBulkSelectRange) {
+            const anchorIdx = videoIndexById.get(bulkAnchorIdRef.current);
+            const targetIdx = videoIndexById.get(video.id);
+            if (anchorIdx !== undefined && targetIdx !== undefined) {
+                const [start, end] = anchorIdx < targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx];
+                const next = new Set(bulkBaseSelectionRef.current);
+                for (const v of sortedVideos.slice(start, end + 1)) {
+                    if (bulkAnchorSelectedRef.current) next.add(v.id); else next.delete(v.id);
+                }
+                onBulkSelectRange(next);
+                return;
+            }
+        }
+        // Plain click: toggle this card and make it the new anchor. `bulkSelectedIds` is still
+        // last render's value here (the toggle's own state update hasn't landed yet), so the
+        // anchor's resulting state and the new base snapshot are both derived from it directly
+        // rather than read back after the fact.
+        const wasSelected = bulkSelectedIds?.has(video.id) ?? false;
+        const nextBase = new Set(bulkSelectedIds ?? []);
+        if (wasSelected) nextBase.delete(video.id); else nextBase.add(video.id);
+        bulkAnchorIdRef.current = video.id;
+        bulkAnchorSelectedRef.current = !wasSelected;
+        bulkBaseSelectionRef.current = nextBase;
+        onToggleBulkSelect?.(video);
+    }, [videoIndexById, sortedVideos, onBulkSelectRange, onToggleBulkSelect, bulkSelectedIds]);
 
     const gridRef = useRef<HTMLDivElement>(null);
     const [scrollMargin, setScrollMargin] = useState(0);
@@ -359,7 +425,7 @@ export function VideoList({
                                             onSaveImageAs={handleSaveImageAs}
                                             bulkAssignMode={bulkAssignMode}
                                             selected={bulkSelectedIds?.has(video.id) ?? false}
-                                            onToggleSelect={onToggleBulkSelect ? () => onToggleBulkSelect(video) : undefined}
+                                            onToggleSelect={onToggleBulkSelect ? (e) => handleBulkCardClick(video, e) : undefined}
                                             onBulkContextMenu={onBulkContextMenu ? (x, y) => onBulkContextMenu(video, x, y) : undefined}
                                         />
                                     ))}
@@ -390,7 +456,7 @@ interface VideoCardProps {
     onSaveImageAs: (url: string) => void;
     bulkAssignMode?: boolean;
     selected?: boolean;
-    onToggleSelect?: () => void;
+    onToggleSelect?: (e: React.MouseEvent) => void;
     onBulkContextMenu?: (x: number, y: number) => void;
 }
 
@@ -398,7 +464,7 @@ function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowD
     return (
         <div
             className={`group flex flex-col gap-2 cursor-pointer rounded-lg transition-all ${selected ? 'ring-2 ring-red-500 ring-offset-2 ring-offset-[#0f0f0f]' : ''}`}
-            onClick={() => bulkAssignMode ? onToggleSelect?.() : onSelect(video)}
+            onClick={(e) => bulkAssignMode ? onToggleSelect?.(e) : onSelect(video)}
             onContextMenu={bulkAssignMode ? (e) => { e.preventDefault(); onBulkContextMenu?.(e.clientX, e.clientY); } : undefined}
         >
             <div className={`${compact ? 'aspect-[16/9]' : 'aspect-video'} w-full rounded-lg overflow-hidden bg-[#272727] relative`}>

@@ -9,6 +9,12 @@ interface WdbsTreePanelProps {
     selectedPath: string | undefined;
     onSelect: (path: string, label: string) => void;
     className?: string;
+    // Bumped by the caller (App.tsx) whenever a video's WDBS assignment or symlinks change
+    // elsewhere (Sidebar's editor, bulk assign) so the tree's counts stay in sync — those
+    // mutations happen outside this component, so it has no way to know about them on its own.
+    // Only added to the fetch effect's dependencies, not used as a remount `key`, so expand/
+    // collapse state survives a refresh.
+    refreshKey?: number;
 }
 
 /**
@@ -17,7 +23,7 @@ interface WdbsTreePanelProps {
  * (see App.tsx's Drive panel button). Owns fetching and expand/collapse state; selection itself
  * is controlled by the caller (App.tsx wires it into the Library's own search/filter state).
  */
-export function WdbsTreePanel({ selectedPath, onSelect, className }: WdbsTreePanelProps) {
+export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey }: WdbsTreePanelProps) {
     const [tree, setTree] = useState<WdbsNode[]>([]);
     const [loading, setLoading] = useState(true);
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -30,7 +36,7 @@ export function WdbsTreePanel({ selectedPath, onSelect, className }: WdbsTreePan
             .catch(() => { if (!cancelled) setTree([]); })
             .finally(() => { if (!cancelled) setLoading(false); });
         return () => { cancelled = true; };
-    }, []);
+    }, [refreshKey]);
 
     const toggleExpanded = useCallback((path: string) => {
         setExpanded(prev => {

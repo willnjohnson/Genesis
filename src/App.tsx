@@ -119,6 +119,10 @@ function App() {
     const [allowEditBio, setAllowEditBio] = useState(true);
     const [allowEditTranscriptOnNA, setAllowEditTranscriptOnNA] = useState(true);
     const [allowEditWDBS, setAllowEditWDBS] = useState(false);
+    // Bumped whenever a video's WDBS assignment or symlinks change (Sidebar's editor, bulk
+    // assign) so WdbsTreePanel's per-category counts refetch — those mutations happen outside
+    // the tree panel itself, which otherwise has no way to know its counts just went stale.
+    const [driveVersion, setDriveVersion] = useState(0);
 
     // ── Sidebar / transcript state ───────────────────────────────────────────
     const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
@@ -429,6 +433,14 @@ function App() {
         });
     }, []);
 
+    // Shift-click range select/deselect — VideoList.tsx's handleBulkCardClick has already worked
+    // out the full resulting selection (base-selection-before-the-anchor-click, with the anchor-
+    // to-target range forced to match the anchor's own state), so this just applies it wholesale
+    // rather than layering another add/remove on top.
+    const handleBulkSelectRange = useCallback((nextSelectedIds: Set<string>) => {
+        setBulkSelectedIds(nextSelectedIds);
+    }, []);
+
     // Standard file-manager-style right-click: if the card is already part of the selection, the
     // menu applies to the whole selection; otherwise it applies to just this card (replacing
     // whatever was selected before), so a single video can be reassigned without a separate
@@ -461,6 +473,7 @@ function App() {
                 setBulkAssignMenu(null);
             }
             library.refreshLibrary();
+            setDriveVersion(v => v + 1);
         } catch (e: any) {
             setBulkAssignError(typeof e === "string" ? e : e?.message ?? "Bulk assign failed.");
         } finally {
@@ -752,6 +765,7 @@ function App() {
                                             library.setWdbsFilter(path);
                                             setDriveFilterLabel(label);
                                         }}
+                                        refreshKey={driveVersion}
                                     />
                                     {allowEditWDBS && (
                                         <button
@@ -794,6 +808,7 @@ function App() {
                                     bulkAssignMode={bulkAssignMode}
                                     bulkSelectedIds={bulkSelectedIds}
                                     onToggleBulkSelect={handleToggleBulkSelect}
+                                    onBulkSelectRange={handleBulkSelectRange}
                                     onBulkContextMenu={handleBulkContextMenu}
                                 />
                             </div>
@@ -853,6 +868,7 @@ function App() {
                     setSelectedVideo(prev => prev ? { ...prev, wdbs: newWdbs } : prev);
                     library.refreshLibrary();
                 }}
+                onWdbsChanged={() => setDriveVersion(v => v + 1)}
             />
 
             <SettingsModal

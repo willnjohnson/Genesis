@@ -16,11 +16,11 @@ fn sanitize_int(raw: &str) -> i32 {
     digits.parse::<i32>().unwrap_or(0)
 }
 
-/// Falls back to 9999 (an easy-to-spot "unknown/needs backfill" sentinel — see the schema
-/// handoff doc) whenever the YouTube Data API doesn't return a usable subscriber count: no API
-/// key configured, the request fails, the channel hides its count, or channel_id couldn't be
-/// resolved at all.
-const UNKNOWN_SUBSCRIBER_COUNT: i64 = 9999;
+/// Falls back to -1 (a real subscriber count is never negative, so it's an unambiguous
+/// "unknown/needs backfill" sentinel — see the schema handoff doc) whenever the YouTube Data API
+/// doesn't return a usable subscriber count: no API key configured, the request fails, the
+/// channel hides its count, or channel_id couldn't be resolved at all.
+const UNKNOWN_SUBSCRIBER_COUNT: i64 = -1;
 
 /// Seeds a biography row the first time a given handle is saved, resolving and capturing
 /// YouTube's immutable channel ID and current subscriber count at that moment — both are cheap

@@ -1,6 +1,6 @@
 import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus } from 'lucide-react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink } from '../api';
+import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink } from '../api';
 import { saveImageAs } from '../lib/save-image-as';
 import { handleMarkdownKeyDown } from '../lib/markdown-editor';
 import { useFindReplace } from './sidebar/useFindReplace';
@@ -50,6 +50,12 @@ interface Props {
     wdbs?: string;
     allowEditWDBS?: boolean;
     onWdbsUpdated?: (wdbs: string) => void;
+    // Fired after ANY successful WDBS mutation here — primary designator change, or a symlink
+    // added/removed — so the caller can refresh views that show WDBS assignments but live outside
+    // this panel (e.g. App.tsx's Drive/Warp Drive tree, whose per-category counts otherwise go
+    // stale the moment they're rendered). `onWdbsUpdated` above only covers the primary value and
+    // only updates this same video's own local state, not those other views.
+    onWdbsChanged?: () => void;
 }
 
 /**
@@ -61,7 +67,7 @@ interface Props {
  * directly, since the two panes are asymmetric (only the summary pane supports image hover-to-
  * delete) rather than a clean shared abstraction.
  */
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated }: Props) {
+export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged }: Props) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
@@ -105,6 +111,12 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [savingWdbs, setSavingWdbs] = useState(false);
     const [wdbsSuggestions, setWdbsSuggestions] = useState<string[]>([]);
     const [wdbsLinks, setWdbsLinks] = useState<string[]>([]);
+    // The video's actual canonical WDBS, looked up from the database rather than trusted from the
+    // `wdbs` prop — a video opened from Search carries a freshly-fetched YouTube `Video` object
+    // that never has `wdbs` set, even when that video is already saved locally with one (see
+    // api.ts's getVideoWdbs). Falls back to the prop so a Library-opened video (which does carry
+    // its real value already) renders immediately without waiting on the round trip.
+    const [primaryWdbs, setPrimaryWdbs] = useState<string | undefined>(wdbs);
     const [isAddingLink, setIsAddingLink] = useState(false);
     const [linkInput, setLinkInput] = useState('');
     const [linkError, setLinkError] = useState<string | null>(null);
@@ -483,7 +495,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     // "Also in" (symlinks) only makes sense once there's a canonical WDBS to be "also" alongside
     // — see the "Also in" section below, and update_wdbs's own symlink cleanup when this becomes
     // false (clearing the canonical value removes any symlinks server-side too).
-    const hasPrimaryWdbs = !!decodeWdbs(wdbs);
+    const hasPrimaryWdbs = !!decodeWdbs(primaryWdbs);
 
     // Autocomplete suggestions (existing Warp Drive paths) are shared by the primary editor and
     // the "link to another Warp Drive" adder below — loaded once, not per-video.
@@ -496,13 +508,23 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     // Drives are re-fetched per video too, since they aren't part of the Video object itself.
     useEffect(() => {
         setIsEditingWdbs(false);
-        setWdbsInput(decodeWdbs(wdbs));
         setWdbsError(null);
         setIsAddingLink(false);
         setLinkInput('');
         setLinkError(null);
+        setPrimaryWdbs(wdbs);
+        setWdbsInput(decodeWdbs(wdbs));
         if (videoId && existsInDb) {
             getVideoWdbsLinks(videoId).then(setWdbsLinks).catch(() => setWdbsLinks([]));
+            // The `wdbs` prop is only ever populated for a video opened from Library/Portal, whose
+            // Video object comes straight from the database. One opened from Search comes fresh
+            // from the YouTube API and never carries a `wdbs` value, even when that same video is
+            // already saved locally with one — so once we know it's in the db, look up the real
+            // value directly rather than keep showing "N/A" (see api.ts's getVideoWdbs).
+            getVideoWdbs(videoId).then(v => {
+                setPrimaryWdbs(v ?? undefined);
+                setWdbsInput(decodeWdbs(v));
+            }).catch(() => {});
         } else {
             setWdbsLinks([]);
         }
@@ -515,15 +537,18 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         try {
             await updateVideoWdbs(videoId, wdbsInput.trim());
             setIsEditingWdbs(false);
-            onWdbsUpdated?.(encodeWdbs(wdbsInput));
+            const encoded = encodeWdbs(wdbsInput);
+            setPrimaryWdbs(encoded);
+            onWdbsUpdated?.(encoded);
+            onWdbsChanged?.();
         } catch (e: any) {
             // update_wdbs already turns a SQLite trigger rejection into a plain-language message
             // (see commands::wdbs::update_wdbs) — surface it as-is.
-            setWdbsError(typeof e === "string" ? e : e?.message ?? "Failed to update WDBS.");
+            setWdbsError(typeof e === "string" ? e : e?.message ?? `Failed to update ${BRAND.wdbsLabel}.`);
         } finally {
             setSavingWdbs(false);
         }
-    }, [videoId, wdbsInput, onWdbsUpdated]);
+    }, [videoId, wdbsInput, onWdbsUpdated, onWdbsChanged]);
 
     const handleAddLink = useCallback(async () => {
         if (!videoId || !linkInput.trim()) return;
@@ -534,12 +559,13 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             setWdbsLinks(prev => prev.includes(encoded) ? prev : [...prev, encoded]);
             setLinkInput('');
             setIsAddingLink(false);
+            onWdbsChanged?.();
         } catch (e: any) {
-            setLinkError(typeof e === "string" ? e : e?.message ?? "Failed to link WDBS.");
+            setLinkError(typeof e === "string" ? e : e?.message ?? `Failed to ${BRAND.linkLabel.toLowerCase()} ${BRAND.wdbsLabel}.`);
         } finally {
             setSavingLink(false);
         }
-    }, [videoId, linkInput]);
+    }, [videoId, linkInput, onWdbsChanged]);
 
     const handleRemoveLink = useCallback(async (encoded: string) => {
         if (!videoId) return;
@@ -548,10 +574,11 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         setWdbsLinks(prev => prev.filter(l => l !== encoded));
         try {
             await removeVideoWdbsLink(videoId, encoded);
+            onWdbsChanged?.();
         } catch {
             setWdbsLinks(prev => prev.includes(encoded) ? prev : [...prev, encoded]);
         }
-    }, [videoId]);
+    }, [videoId, onWdbsChanged]);
 
     return (
         <>
@@ -667,7 +694,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                     {wdbsSuggestions.map(s => <option key={s} value={s} />)}
                                                 </datalist>
                                                 <div className="mt-3 flex items-center gap-2 text-xs">
-                                                    <span className="text-[#666666] uppercase font-bold tracking-wider text-[10px] shrink-0">WDBS:</span>
+                                                    <span className="text-[#666666] uppercase font-bold tracking-wider text-[10px] shrink-0">{BRAND.wdbsLabel}:</span>
                                                     {isEditingWdbs ? (
                                                         <>
                                                             <input
@@ -675,10 +702,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                 autoFocus
                                                                 list="wdbs-suggestions"
                                                                 value={wdbsInput}
-                                                                onChange={(e) => setWdbsInput(e.target.value)}
+                                                                onChange={(e) => setWdbsInput(e.target.value.toUpperCase())}
                                                                 onKeyDown={(e) => {
                                                                     if (e.key === 'Enter') handleSaveWdbs();
-                                                                    if (e.key === 'Escape') { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(wdbs)); setWdbsError(null); }
+                                                                    if (e.key === 'Escape') { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(primaryWdbs)); setWdbsError(null); }
                                                                 }}
                                                                 placeholder=":UAP-GERB-VVV"
                                                                 disabled={savingWdbs}
@@ -693,7 +720,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                 <Check className="w-3.5 h-3.5" />
                                                             </button>
                                                             <button
-                                                                onClick={() => { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(wdbs)); setWdbsError(null); }}
+                                                                onClick={() => { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(primaryWdbs)); setWdbsError(null); }}
                                                                 disabled={savingWdbs}
                                                                 title="Cancel"
                                                                 className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
@@ -703,11 +730,11 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         </>
                                                     ) : (
                                                         <>
-                                                            <span className="text-[#aaaaaa] font-mono truncate">{decodeWdbs(wdbs) || "N/A"}</span>
+                                                            <span className="text-[#aaaaaa] font-mono truncate">{decodeWdbs(primaryWdbs) || "N/A"}</span>
                                                             {allowEditWDBS && (
                                                                 <button
                                                                     onClick={() => setIsEditingWdbs(true)}
-                                                                    title="Edit WDBS"
+                                                                    title={`Edit ${BRAND.wdbsLabel}`}
                                                                     className="text-gray-500 hover:text-blue-400 transition-colors cursor-pointer p-1 shrink-0"
                                                                 >
                                                                     <Pencil className="w-3.5 h-3.5" />
@@ -738,7 +765,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                 {allowEditWDBS && (
                                                                     <button
                                                                         onClick={() => handleRemoveLink(link)}
-                                                                        title="Remove link"
+                                                                        title={`Remove ${BRAND.linkLabel.toLowerCase()}`}
                                                                         className="text-gray-500 hover:text-red-400 transition-colors cursor-pointer p-0.5"
                                                                     >
                                                                         <X className="w-3 h-3" />
@@ -753,7 +780,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                     autoFocus
                                                                     list="wdbs-suggestions"
                                                                     value={linkInput}
-                                                                    onChange={(e) => setLinkInput(e.target.value)}
+                                                                    onChange={(e) => setLinkInput(e.target.value.toUpperCase())}
                                                                     onKeyDown={(e) => {
                                                                         if (e.key === 'Enter') handleAddLink();
                                                                         if (e.key === 'Escape') { setIsAddingLink(false); setLinkInput(''); setLinkError(null); }
@@ -765,7 +792,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                 <button
                                                                     onClick={handleAddLink}
                                                                     disabled={savingLink || !linkInput.trim()}
-                                                                    title="Add link"
+                                                                    title={`Add ${BRAND.linkLabel.toLowerCase()}`}
                                                                     className="text-green-500 hover:text-green-400 transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
                                                                 >
                                                                     <Check className="w-3.5 h-3.5" />
@@ -782,11 +809,11 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         ) : (
                                                             <button
                                                                 onClick={() => setIsAddingLink(true)}
-                                                                title="Link to another WDBS"
+                                                                title={`${BRAND.linkLabel} to another ${BRAND.wdbsLabel}`}
                                                                 className="flex items-center gap-1 text-gray-500 hover:text-blue-400 transition-colors cursor-pointer px-1.5 py-0.5 rounded-md border border-dashed border-[#333] hover:border-blue-400/50 text-[11px]"
                                                             >
                                                                 <Plus className="w-3 h-3" />
-                                                                Link
+                                                                {BRAND.linkLabel}
                                                             </button>
                                                         ))}
                                                     </div>
