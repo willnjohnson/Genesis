@@ -13,7 +13,7 @@ pub fn has_real_summary(summary: &str) -> bool {
     !content.trim().is_empty()
 }
 
-// Appends a "Channel Info: ..." footer to a video's summary (feeding the fts_videos.summary
+// Appends a "Channel Info: ..." footer to a video's summary (feeding the ftsVideos.summary
 // FTS5 column), always at the very bottom. Guarded so repeated saves/refetches/re-summarizes
 // of the same video don't duplicate it. Prefers the channel's biography display_name, but
 // falls back to the video's own `author` field so this doesn't depend on a biographies row

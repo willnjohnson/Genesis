@@ -3,7 +3,7 @@ use tauri::command;
 use crate::{get_db_path, db, types::*, DRIVE_LABEL};
 
 /// Transforms a Warp Drive designator from user-facing display format (":UAP-GERB-VVV") into the
-/// storage encoding the wdbs column actually uses — ':' and '-' become 'θψ' and '_' respectively,
+/// storage encoding the WDBS column actually uses — ':' and '-' become 'θψ' and '_' respectively,
 /// e.g. ":UAP-GERB-VVV" -> "θψUAP_GERB_VVV". Uppercases the designator body so a value is stored
 /// consistently regardless of the case it was typed in (the input fields also uppercase live, but
 /// this is the one place every save path — update_wdbs, add_video_wdbs_link, bulk_update_wdbs —
@@ -26,14 +26,14 @@ pub(crate) fn encode_wdbs_display(raw: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Updates a video's canonical Warp Drive (wdbs) designator, or clears it back to unassigned
+/// Updates a video's canonical Warp Drive (WDBS) designator, or clears it back to unassigned
 /// ("N/A") when given an empty string. Clearing writes ":" — the storage encoding of tblWDBS's
 /// root entry — rather than an empty string, SQL NULL, or the column's own "θψ" default: the
-/// production database's wdbs column is NOT NULL, and its validating trigger
+/// production database's WDBS column is NOT NULL, and its validating trigger
 /// (trgVideosBeforeUPD_Videos_ValidateWDBS) requires ANY non-null value to resolve to a real
 /// tblWDBS row, so only a value that's actually registered there will be accepted (see
 /// db::update_video_wdbs). ":" specifically (not "θψ") because "θψ" is alphabetic and also the
-/// universal prefix every real wdbs value starts with, so FTS5 indexes it as a literal searchable
+/// universal prefix every real WDBS value starts with, so FTS5 indexes it as a literal searchable
 /// term that matches every video regardless of assignment — ":" is punctuation, which the
 /// tokenizer doesn't index at all. Setting a real designator first ensures it — and every level
 /// above it — exists in tblWDBS (see db::ensure_wdbs_path_exists), so a genuinely new category
@@ -50,7 +50,7 @@ pub(crate) fn encode_wdbs_display(raw: &str) -> Result<Option<String>, String> {
 pub async fn update_wdbs(app: tauri::AppHandle, video_id: String, wdbs: String) -> Result<(), String> {
     let db_path = get_db_path(&app);
     // Uppercased before both encoding and tblWDBS registration, so the two stay in sync — the
-    // trigger that validates a video's wdbs resolves against tblWDBS's own case (see
+    // trigger that validates a video's WDBS resolves against tblWDBS's own case (see
     // encode_wdbs_display), and SQLite TEXT comparison is case-sensitive by default.
     let trimmed = wdbs.trim().to_uppercase();
     let trimmed = trimmed.as_str();

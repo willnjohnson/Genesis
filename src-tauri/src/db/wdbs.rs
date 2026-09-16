@@ -103,15 +103,15 @@ fn is_unassigned_sentinel(wdbs: &str) -> bool {
     wdbs == ":" || wdbs == "θψ"
 }
 
-/// Builds the full Warp Drive taxonomy tree from every (video, wdbs) assignment actually in use
-/// — both each video's canonical `videos.wdbs` and any symlinks in `video_wdbs_links`. The
+/// Builds the full Warp Drive taxonomy tree from every (video, WDBS) assignment actually in use
+/// — both each video's canonical `videos.WDBS` and any symlinks in `video_wdbs_links`. The
 /// distinct-assignment list is taxonomy-sized, not video-count-sized, so it's cheap to pull in
 /// one shot and build the whole tree in memory rather than doing per-level round trips.
 pub fn get_wdbs_tree(db_path: &str) -> Result<Vec<WdbsNode>> {
     let conn = Connection::open(db_path)?;
 
     let mut stmt = conn.prepare(
-        "SELECT video_id, wdbs FROM videos WHERE wdbs IS NOT NULL AND wdbs != ''
+        "SELECT video_id, WDBS FROM videos WHERE WDBS IS NOT NULL AND WDBS != ''
          UNION
          SELECT video_id, wdbs FROM video_wdbs_links",
     )?;
@@ -144,7 +144,7 @@ pub fn get_wdbs_tree(db_path: &str) -> Result<Vec<WdbsNode>> {
     Ok(build_nodes(&root, ""))
 }
 
-/// Pages videos belonging to one Warp Drive category: everything whose canonical wdbs, or any
+/// Pages videos belonging to one Warp Drive category: everything whose canonical WDBS, or any
 /// symlink (video_wdbs_links), is exactly `wdbs_prefix` or nested beneath it, optionally narrowed
 /// further by a free-text `query` (searched via the same FTS5 index — and the same tokenizer,
 /// see build_fts_query — as the Library/Portal grid's own search, just scoped to this category
@@ -172,12 +172,12 @@ pub fn list_videos_by_wdbs(
 
     // GLOB (not LIKE) is required here: LIKE's '_' wildcard matches any single character, which
     // would treat the literal underscore segment-separator as a wildcard too. GLOB's '_' is
-    // literal and '*' is the wildcard. The ids subquery only has enough columns to resolve wdbs
+    // literal and '*' is the wildcard. The ids subquery only has enough columns to resolve WDBS
     // membership, not transcript/summary state or FTS content, so filter_kind and the text
     // search below are both applied against the outer `videos` row instead, once IN (...) has
     // narrowed it down to this category's members.
     let matching_ids_sql = "
-        SELECT video_id FROM videos WHERE wdbs = ?1 OR wdbs GLOB ?1 || '_*'
+        SELECT video_id FROM videos WHERE WDBS = ?1 OR WDBS GLOB ?1 || '_*'
         UNION
         SELECT video_id FROM video_wdbs_links WHERE wdbs = ?1 OR wdbs GLOB ?1 || '_*'
     ";
@@ -205,15 +205,15 @@ pub fn list_videos_by_wdbs(
         }
     } else {
         let where_sql = format!(
-            "v.video_id IN ({matching_ids_sql}) AND fts_videos MATCH ?2 AND {filter_where}"
+            "v.video_id IN ({matching_ids_sql}) AND ftsVideos MATCH ?2 AND {filter_where}"
         );
         let count_sql = format!(
-            "SELECT COUNT(*) FROM videos AS v JOIN fts_videos ON v.rowid = fts_videos.rowid WHERE {where_sql}"
+            "SELECT COUNT(*) FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql}"
         );
         total = conn.query_row(&count_sql, params![wdbs_prefix, fts_query], |row| row.get(0))?;
 
         let sql = format!(
-            "SELECT {columns} FROM videos AS v JOIN fts_videos ON v.rowid = fts_videos.rowid WHERE {where_sql} ORDER BY {order} LIMIT ?3 OFFSET ?4"
+            "SELECT {columns} FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql} ORDER BY {order} LIMIT ?3 OFFSET ?4"
         );
         let mut stmt = conn.prepare(&sql)?;
         let iter = stmt.query_map(params![wdbs_prefix, fts_query, limit, offset], |row| video_row(row, false))?;
@@ -231,7 +231,7 @@ pub fn list_videos_by_wdbs(
 pub fn list_all_wdbs_paths(db_path: &str) -> Result<Vec<String>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT wdbs FROM videos WHERE wdbs IS NOT NULL AND wdbs != ''
+        "SELECT WDBS FROM videos WHERE WDBS IS NOT NULL AND WDBS != ''
          UNION
          SELECT wdbs FROM video_wdbs_links
          ORDER BY 1",
@@ -244,12 +244,12 @@ pub fn list_all_wdbs_paths(db_path: &str) -> Result<Vec<String>> {
     Ok(paths)
 }
 
-/// A video's current canonical Warp Drive, if any (i.e. `videos.wdbs`) — used before adding a
+/// A video's current canonical Warp Drive, if any (i.e. `videos.WDBS`) — used before adding a
 /// symlink, to reject one that would just duplicate the canonical assignment.
 pub fn get_video_wdbs_primary(db_path: &str, video_id: &str) -> Result<Option<String>> {
     let conn = Connection::open(db_path)?;
     conn.query_row(
-        "SELECT wdbs FROM videos WHERE video_id = ?1",
+        "SELECT WDBS FROM videos WHERE video_id = ?1",
         params![video_id],
         |row| row.get::<_, Option<String>>(0),
     )

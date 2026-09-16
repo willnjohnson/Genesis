@@ -122,22 +122,29 @@ pub fn init_db(db_path: &str) -> Result<()> {
         log::info!("Creating missing database tables: {:?}", missing_tables);
     }
 
-    // `StopWords`/`ftsVideos` predate this app's snake_case convention for tables it creates and
-    // owns — renamed in place (an ALTER TABLE RENAME TO, not a drop+recreate, so no data is lost)
-    // so a long-running install ends up on the same names a fresh install gets from here on. Both
-    // checks are exact-case (`table_exists` compares against sqlite_master.name, whose default
-    // BINARY collation makes `=` case-sensitive) specifically so they can tell "still under the
-    // old name" apart from "already renamed" — a case-insensitive check couldn't, since by that
-    // measure the old and new names would look identical. Case-only differences elsewhere (e.g.
-    // `WDBS`/`wdbs`, `Culls`/`culls`) don't need this treatment at all: SQLite matches identifiers
-    // case-insensitively, so old and new casing already refer to the exact same column with zero
-    // functional difference — only a genuinely different spelling (like an added underscore) needs
-    // an actual rename.
+    // `StopWords` predates this app's snake_case convention for tables it creates and owns —
+    // renamed in place (an ALTER TABLE RENAME TO, not a drop+recreate, so no data is lost) so a
+    // long-running install ends up on the same name a fresh install gets from here on. The check
+    // is exact-case (`table_exists` compares against sqlite_master.name, whose default BINARY
+    // collation makes `=` case-sensitive) specifically so it can tell "still under the old name"
+    // apart from "already renamed" — a case-insensitive check couldn't, since by that measure the
+    // old and new names would look identical. Case-only differences elsewhere (e.g. `Culls`/
+    // `culls`) don't need this treatment at all: SQLite matches identifiers case-insensitively, so
+    // old and new casing already refer to the exact same column with zero functional difference —
+    // only a genuinely different spelling (like an added underscore) needs an actual rename.
     if table_exists(&conn, "StopWords")? && !table_exists(&conn, "stop_words")? {
         conn.execute("ALTER TABLE StopWords RENAME TO stop_words", [])?;
     }
-    if table_exists(&conn, "ftsVideos")? && !table_exists(&conn, "fts_videos")? {
-        conn.execute("ALTER TABLE ftsVideos RENAME TO fts_videos", [])?;
+    // `ftsVideos`/`WDBS` are kept under their original casing (not renamed to `fts_videos`/`wdbs`)
+    // — an earlier revision of this file did rename `ftsVideos` to `fts_videos` and spell `WDBS`
+    // lowercase, but that's since been reverted. Because SQLite matches identifiers case-
+    // insensitively, nothing here actually depends on which casing is used — `wdbs`/`WDBS` were
+    // always interchangeable with zero functional difference either way — but `ftsVideos` is a
+    // genuinely different table name than `fts_videos` (differs by more than case, an added
+    // underscore), so a database that already went through the earlier rename needs an actual
+    // ALTER TABLE to come back, the same way the StopWords rename above needs one to go forward.
+    if table_exists(&conn, "fts_videos")? && !table_exists(&conn, "ftsVideos")? {
+        conn.execute("ALTER TABLE fts_videos RENAME TO ftsVideos", [])?;
     }
 
     // Create videos table
@@ -161,7 +168,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     )?;
 
     // `tags`/`tokens` were added to the CREATE TABLE above after some databases already existed
-    // (same situation as wdbs/channel_id/subscriber_count elsewhere in this file); ADD COLUMN
+    // (same situation as WDBS/channel_id/subscriber_count elsewhere in this file); ADD COLUMN
     // backfills them onto those. Without this, any database created before these columns existed
     // has no way to ever gain them (CREATE TABLE IF NOT EXISTS is a no-op once the table is
     // there), and save_tags/regenerate_tokens_from_transcript — plus the compatibility FTS
@@ -183,22 +190,19 @@ pub fn init_db(db_path: &str) -> Result<()> {
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosViewCount ON videos(view_count)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosVideoType ON videos(video_type)", []);
 
-    // Warp Drive taxonomy: `wdbs` indirectly ties a video to a row in `tblWDBS` (the Warp Drive
+    // Warp Drive taxonomy: `WDBS` indirectly ties a video to a row in `tblWDBS` (the Warp Drive
     // repository). `tblWDBS` itself, plus the computed/IMMUTABLE `fkWDBS` column that directly
     // enforces that reference, are owned entirely by the hand-maintained production database this
-    // app is expected to run against — Kinesis itself never creates them, and never renames them
-    // either (see the "internal use only" note in the schema handoff doc) — only Kinesis's own
-    // `videos.wdbs` column follows this file's snake_case convention; tblWDBS's own column names
-    // (WDInfo, WDAlias, etc. — see db/wdbs.rs) are left exactly as that external schema defines
-    // them. `wdbs` is added here as a plain nullable column so Kinesis keeps working end-to-end
-    // (search, display, edit) against a from-scratch database too, without trying to reproduce the
-    // taxonomy machinery. Declared lowercase for a brand-new database; an existing database whose
-    // column is still cased `WDBS` needs no migration at all, unlike StopWords/ftsVideos above —
-    // SQLite matches identifiers case-insensitively, so `WDBS` and `wdbs` already refer to the
+    // app is expected to run against — Kinesis itself never creates them (see the "internal use
+    // only" note in the schema handoff doc). `WDBS` is added here as a plain nullable column so
+    // Kinesis keeps working end-to-end (search, display, edit) against a from-scratch database
+    // too, without trying to reproduce the taxonomy machinery. No migration is needed for a
+    // database whose column ended up declared lowercase `wdbs` by an earlier revision of this file
+    // — SQLite matches identifiers case-insensitively, so `WDBS` and `wdbs` already refer to the
     // exact same column (this check folds case for exactly that reason), and every query in this
-    // codebase now spells it lowercase regardless of which case a given database has it under.
-    if !column_exists(&conn, "videos", "wdbs")? {
-        conn.execute("ALTER TABLE videos ADD COLUMN wdbs TEXT", [])?;
+    // codebase now spells it uppercase regardless of which case a given database has it under.
+    if !column_exists(&conn, "videos", "WDBS")? {
+        conn.execute("ALTER TABLE videos ADD COLUMN WDBS TEXT", [])?;
     }
 
     // Create stop_words table: common words culled out of generated FTS tokens
@@ -382,11 +386,11 @@ pub fn init_db(db_path: &str) -> Result<()> {
 
     // One-time normalization of the "unassigned Warp Drive" placeholder from "θψ" to ":". "θψ" is
     // made of ordinary alphabetic Unicode characters, so FTS5's tokenizer indexes it as a real
-    // searchable term — since it's also the universal prefix every real wdbs value starts with, a
+    // searchable term — since it's also the universal prefix every real WDBS value starts with, a
     // Library/Portal search for it matched every video regardless of whether one was assigned.
     // ":" is punctuation, which the tokenizer doesn't index at all, so it can't leak into search
     // results that way. This only ever needs to run once (it's a full-table scan with no index on
-    // wdbs), so it's gated behind a settings flag rather than repeated on every launch/search —
+    // WDBS), so it's gated behind a settings flag rather than repeated on every launch/search —
     // db::videos::save_video separately normalizes each newly-saved video's row on the spot,
     // since the production database's own INSERT trigger still writes the "θψ" default going
     // forward and this app has no way to change that trigger itself.
@@ -398,43 +402,43 @@ pub fn init_db(db_path: &str) -> Result<()> {
         )
         .unwrap_or(0);
     if migrated_placeholder == 0 {
-        let _ = conn.execute("UPDATE videos SET wdbs = ':' WHERE wdbs = 'θψ'", []);
+        let _ = conn.execute("UPDATE videos SET WDBS = ':' WHERE WDBS = 'θψ'", []);
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('migratedWdbsPlaceholder', 'true')",
             [],
         )?;
     }
 
-    // Backfills `wdbs` onto an fts_videos table created (by an earlier version of this app) before
+    // Backfills `WDBS` onto an ftsVideos table created (by an earlier version of this app) before
     // that column existed. Unlike ordinary tables, FTS5 virtual tables reject ALTER TABLE ADD
     // COLUMN outright ("virtual tables may not be altered") — there is no in-place way to add a
-    // column to one. A prior version of this migration tried `ALTER TABLE fts_videos ADD COLUMN
-    // wdbs` anyway and swallowed the resulting error, so on any database whose fts_videos table
-    // predates this column, it silently never gained `wdbs` — and every subsequent write (the
-    // compatibility triggers below insert into fts_videos on every video insert/update/delete)
-    // failed with "table fts_videos has no column named wdbs", most visibly when assigning a Warp
+    // column to one. A prior version of this migration tried `ALTER TABLE ftsVideos ADD COLUMN
+    // WDBS` anyway and swallowed the resulting error, so on any database whose ftsVideos table
+    // predates this column, it silently never gained `WDBS` — and every subsequent write (the
+    // compatibility triggers below insert into ftsVideos on every video insert/update/delete)
+    // failed with "table ftsVideos has no column named WDBS", most visibly when assigning a Warp
     // Drive value. The only real fix is to drop and recreate the table, then ask FTS5 to rebuild
     // its index from the content table — `rebuild` matches columns by name (case-insensitively),
-    // so it correctly backfills `wdbs` from the existing `videos.wdbs` values.
-    let fts_missing_wdbs = table_exists(&conn, "fts_videos")? && !column_exists(&conn, "fts_videos", "wdbs")?;
+    // so it correctly backfills `WDBS` from the existing `videos.WDBS` values.
+    let fts_missing_wdbs = table_exists(&conn, "ftsVideos")? && !column_exists(&conn, "ftsVideos", "WDBS")?;
     if fts_missing_wdbs {
-        conn.execute("DROP TABLE fts_videos", [])?;
+        conn.execute("DROP TABLE ftsVideos", [])?;
     }
     // Create FTS5 virtual table for library video search — idempotent and cheap even when it
-    // already exists, so this stays unconditional. `wdbs` is indexed alongside title/summary/
+    // already exists, so this stays unconditional. `WDBS` is indexed alongside title/summary/
     // tokens so a Warp Drive designator search (":UAP floating" — see db/search.rs) can match
     // against it directly via FTS5 MATCH.
     let _ = conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS fts_videos USING fts5(title, summary, tokens, wdbs, content='videos')",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS ftsVideos USING fts5(title, summary, tokens, WDBS, content='videos')",
         [],
     );
     if fts_missing_wdbs {
-        conn.execute("INSERT INTO fts_videos(fts_videos) VALUES('rebuild')", [])?;
+        conn.execute("INSERT INTO ftsVideos(ftsVideos) VALUES('rebuild')", [])?;
     }
 
     // ACTION REQUIRED (per Kinesis DB schema update): trg_ftsVideos_AfterDEL/AfterINS/BeforeDEL/
     // AfterUPD are deprecated — the hand-maintained production database now owns FTS-sync and
-    // wdbs referential-integrity via its own 10-trigger schema (see tblWDBS/fkWDBS above), and
+    // WDBS referential-integrity via its own 10-trigger schema (see tblWDBS/fkWDBS above), and
     // these four app-created triggers must be permanently dropped so they don't fight the new
     // ones. Unconditional and idempotent: a DB that never had them just no-ops here.
     let _ = conn.execute("DROP TRIGGER IF EXISTS trg_ftsVideos_AfterDEL", []);
@@ -443,18 +447,18 @@ pub fn init_db(db_path: &str) -> Result<()> {
     let _ = conn.execute("DROP TRIGGER IF EXISTS trg_ftsVideos_AfterUPD", []);
 
     // Compatibility path for databases that DON'T have the production tblWDBS/10-trigger schema
-    // (i.e. a from-scratch or pre-wdbs database created by this app itself, not the hand-
+    // (i.e. a from-scratch or pre-WDBS database created by this app itself, not the hand-
     // maintained one). Without this, such a database would silently lose FTS-sync-on-write and
     // biography cascade-delete entirely once the four deprecated triggers above are dropped.
     // Recreated under new names (not the deprecated ones) so they can never collide with
     // whatever the production schema's own 10 triggers are named. Skipped entirely when tblWDBS
     // is present, since that schema already does this (and more) itself — running both would
-    // double-insert into fts_videos on every write.
+    // double-insert into ftsVideos on every write.
     //
     // These bodies are only what a *freshly created* trigger gets — CREATE TRIGGER IF NOT EXISTS
     // is a no-op on a database where the trigger already exists from a previous run, and that
-    // existing trigger's stored body doesn't need separate migrating here: renaming ftsVideos to
-    // fts_videos above (an ALTER TABLE ... RENAME TO) already asked SQLite to rewrite every
+    // existing trigger's stored body doesn't need separate migrating here: renaming fts_videos
+    // back to ftsVideos above (an ALTER TABLE ... RENAME TO) already asked SQLite to rewrite every
     // reference to the old name across the whole schema, trigger bodies included, as part of that
     // same rename.
     if !table_exists(&conn, "tblWDBS")? {
@@ -462,8 +466,8 @@ pub fn init_db(db_path: &str) -> Result<()> {
             "CREATE TRIGGER IF NOT EXISTS trg_kinesis_fts_before_del
             BEFORE DELETE ON videos
             BEGIN
-                INSERT INTO fts_videos(fts_videos, rowid, title, summary, tokens, wdbs)
-                VALUES ('delete', OLD.rowid, OLD.title, OLD.summary, OLD.tokens, OLD.wdbs);
+                INSERT INTO ftsVideos(ftsVideos, rowid, title, summary, tokens, WDBS)
+                VALUES ('delete', OLD.rowid, OLD.title, OLD.summary, OLD.tokens, OLD.WDBS);
             END",
             [],
         );
@@ -483,8 +487,8 @@ pub fn init_db(db_path: &str) -> Result<()> {
             "CREATE TRIGGER IF NOT EXISTS trg_kinesis_fts_after_ins
             AFTER INSERT ON videos
             BEGIN
-                INSERT INTO fts_videos(rowid, title, summary, tokens, wdbs)
-                VALUES (new.rowid, new.title, new.summary, new.tokens, new.wdbs);
+                INSERT INTO ftsVideos(rowid, title, summary, tokens, WDBS)
+                VALUES (new.rowid, new.title, new.summary, new.tokens, new.WDBS);
             END",
             [],
         );
@@ -492,10 +496,10 @@ pub fn init_db(db_path: &str) -> Result<()> {
             "CREATE TRIGGER IF NOT EXISTS trg_kinesis_fts_after_upd
             AFTER UPDATE ON videos
             BEGIN
-                INSERT INTO fts_videos(fts_videos, rowid, title, summary, tokens, wdbs)
-                VALUES ('delete', old.rowid, old.title, old.summary, old.tokens, old.wdbs);
-                INSERT INTO fts_videos(rowid, title, summary, tokens, wdbs)
-                VALUES (new.rowid, new.title, new.summary, new.tokens, new.wdbs);
+                INSERT INTO ftsVideos(ftsVideos, rowid, title, summary, tokens, WDBS)
+                VALUES ('delete', old.rowid, old.title, old.summary, old.tokens, old.WDBS);
+                INSERT INTO ftsVideos(rowid, title, summary, tokens, WDBS)
+                VALUES (new.rowid, new.title, new.summary, new.tokens, new.WDBS);
             END",
             [],
         );
@@ -533,18 +537,22 @@ mod tests {
     }
 
 
+
     #[test]
-    fn fresh_database_gets_snake_case_names_throughout() {
+    fn fresh_database_uses_expected_names() {
         let db_path = temp_db_path("fresh");
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
+        // StopWords/biographies' channel_id/subscriber_count: snake_case, as before.
         assert!(table_exists(&conn, "stop_words").unwrap());
         assert!(!table_exists(&conn, "StopWords").unwrap());
-        assert!(table_exists(&conn, "fts_videos").unwrap());
-        assert!(!table_exists(&conn, "ftsVideos").unwrap());
-        assert!(column_exists_exact(&conn, "videos", "wdbs").unwrap());
         assert!(column_exists_exact(&conn, "biographies", "channel_id").unwrap());
         assert!(column_exists_exact(&conn, "biographies", "subscriber_count").unwrap());
+        // ftsVideos/WDBS: kept under their original casing (reverted from an earlier revision
+        // that renamed/lowercased these — see the comments above the rename/ADD COLUMN below).
+        assert!(table_exists(&conn, "ftsVideos").unwrap());
+        assert!(!table_exists(&conn, "fts_videos").unwrap());
+        assert!(column_exists_exact(&conn, "videos", "WDBS").unwrap());
         conn.execute("INSERT INTO biographies (handle) VALUES ('fresh-handle')", []).unwrap();
         let default_subscriber_count: i64 = conn.query_row(
             "SELECT subscriber_count FROM biographies WHERE handle = 'fresh-handle'", [], |row| row.get(0),
@@ -699,21 +707,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_stop_words_and_fts_videos_tables_are_renamed_without_losing_data() {
-        let db_path = temp_db_path("legacy_tables");
+    fn legacy_stop_words_table_is_renamed_without_losing_data() {
+        let db_path = temp_db_path("legacy_stopwords");
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
             conn.execute("CREATE TABLE StopWords (Culls TEXT PRIMARY KEY)", []).unwrap();
             conn.execute("INSERT INTO StopWords (Culls) VALUES ('the')", []).unwrap();
-            conn.execute("CREATE VIRTUAL TABLE ftsVideos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
         }
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
         assert!(table_exists(&conn, "stop_words").unwrap());
         assert!(!table_exists(&conn, "StopWords").unwrap());
-        assert!(table_exists(&conn, "fts_videos").unwrap());
-        assert!(!table_exists(&conn, "ftsVideos").unwrap());
         let has_the: i64 = conn.query_row("SELECT COUNT(*) FROM stop_words WHERE culls = 'the'", [], |row| row.get(0)).unwrap();
         assert_eq!(has_the, 1);
         drop(conn);
@@ -721,12 +725,41 @@ mod tests {
     }
 
     #[test]
-    fn preexisting_uppercase_wdbs_column_is_not_duplicated_and_stays_queryable_lowercase() {
-        let db_path = temp_db_path("wdbs_case");
+    fn previously_renamed_fts_videos_table_is_reverted_to_ftsvideos_without_losing_data() {
+        // Simulates a database that already went through the earlier (since-reverted) rename to
+        // `fts_videos` — init_db should rename it back to `ftsVideos`, preserving both the row
+        // data and the FTS index's ability to actually find it (not just the table's existence).
+        let db_path = temp_db_path("fts_videos_revert");
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
-            conn.execute("INSERT INTO videos (video_id, WDBS) VALUES ('v1', ':UAP')", []).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE fts_videos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
+            conn.execute("INSERT INTO videos (video_id, title, summary, tokens, WDBS) VALUES ('v1', 'Some Title', 'Some Summary', 'some title', ':UAP')", []).unwrap();
+            conn.execute("INSERT INTO fts_videos(rowid, title, summary, tokens, wdbs) VALUES (1, 'Some Title', 'Some Summary', 'some title', ':UAP')", []).unwrap();
+        }
+        init_db(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        assert!(table_exists(&conn, "ftsVideos").unwrap());
+        assert!(!table_exists(&conn, "fts_videos").unwrap());
+        let matched_id: String = conn.query_row(
+            "SELECT v.video_id FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE ftsVideos MATCH 'Some'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(matched_id, "v1");
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn preexisting_lowercase_wdbs_column_is_not_duplicated_and_stays_queryable_uppercase() {
+        // Simulates a database whose `videos.wdbs` column was declared lowercase by the earlier
+        // (since-reverted) revision — init_db should recognize it as already satisfying the
+        // (case-insensitive) existence check, rather than adding a second `WDBS` column beside it.
+        let db_path = temp_db_path("wdbs_case");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', wdbs TEXT)", []).unwrap();
+            conn.execute("INSERT INTO videos (video_id, wdbs) VALUES ('v1', ':UAP')", []).unwrap();
         }
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
@@ -736,7 +769,7 @@ mod tests {
             .filter(|n| n.eq_ignore_ascii_case("wdbs"))
             .collect();
         assert_eq!(wdbs_ish_columns.len(), 1, "expected exactly one wdbs-ish column, got {:?}", wdbs_ish_columns);
-        let value: String = conn.query_row("SELECT wdbs FROM videos WHERE video_id = 'v1'", [], |row| row.get(0)).unwrap();
+        let value: String = conn.query_row("SELECT WDBS FROM videos WHERE video_id = 'v1'", [], |row| row.get(0)).unwrap();
         assert_eq!(value, ":UAP");
         drop(conn);
         let _ = fs::remove_file(&db_path);

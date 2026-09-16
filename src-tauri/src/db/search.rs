@@ -11,7 +11,7 @@ use super::summaries::has_real_summary;
 pub(crate) fn video_columns_sql(alias: &str) -> String {
     let cols = [
         "video_id", "title", "author", "handle", "length_seconds", "transcript",
-        "view_count", "published_at", "video_type", "date_added", "tags", "summary", "wdbs",
+        "view_count", "published_at", "video_type", "date_added", "tags", "summary", "WDBS",
     ];
     let prefixed = cols.iter().map(|c| format!("{alias}{c}")).collect::<Vec<_>>().join(", ");
     format!(
@@ -89,7 +89,7 @@ pub(crate) fn filter_kind_where(alias: &str, filter_kind: Option<&str>) -> Strin
 // Builds an FTS5 MATCH expression from free-text search words: each word gets a trailing '*' for
 // prefix matching, and words containing FTS5-special characters get quoted. A word starting with
 // ':' is a Warp Drive designator (e.g. ":UAP", either leftmost by convention or anywhere in the
-// query — see the search revision doc) and gets translated into the storage encoding the wdbs
+// query — see the search revision doc) and gets translated into the storage encoding the WDBS
 // column actually uses (':' -> 'θψ', '-' -> '_'), e.g. ":UAP-GERB-VVV" -> "θψUAP_GERB_VVV*". A
 // bare ':' means "Universe" (no restriction), which is redundant with an unfiltered search, so
 // it's dropped rather than turned into a dead θψ* term. Shared by search_library_videos and
@@ -239,7 +239,7 @@ pub fn search_library_videos(
         }
     } else {
         let where_sql = format!(
-            "fts_videos MATCH ?1
+            "ftsVideos MATCH ?1
                AND (?2 = '' OR v.handle LIKE ?3)
                AND (?4 = '' OR v.video_id LIKE ?5)
                AND (?6 = '' OR {tag_col} LIKE ?7)
@@ -247,7 +247,7 @@ pub fn search_library_videos(
                AND {filter_where}"
         );
         let count_sql = format!(
-            "SELECT COUNT(*) FROM videos AS v JOIN fts_videos ON v.rowid = fts_videos.rowid WHERE {where_sql}"
+            "SELECT COUNT(*) FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql}"
         );
         total = conn.query_row(
             &count_sql,
@@ -263,7 +263,7 @@ pub fn search_library_videos(
         let sql = format!(
             "SELECT {columns}
              FROM videos AS v
-             JOIN fts_videos ON v.rowid = fts_videos.rowid
+             JOIN ftsVideos ON v.rowid = ftsVideos.rowid
              WHERE {where_sql}
              ORDER BY {order}
              LIMIT ?8 OFFSET ?9"

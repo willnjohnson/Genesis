@@ -15,7 +15,7 @@ pub(crate) const DRIVE_LABEL: &str = "Drive";
 #[cfg(not(feature = "genesis"))]
 pub(crate) const DRIVE_LABEL: &str = "Warp Drive";
 
-const VERSION: &str = "0.3.9";
+const VERSION: &str = "0.4.0";
 
 fn get_window_title() -> String {
     format!("{} v{}", APP_NAME, VERSION)
