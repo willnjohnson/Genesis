@@ -461,6 +461,29 @@ pub fn init_db(db_path: &str) -> Result<()> {
         let _ = conn.execute("DROP TRIGGER IF EXISTS trg_kinesis_wdbs_links_cascade_del", []);
     }
 
+    // One-time backfill of tblWDBS rows for any videos.WDBS/video_wdbs_links assignment made
+    // before Kinesis started creating/owning tblWDBS itself (see the tblWDBS block above) —
+    // ensure_wdbs_path_exists was a no-op on a from-scratch database back then, so such an
+    // assignment could exist with no matching tblWDBS row. Left unregistered, curating an
+    // alias/icon on that node via set_wdbs_alias/set_wdbs_icon silently no-ops (their UPDATE
+    // matches zero rows) even though the node visibly shows up in the tree — see
+    // db::wdbs::backfill_missing_wdbs_paths. Gated behind a settings flag rather than repeated on
+    // every launch, same pattern as migratedWdbsPlaceholder/migratedSubscriberCountSentinel above.
+    let migrated_wdbs_backfill: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'migratedWdbsTaxonomyBackfill' AND value = 'true'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if migrated_wdbs_backfill == 0 {
+        super::wdbs::backfill_missing_wdbs_paths(&conn)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('migratedWdbsTaxonomyBackfill', 'true')",
+            [],
+        )?;
+    }
+
     // Initialize default settings if they don't exist
     let defaults = [
         ("showSearch", "true"),
@@ -952,6 +975,33 @@ mod tests {
         assert_eq!(wdbs_ish_columns.len(), 1, "expected exactly one wdbs-ish column, got {:?}", wdbs_ish_columns);
         let value: String = conn.query_row("SELECT WDBS FROM videos WHERE video_id = 'v1'", [], |row| row.get(0)).unwrap();
         assert_eq!(value, ":UAP");
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn backfills_tblwdbs_rows_for_preexisting_video_assignments() {
+        // Simulates a database from before Kinesis created/owned tblWDBS itself (see the tblWDBS
+        // block above): a video already has a WDBS designator, but tblWDBS doesn't exist yet, so
+        // ensure_wdbs_path_exists was a no-op back when that designator was set and no matching
+        // row was ever created for it. Without backfill_missing_wdbs_paths, the node still shows
+        // up fine in get_wdbs_tree (built straight from videos.WDBS), but set_wdbs_alias/
+        // set_wdbs_icon's UPDATE against tblWDBS would silently match zero rows for it.
+        let db_path = temp_db_path("wdbs_backfill");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
+            conn.execute("INSERT INTO videos (video_id, WDBS) VALUES ('v1', 'θψUAP_GERB')", []).unwrap();
+        }
+        init_db(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        let paths: Vec<String> = conn.prepare("SELECT WDBS FROM tblWDBS ORDER BY WDBS").unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(paths, vec![":UAP".to_string(), ":UAP-GERB".to_string()]);
+        let changed = conn.execute("UPDATE tblWDBS SET WDInfo = 'Curated' WHERE WDBS = ':UAP-GERB'", []).unwrap();
+        assert_eq!(changed, 1, "set_wdbs_alias's UPDATE must actually match the backfilled row");
         drop(conn);
         let _ = fs::remove_file(&db_path);
     }

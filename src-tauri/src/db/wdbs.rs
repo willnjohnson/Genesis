@@ -19,7 +19,11 @@ use super::schema::table_exists;
 /// never overwrites curated WDInfo text (the per-node display alias — see set_wdbs_alias).
 pub fn ensure_wdbs_path_exists(db_path: &str, display_path: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
-    if !table_exists(&conn, "tblWDBS")? {
+    ensure_wdbs_path_exists_with_conn(&conn, display_path)
+}
+
+fn ensure_wdbs_path_exists_with_conn(conn: &Connection, display_path: &str) -> Result<()> {
+    if !table_exists(conn, "tblWDBS")? {
         return Ok(());
     }
 
@@ -29,8 +33,8 @@ pub fn ensure_wdbs_path_exists(db_path: &str, display_path: &str) -> Result<()> 
     if segments.is_empty() {
         // The bare root ("Universe"/unassigned) designator itself.
         conn.execute(
-            "INSERT OR IGNORE INTO tblWDBS (Keep, WDBS, Lev, WDID, WDInfo, WDDefault)
-             VALUES ('', ':', 0, '', '', 0)",
+            "INSERT OR IGNORE INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDDefault)
+             VALUES (':', 0, '', '', 0)",
             [],
         )?;
         return Ok(());
@@ -40,10 +44,47 @@ pub fn ensure_wdbs_path_exists(db_path: &str, display_path: &str) -> Result<()> 
         let path = format!(":{}", segments[..i].join("-"));
         let wdid = segments[i - 1];
         conn.execute(
-            "INSERT OR IGNORE INTO tblWDBS (Keep, WDBS, Lev, WDID, WDInfo, WDDefault)
-             VALUES ('', ?1, ?2, ?3, ?3, 0)",
+            "INSERT OR IGNORE INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDDefault)
+             VALUES (?1, ?2, ?3, ?3, 0)",
             params![path, i as i64, wdid],
         )?;
+    }
+    Ok(())
+}
+
+/// One-time backfill (see schema.rs's migratedWdbsTaxonomyBackfill) for tblWDBS rows that a
+/// videos.WDBS/video_wdbs_links assignment never got registered for. Before Kinesis started
+/// creating and owning tblWDBS itself (see schema.rs's tblWDBS block), ensure_wdbs_path_exists
+/// was a no-op on a from-scratch database — the table didn't exist yet — so a designator could
+/// get set on a video without ever gaining a matching tblWDBS row. get_wdbs_tree still shows such
+/// a node fine (it's built straight from videos.WDBS/video_wdbs_links, independent of tblWDBS),
+/// which is what makes this easy to miss: set_wdbs_alias/set_wdbs_icon are UPDATE-only against
+/// tblWDBS (see their own docs), so curating an alias/icon on one of these unregistered nodes
+/// silently no-ops — the UPDATE matches zero rows, no error, nothing ever persists.
+pub(crate) fn backfill_missing_wdbs_paths(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "tblWDBS")? {
+        return Ok(());
+    }
+
+    let mut storage_paths: HashSet<String> = HashSet::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT WDBS FROM videos WHERE WDBS IS NOT NULL AND WDBS != ''
+             UNION
+             SELECT wdbs FROM video_wdbs_links",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows.filter_map(|r| r.ok()) {
+            storage_paths.insert(row);
+        }
+    }
+
+    for storage_path in &storage_paths {
+        if is_unassigned_sentinel(storage_path) {
+            continue;
+        }
+        let display_path = storage_to_display_path(storage_path);
+        ensure_wdbs_path_exists_with_conn(conn, &display_path)?;
     }
     Ok(())
 }
