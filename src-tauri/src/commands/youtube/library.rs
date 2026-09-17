@@ -62,7 +62,6 @@ pub async fn save_video(
     length_seconds: Option<i32>,
     view_count: Option<String>,
     published_at: Option<String>,
-    video_type: Option<String>,
     transcript: Option<String>,
 ) -> Result<Video, String> {
     use crate::types::{parse_view_count, extract_handle_from_url};
@@ -75,7 +74,7 @@ pub async fn save_video(
         }
 
         let has_transcript = !v_data.4.trim().is_empty();
-        let has_summary = db::has_real_summary(&v_data.10);
+        let has_summary = db::has_real_summary(&v_data.9);
         return Ok(Video {
             id: v_data.0,
             title: v_data.1,
@@ -85,12 +84,11 @@ pub async fn save_video(
             author: Some(v_data.2),
             handle: Some(v_data.7),
             status: Some("exists".to_string()),
-            date_added: Some(v_data.9),
+            date_added: Some(v_data.8),
             length_seconds: Some(v_data.3),
-            video_type: Some(v_data.8),
             transcript: Some(v_data.4),
-            summary: Some(v_data.10),
-            tags: Some(v_data.11),
+            summary: Some(v_data.9),
+            tags: Some(v_data.10),
             has_transcript: Some(has_transcript),
             has_summary: Some(has_summary),
             wdbs: None,
@@ -118,15 +116,12 @@ pub async fn save_video(
 
             let author = author.unwrap_or_else(|| "Unknown".to_string());
             let length = length_seconds.unwrap_or(0);
-            let video_type = video_type.unwrap_or_else(|| {
-                if length > 0 && length <= 60 { "short" } else { "standard" }.to_string()
-            });
             let view_count = view_count.as_deref().map(parse_view_count).unwrap_or(0);
             let published_at = published_at.unwrap_or_default();
             let has_summary = summary.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
 
             ensure_biography_seeded(&db_path, &handle, &author, None).await;
-            db::save_video(&db_path, &video_id, title_val, &author, length, transcript_val, view_count, &published_at, &handle, &video_type, summary.as_deref())
+            db::save_video(&db_path, &video_id, title_val, &author, length, transcript_val, view_count, &published_at, &handle, summary.as_deref())
                 .map_err(|e| e.to_string())?;
 
             let date_added = {
@@ -147,7 +142,6 @@ pub async fn save_video(
                 status: Some("saved".to_string()),
                 date_added,
                 length_seconds: Some(length),
-                video_type: Some(video_type),
                 transcript: Some(transcript_val.to_string()),
                 summary,
                 tags: None,
@@ -214,7 +208,6 @@ pub async fn save_video(
     let length = sanitize_int(details["lengthSeconds"].as_str().unwrap_or("0"));
     let view_count = parse_view_count(details["viewCount"].as_str().unwrap_or("0"));
     let published_at = player_web["microformat"]["playerMicroformatRenderer"]["publishDate"].as_str().unwrap_or("");
-    let video_type = if length > 0 && length <= 60 { "short" } else { "standard" };
     let has_summary = summary
         .as_deref()
         .map(|s| !s.trim().is_empty())
@@ -223,7 +216,7 @@ pub async fn save_video(
     // Upsert the biography row before saving the video so save_video's channel-info footer
     // (joined against biographies.handle) can find it on this very first save.
     ensure_biography_seeded(&db_path, &handle, &author, known_channel_id.as_deref()).await;
-    db::save_video(&db_path, &video_id, &title, &author, length, &transcript, view_count, published_at, &handle, video_type, summary.as_deref())
+    db::save_video(&db_path, &video_id, &title, &author, length, &transcript, view_count, published_at, &handle, summary.as_deref())
         .map_err(|e| e.to_string())?;
 
     let date_added = {
@@ -244,7 +237,6 @@ pub async fn save_video(
         status: Some("saved".to_string()),
         date_added,
         length_seconds: Some(length),
-        video_type: Some(video_type.to_string()),
         transcript: Some(transcript),
         summary: summary,
         tags: None,
@@ -265,7 +257,6 @@ const DEFAULT_LIBRARY_PAGE_SIZE: i64 = 300;
 #[command]
 pub async fn fetch_saved_videos(
     app: tauri::AppHandle,
-    video_type: Option<String>,
     filter_kind: Option<String>,
     sort_field: Option<String>,
     sort_order: Option<String>,
@@ -279,7 +270,6 @@ pub async fn fetch_saved_videos(
     let offset = offset.unwrap_or(0).max(0);
     let (videos, total_count) = db::list_videos(
         &db_path,
-        video_type.as_deref(),
         filter_kind.as_deref(),
         sort_field.as_deref(),
         sort_order.as_deref(),
@@ -295,7 +285,6 @@ pub async fn fetch_saved_videos(
 pub async fn search_library(
     app: tauri::AppHandle,
     query: String,
-    video_type: Option<String>,
     filter_kind: Option<String>,
     sort_field: Option<String>,
     sort_order: Option<String>,
@@ -309,7 +298,6 @@ pub async fn search_library(
     let (videos, total_count) = db::search_library_videos(
         &db_path,
         &query,
-        video_type.as_deref(),
         filter_kind.as_deref(),
         sort_field.as_deref(),
         sort_order.as_deref(),
@@ -337,7 +325,7 @@ pub async fn check_video_exists(app: tauri::AppHandle, video_id: String) -> Resu
 pub async fn bulk_save_videos(app: tauri::AppHandle, video_ids: Vec<String>) -> Result<serde_json::Value, String> {
     let mut results = Vec::new();
     for id in video_ids {
-        match save_video(app.clone(), id, None, None, None, None, None, None, None, None, None, None).await {
+        match save_video(app.clone(), id, None, None, None, None, None, None, None, None, None).await {
             Ok(v) => results.push(serde_json::to_value(v).unwrap()),
             Err(e) => results.push(serde_json::json!({"error": e})),
         }

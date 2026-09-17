@@ -15,7 +15,7 @@ pub(crate) const DRIVE_LABEL: &str = "Drive";
 #[cfg(not(feature = "genesis"))]
 pub(crate) const DRIVE_LABEL: &str = "Warp Drive";
 
-const VERSION: &str = "0.4.0";
+const VERSION: &str = "0.4.1";
 
 fn get_window_title() -> String {
     format!("{} v{}", APP_NAME, VERSION)
@@ -175,6 +175,8 @@ pub fn run() {
             commands::add_video_wdbs_link,
             commands::remove_video_wdbs_link,
             commands::bulk_update_wdbs,
+            commands::set_wdbs_alias,
+            commands::set_wdbs_icon,
             // AI / Summarize / Ollama / Venice
             commands::check_ollama,
             commands::check_model_pulled,

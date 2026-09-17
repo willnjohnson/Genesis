@@ -74,8 +74,8 @@ export function useLibrary(
         // than escaping to a library-wide search — see wdbsFilter above.
         if (wdbsFilter) return getVideosByWdbs(wdbsFilter, librarySearch, opts);
         return librarySearch.trim()
-            ? searchLibrary(librarySearch, undefined, opts)
-            : getSavedVideos(undefined, false, opts);
+            ? searchLibrary(librarySearch, opts)
+            : getSavedVideos(false, opts);
     }, [librarySearch, wdbsFilter, filterKind, sortField, sortOrder]);
 
     // Explicitly clearing the category (passing `null` — e.g. the toggle button turning the

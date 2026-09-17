@@ -30,11 +30,10 @@ fn parse_iso8601_duration_secs(s: &str) -> Option<i32> {
     Some(secs.min(i32::MAX as i64) as i32)
 }
 
-/// Fetches statistics + contentDetails for `video_ids` from the YouTube Data API and patches
-/// each matching entry in `videos` in place: view count, length_seconds, and video_type
-/// ("short" for 0 < length <= 60, matching the save-time rule in commands::youtube::library).
-/// Used after both the channel-uploads and keyword-search endpoints, neither of which returns
-/// view counts or durations in their own response.
+/// Fetches statistics + contentDetails for `video_ids` from the YouTube Data API and patches each
+/// matching entry in `videos` in place: view count and length_seconds. Used after both the
+/// channel-uploads and keyword-search endpoints, neither of which returns view counts or
+/// durations in their own response.
 async fn fetch_video_details(client: &reqwest::Client, api_key: &str, video_ids: &[String], videos: &mut [Video]) {
     if video_ids.is_empty() {
         return;
@@ -52,7 +51,6 @@ async fn fetch_video_details(client: &reqwest::Client, api_key: &str, video_ids:
                             v.view_count = item["statistics"]["viewCount"].as_str().unwrap_or("0").to_string();
                             if let Some(len) = item["contentDetails"]["duration"].as_str().and_then(parse_iso8601_duration_secs) {
                                 v.length_seconds = Some(len);
-                                v.video_type = Some(if len > 0 && len <= 60 { "short" } else { "standard" }.to_string());
                             }
                         }
                     }
@@ -223,7 +221,7 @@ pub async fn fetch_channel_videos_v3(
                     view_count: "0".to_string(),
                     author: snippet["channelTitle"].as_str().map(|s| decode_html(s)),
                     handle: None, status: None, date_added: None,
-                    length_seconds: None, video_type: None, transcript: None,
+                    length_seconds: None, transcript: None,
                     summary: None, tags: None, has_transcript: None, has_summary: None, wdbs: None,
                 });
             }
@@ -280,7 +278,7 @@ pub async fn fetch_video_info(_app: tauri::AppHandle, video_id: String) -> Resul
         published_at,
         view_count: parse_view_count(details["viewCount"].as_str().unwrap_or("0")).to_string(),
         author, handle, status: None, date_added: None,
-        length_seconds: None, video_type: None, transcript: None,
+        length_seconds: None, transcript: None,
         summary: None, tags: None, has_transcript: None, has_summary: None, wdbs: None,
     })
 }
@@ -359,7 +357,7 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
                         view_count: "0".to_string(),
                         author: channel_title,
                         handle: None, status: None, date_added: None,
-                        length_seconds: None, video_type: None, transcript: None,
+                        length_seconds: None, transcript: None,
                         summary: None, tags: None, has_transcript: None, has_summary: None, wdbs: None,
                     });
                 }
@@ -378,7 +376,7 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
             .map(|v| v != "false")
             .unwrap_or(true);
         if hide_shorts {
-            videos.retain(|v| v.video_type.as_deref() != Some("short"));
+            videos.retain(|v| !is_short_length(v.length_seconds));
         }
 
         return Ok(VideoResponse { videos, continuation: next_page_token, total_count: None });

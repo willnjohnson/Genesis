@@ -1,7 +1,7 @@
 use crate::Video;
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use super::search::{video_columns_sql, video_row, library_order_by, filter_kind_where, build_fts_query};
 use super::schema::table_exists;
 
@@ -16,7 +16,7 @@ use super::schema::table_exists;
 /// trgVideosBeforeUPD_Videos_ValidateWDBS trigger rejects any designator that doesn't already
 /// exist as "referential integrity violation", including one nobody has ever gotten the chance
 /// to create yet. Existing rows are left untouched (INSERT OR IGNORE): this only fills gaps, it
-/// never overwrites curated WDInfo/WDAlias text.
+/// never overwrites curated WDInfo text (the per-node display alias — see set_wdbs_alias).
 pub fn ensure_wdbs_path_exists(db_path: &str, display_path: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     if !table_exists(&conn, "tblWDBS")? {
@@ -29,8 +29,8 @@ pub fn ensure_wdbs_path_exists(db_path: &str, display_path: &str) -> Result<()> 
     if segments.is_empty() {
         // The bare root ("Universe"/unassigned) designator itself.
         conn.execute(
-            "INSERT OR IGNORE INTO tblWDBS (Keep, WDBS, Lev, WDID, WDInfo, WDAlias, WDDefault)
-             VALUES ('', ':', 0, '', '', '', 0)",
+            "INSERT OR IGNORE INTO tblWDBS (Keep, WDBS, Lev, WDID, WDInfo, WDDefault)
+             VALUES ('', ':', 0, '', '', 0)",
             [],
         )?;
         return Ok(());
@@ -40,11 +40,59 @@ pub fn ensure_wdbs_path_exists(db_path: &str, display_path: &str) -> Result<()> 
         let path = format!(":{}", segments[..i].join("-"));
         let wdid = segments[i - 1];
         conn.execute(
-            "INSERT OR IGNORE INTO tblWDBS (Keep, WDBS, Lev, WDID, WDInfo, WDAlias, WDDefault)
-             VALUES ('', ?1, ?2, ?3, ?3, '', 0)",
+            "INSERT OR IGNORE INTO tblWDBS (Keep, WDBS, Lev, WDID, WDInfo, WDDefault)
+             VALUES ('', ?1, ?2, ?3, ?3, 0)",
             params![path, i as i64, wdid],
         )?;
     }
+    Ok(())
+}
+
+/// Inverse of the "θψ"/"_" storage encoding build_nodes below (and commands::wdbs::
+/// encode_wdbs_display) apply — turns a WdbsNode.path (e.g. "θψCRYPTO_JOHN") back into the ":"/
+/// "-" display form tblWDBS.WDBS stores (":CRYPTO-JOHN"), so a tree node's alias can be looked up
+/// or updated by joining/matching against it.
+fn storage_to_display_path(storage_path: &str) -> String {
+    let body = storage_path.strip_prefix("θψ").unwrap_or(storage_path);
+    format!(":{}", body.replace('_', "-"))
+}
+
+/// Sets (or clears, given a blank `alias`) the curated display alias — tblWDBS.WDInfo — for one
+/// Warp Drive taxonomy node, so components/WdbsTreePanel.tsx can show it as a tooltip/detail
+/// alongside the node's raw segment name (e.g. "JOHN" aliased to "YOUTUBER"). `storage_path` is a
+/// WdbsNode.path value. A no-op when tblWDBS isn't present (from-scratch/compatibility database —
+/// see ensure_wdbs_path_exists) since there's nowhere to persist it; the row is expected to
+/// already exist there (every level of every assigned WDBS value is registered via
+/// ensure_wdbs_path_exists as soon as it's first used), so this only ever updates, never inserts.
+pub fn set_wdbs_alias(db_path: &str, storage_path: &str, alias: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    if !table_exists(&conn, "tblWDBS")? {
+        return Ok(());
+    }
+    let display_path = storage_to_display_path(storage_path);
+    conn.execute(
+        "UPDATE tblWDBS SET WDInfo = ?1 WHERE WDBS = ?2",
+        params![alias.trim(), display_path],
+    )?;
+    Ok(())
+}
+
+/// Sets (or clears, given '') the curated icon — tblWDBS.WDIcon — for one Warp Drive taxonomy
+/// node, shown to the left of its segment name in the tree (see components/WdbsTreePanel.tsx's
+/// "Edit Icon" context menu). `storage_path` is a WdbsNode.path value. Validating `icon` against
+/// the fixed picker choices is commands::wdbs::set_wdbs_icon's job (it owns the user-facing error
+/// message); this just persists whatever it's given, same trust boundary as set_wdbs_alias above.
+/// A no-op when tblWDBS isn't present, for the same reason set_wdbs_alias is.
+pub fn set_wdbs_icon(db_path: &str, storage_path: &str, icon: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    if !table_exists(&conn, "tblWDBS")? {
+        return Ok(());
+    }
+    let display_path = storage_to_display_path(storage_path);
+    conn.execute(
+        "UPDATE tblWDBS SET WDIcon = ?1 WHERE WDBS = ?2",
+        params![icon.trim(), display_path],
+    )?;
     Ok(())
 }
 
@@ -61,7 +109,25 @@ pub struct WdbsNode {
     pub path: String,
     pub count: i64,
     pub children: Vec<WdbsNode>,
+    // The node's curated display alias (tblWDBS.WDInfo — see set_wdbs_alias), when it differs
+    // from `segment`. `None` both when nothing's been curated yet and when the running database
+    // doesn't have the production tblWDBS schema at all.
+    pub alias: Option<String>,
+    // The node's curated icon (tblWDBS.WDIcon — see set_wdbs_icon), one of WDBS_ICONS. `None`
+    // when unset, when the running database doesn't have tblWDBS, or when the stored value
+    // doesn't match any current icon (e.g. hand-edited, or a value from a since-removed choice).
+    pub icon: Option<String>,
 }
+
+/// The fixed set of icons a Warp Drive taxonomy node's WDIcon can hold — see
+/// components/WdbsIconMenu.tsx for the matching picker UI and lucide icon per key.
+/// commands::wdbs::set_wdbs_icon rejects anything outside this list; get_wdbs_tree (below) treats
+/// a stored value outside it the same as unset, rather than surfacing a value the tree can't
+/// actually render an icon for.
+pub const WDBS_ICONS: &[&str] = &[
+    "star", "company", "person", "music", "sports", "gaming", "podcast", "fitness", "food",
+    "news", "education", "comedy", "tech", "finance", "guides",
+];
 
 struct TrieNode {
     video_ids: HashSet<String>,
@@ -74,7 +140,12 @@ impl TrieNode {
     }
 }
 
-fn build_nodes(trie: &TrieNode, prefix: &str) -> Vec<WdbsNode> {
+fn build_nodes(
+    trie: &TrieNode,
+    prefix: &str,
+    aliases: &HashMap<String, String>,
+    icons: &HashMap<String, String>,
+) -> Vec<WdbsNode> {
     trie.children
         .iter()
         .map(|(segment, child)| {
@@ -83,11 +154,27 @@ fn build_nodes(trie: &TrieNode, prefix: &str) -> Vec<WdbsNode> {
             } else {
                 format!("{}_{}", prefix, segment)
             };
+            let display_path = storage_to_display_path(&path);
+            // Suppressed when it's just the uncurated default (WDInfo seeded to the segment's own
+            // name by ensure_wdbs_path_exists) or blank (explicitly cleared) — either way there's
+            // nothing more informative to show than the segment name already visible in the tree.
+            let alias = aliases
+                .get(&display_path)
+                .filter(|a| !a.is_empty() && *a != segment)
+                .cloned();
+            // Unlike alias, a stored value with no matching current icon is treated as unset
+            // rather than passed through — the tree has nothing to render for it either way.
+            let icon = icons
+                .get(&display_path)
+                .filter(|i| WDBS_ICONS.contains(&i.as_str()))
+                .cloned();
             WdbsNode {
                 segment: segment.clone(),
                 count: child.video_ids.len() as i64,
-                children: build_nodes(child, &path),
+                children: build_nodes(child, &path, aliases, icons),
                 path,
+                alias,
+                icon,
             }
         })
         // BTreeMap already yields keys in sorted order, so children come out alphabetized.
@@ -109,6 +196,23 @@ fn is_unassigned_sentinel(wdbs: &str) -> bool {
 /// one shot and build the whole tree in memory rather than doing per-level round trips.
 pub fn get_wdbs_tree(db_path: &str) -> Result<Vec<WdbsNode>> {
     let conn = Connection::open(db_path)?;
+
+    // Curated aliases/icons (tblWDBS.WDInfo/WDIcon), each keyed by display path — both absent
+    // entirely on a database without tblWDBS, in which case every node's `alias`/`icon` just come
+    // back `None` (see build_nodes).
+    let mut aliases: HashMap<String, String> = HashMap::new();
+    let mut icons: HashMap<String, String> = HashMap::new();
+    if table_exists(&conn, "tblWDBS")? {
+        let mut stmt = conn.prepare("SELECT WDBS, WDInfo, WDIcon FROM tblWDBS")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        for row in rows.filter_map(|r| r.ok()) {
+            let (path, info, icon) = row;
+            aliases.insert(path.clone(), info);
+            icons.insert(path, icon);
+        }
+    }
 
     let mut stmt = conn.prepare(
         "SELECT video_id, WDBS FROM videos WHERE WDBS IS NOT NULL AND WDBS != ''
@@ -141,7 +245,7 @@ pub fn get_wdbs_tree(db_path: &str) -> Result<Vec<WdbsNode>> {
         node.video_ids.insert(video_id);
     }
 
-    Ok(build_nodes(&root, ""))
+    Ok(build_nodes(&root, "", &aliases, &icons))
 }
 
 /// Pages videos belonging to one Warp Drive category: everything whose canonical WDBS, or any

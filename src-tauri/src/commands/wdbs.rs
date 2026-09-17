@@ -129,6 +129,33 @@ pub async fn fetch_videos_by_wdbs(
     Ok(VideoResponse { videos, continuation: None, total_count: Some(total_count) })
 }
 
+/// Sets (or clears, given a blank `alias`) the curated display alias for one Warp Drive taxonomy
+/// node — tblWDBS.WDInfo — shown as a tooltip/detail alongside its raw segment name in the tree
+/// (see components/WdbsTreePanel.tsx's "Edit Alias" context menu). `path` is a WdbsNode.path
+/// value (storage-encoded). A no-op against a database without the production tblWDBS schema.
+#[command]
+pub async fn set_wdbs_alias(app: tauri::AppHandle, path: String, alias: String) -> Result<(), String> {
+    let db_path = get_db_path(&app);
+    db::set_wdbs_alias(&db_path, &path, &alias).map_err(|e| e.to_string())
+}
+
+/// Sets (or clears, given a blank `icon`) the curated icon for one Warp Drive taxonomy node —
+/// tblWDBS.WDIcon — shown to the left of its segment name in the tree (see
+/// components/WdbsTreePanel.tsx's "Edit Icon" context menu). `path` is a WdbsNode.path value.
+/// Rejects anything outside db::WDBS_ICONS with a plain-language message rather than letting a
+/// stray/garbled value get stuck in the taxonomy with nothing able to render it — db::set_wdbs_icon
+/// itself trusts whatever it's given, so this is the one place that boundary is enforced. A no-op
+/// against a database without the production tblWDBS schema.
+#[command]
+pub async fn set_wdbs_icon(app: tauri::AppHandle, path: String, icon: String) -> Result<(), String> {
+    let db_path = get_db_path(&app);
+    let icon = icon.trim();
+    if !icon.is_empty() && !db::WDBS_ICONS.contains(&icon) {
+        return Err(format!("\"{}\" isn't a recognized {} icon.", icon, DRIVE_LABEL));
+    }
+    db::set_wdbs_icon(&db_path, &path, icon).map_err(|e| e.to_string())
+}
+
 /// Every Warp Drive path currently assigned to at least one video (storage-encoded), for
 /// autocomplete when assigning an existing category rather than typing one from scratch.
 #[command]

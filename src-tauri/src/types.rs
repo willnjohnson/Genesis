@@ -23,6 +23,15 @@ pub fn parse_view_count(view_count_str: &str) -> i64 {
     num_str.parse::<i64>().unwrap_or(0) * multiplier
 }
 
+/// Whether a video of this length counts as a YouTube Short (vertical, <= 60s) for the
+/// `hideShortsInSearch` filter — see commands::youtube::metadata::fetch_video_details's search-
+/// results filtering. Computed on demand rather than persisted anywhere (the `videos` table's own
+/// former `video_type` column was retired as dead weight — nothing in the shipped UI ever read it
+/// back for a saved video), since this is the only place the classification is actually needed.
+pub fn is_short_length(length_seconds: Option<i32>) -> bool {
+    matches!(length_seconds, Some(l) if l > 0 && l <= 60)
+}
+
 /// Extract YouTube handle from URL (e.g., "https://www.youtube.com/@handle")
 pub fn extract_handle_from_url(url: &str) -> Option<String> {
     if url.contains("@") {
@@ -63,8 +72,6 @@ pub struct Video {
     pub date_added: Option<String>,
     #[serde(rename = "lengthSeconds")]
     pub length_seconds: Option<i32>,
-    #[serde(rename = "videoType")]
-    pub video_type: Option<String>,
     pub transcript: Option<String>,
     pub summary: Option<String>,
     pub tags: Option<String>,

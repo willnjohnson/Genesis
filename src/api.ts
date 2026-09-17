@@ -21,7 +21,6 @@ export interface Video {
     hasTranscript?: boolean;
     hasSummary?: boolean;
     lengthSeconds?: number;
-    videoType?: string;
     // Warp Drive taxonomy designator, in storage encoding (e.g. "θψUAP_GERB_PND") — empty/absent
     // means unassigned ("Universe"). See updateVideoWdbs for the user-facing ":UAP-GERB-PND" form.
     wdbs?: string;
@@ -106,7 +105,6 @@ export async function saveVideo(video: Video, transcript: string, summary?: stri
         lengthSeconds: video.lengthSeconds,
         viewCount: video.viewCount,
         publishedAt: video.publishedAt,
-        videoType: video.videoType,
         transcript,
     });
 }
@@ -115,9 +113,8 @@ export async function searchVideos(query: string, continuation?: string | null):
     return await invoke("search_videos", { query, continuation });
 }
 
-export async function getSavedVideos(videoType?: string, includeContent?: boolean, opts?: LibraryQueryOptions): Promise<SearchResponse> {
+export async function getSavedVideos(includeContent?: boolean, opts?: LibraryQueryOptions): Promise<SearchResponse> {
     return await invoke("fetch_saved_videos", {
-        videoType,
         includeContent,
         filterKind: opts?.filterKind,
         sortField: opts?.sortField,
@@ -127,10 +124,9 @@ export async function getSavedVideos(videoType?: string, includeContent?: boolea
     });
 }
 
-export async function searchLibrary(query: string, videoType?: string, opts?: LibraryQueryOptions): Promise<SearchResponse> {
+export async function searchLibrary(query: string, opts?: LibraryQueryOptions): Promise<SearchResponse> {
     return await invoke("search_library", {
         query,
-        videoType,
         filterKind: opts?.filterKind,
         sortField: opts?.sortField,
         sortOrder: opts?.sortOrder,
@@ -497,10 +493,42 @@ export interface WdbsNode {
     path: string;
     count: number;
     children: WdbsNode[];
+    // The node's curated display alias (tblWDBS.WDInfo), when one's been set and differs from
+    // `segment` — null both when nothing's been curated and when the database doesn't have the
+    // production tblWDBS schema at all. See setWdbsAlias.
+    alias: string | null;
+    // The node's curated icon (tblWDBS.WDIcon) — one of WDBS_ICON_KEYS, or null when unset/
+    // unrecognized/no tblWDBS. See setWdbsIcon.
+    icon: string | null;
 }
+
+// The fixed set of icons a Warp Drive taxonomy node's WDIcon can hold — must match the Rust side's
+// db::WDBS_ICONS exactly (that's what commands::wdbs::set_wdbs_icon validates against). Order here
+// is just the order they're offered in WdbsIconMenu's picker.
+export const WDBS_ICON_KEYS = [
+    "star", "company", "person", "music", "sports", "gaming", "podcast", "fitness", "food",
+    "news", "education", "comedy", "tech", "finance", "guides",
+] as const;
+export type WdbsIconKey = typeof WDBS_ICON_KEYS[number];
 
 export async function getWdbsTree(): Promise<WdbsNode[]> {
     return await invoke("get_wdbs_tree");
+}
+
+// Sets (or clears, given '') the curated display alias for one Warp Drive taxonomy node — shown
+// as a tooltip/detail alongside its raw segment name (see components/WdbsTreePanel.tsx's "Edit
+// Alias" context menu). `path` is a WdbsNode.path value. A no-op against a database without the
+// production tblWDBS schema.
+export async function setWdbsAlias(path: string, alias: string): Promise<void> {
+    await invoke("set_wdbs_alias", { path, alias });
+}
+
+// Sets (or clears, given '') the curated icon for one Warp Drive taxonomy node — shown to the left
+// of its segment name in the tree (see components/WdbsTreePanel.tsx's "Edit Icon" context menu).
+// `path` is a WdbsNode.path value; `icon` must be one of WDBS_ICON_KEYS or ''. A no-op against a
+// database without the production tblWDBS schema.
+export async function setWdbsIcon(path: string, icon: string): Promise<void> {
+    await invoke("set_wdbs_icon", { path, icon });
 }
 
 // `wdbsPath` is a WdbsNode.path value (or any encoded prefix) — selects that category and

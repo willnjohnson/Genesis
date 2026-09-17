@@ -4,14 +4,14 @@ use rusqlite::{params, Connection, Result};
 use super::summaries::has_real_summary;
 
 // Canonical column order for every video_row() caller, as a single source of truth: video_id,
-// title, author, handle, length_seconds, transcript, view_count, published_at, video_type,
-// date_added, tags, summary, has_transcript, has_summary. `alias` is an optional table-alias
-// prefix (e.g. "v.") for queries that join against other tables; pass "" for a plain single-table
-// SELECT. Used by search_library_videos below and by db::videos::list_videos.
+// title, author, handle, length_seconds, transcript, view_count, published_at, date_added, tags,
+// summary, has_transcript, has_summary. `alias` is an optional table-alias prefix (e.g. "v.") for
+// queries that join against other tables; pass "" for a plain single-table SELECT. Used by
+// search_library_videos below and by db::videos::list_videos.
 pub(crate) fn video_columns_sql(alias: &str) -> String {
     let cols = [
         "video_id", "title", "author", "handle", "length_seconds", "transcript",
-        "view_count", "published_at", "video_type", "date_added", "tags", "summary", "WDBS",
+        "view_count", "published_at", "date_added", "tags", "summary", "WDBS",
     ];
     let prefixed = cols.iter().map(|c| format!("{alias}{c}")).collect::<Vec<_>>().join(", ");
     format!(
@@ -32,7 +32,7 @@ pub(crate) fn video_row(row: &rusqlite::Row, include_content: bool) -> rusqlite:
         Some(0) | None => "Saved".to_string(),
         Some(n) => n.to_string(),
     };
-    let raw_summary: Option<String> = row.get(11).unwrap_or(None);
+    let raw_summary: Option<String> = row.get(10).unwrap_or(None);
     Ok(Video {
         id: row.get::<_, String>(0).unwrap_or_default(),
         title: row.get::<_, Option<String>>(1).unwrap_or(None).unwrap_or_else(|| "Unknown".to_string()),
@@ -42,14 +42,13 @@ pub(crate) fn video_row(row: &rusqlite::Row, include_content: bool) -> rusqlite:
         thumbnail: format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", row.get::<_, String>(0).unwrap_or_default()),
         published_at: row.get::<_, Option<String>>(7).unwrap_or(None).unwrap_or_else(|| "".to_string()),
         status: Some("saved".to_string()),
-        date_added: row.get::<_, Option<String>>(9).unwrap_or(None),
+        date_added: row.get::<_, Option<String>>(8).unwrap_or(None),
         handle: row.get::<_, Option<String>>(3).unwrap_or(None),
-        video_type: row.get::<_, Option<String>>(8).unwrap_or(None),
         transcript: if include_content { row.get::<_, Option<String>>(5).unwrap_or(None) } else { None },
-        tags: row.get::<_, Option<String>>(10).unwrap_or(None),
+        tags: row.get::<_, Option<String>>(9).unwrap_or(None),
         summary: if include_content { raw_summary.clone() } else { None },
-        wdbs: row.get::<_, Option<String>>(12).unwrap_or(None),
-        has_transcript: Some(row.get::<_, i64>(13).unwrap_or(0) > 0),
+        wdbs: row.get::<_, Option<String>>(11).unwrap_or(None),
+        has_transcript: Some(row.get::<_, i64>(12).unwrap_or(0) > 0),
         has_summary: Some(raw_summary.as_deref().map(has_real_summary).unwrap_or(false)),
     })
 }
@@ -139,7 +138,6 @@ pub(crate) fn library_order_by(alias: &str, sort_field: Option<&str>, sort_order
 pub fn search_library_videos(
     db_path: &str,
     query: &str,
-    video_type_filter: Option<&str>,
     filter_kind: Option<&str>,
     sort_field: Option<&str>,
     sort_order: Option<&str>,
@@ -177,11 +175,6 @@ pub fn search_library_videos(
 
     let free_text = remaining.trim();
 
-    let video_type_where = match video_type_filter {
-        Some("short") => "v.video_type = 'short'",
-        Some("standard") => "v.video_type = 'standard'",
-        _ => "1=1",
-    };
     let filter_where = filter_kind_where("v.", filter_kind);
     let columns = video_columns_sql("v.");
     let order = library_order_by("v.", sort_field, sort_order);
@@ -207,7 +200,6 @@ pub fn search_library_videos(
             "(?1 = '' OR v.handle LIKE ?2)
                AND (?3 = '' OR v.video_id LIKE ?4)
                AND (?5 = '' OR {tag_col} LIKE ?6)
-               AND {video_type_where}
                AND {filter_where}"
         );
         let count_sql = format!("SELECT COUNT(*) FROM videos AS v WHERE {where_sql}");
@@ -243,7 +235,6 @@ pub fn search_library_videos(
                AND (?2 = '' OR v.handle LIKE ?3)
                AND (?4 = '' OR v.video_id LIKE ?5)
                AND (?6 = '' OR {tag_col} LIKE ?7)
-               AND {video_type_where}
                AND {filter_where}"
         );
         let count_sql = format!(

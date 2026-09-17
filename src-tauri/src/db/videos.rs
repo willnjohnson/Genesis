@@ -4,17 +4,16 @@ use super::summaries::{append_channel_info_footer, clean_blockquote_lines, clear
 use super::settings::get_setting_bool;
 use super::search::{regenerate_tokens_from_transcript, video_row, video_columns_sql, filter_kind_where, library_order_by};
 
-/// Pages the Library grid: optionally filtered to one `video_type` ("short"/"standard") and one
-/// `filter_kind` ("transcript"/"summary"/None-or-"all"), ordered per `sort_field`/`sort_order`
-/// (see `library_order_by`), and capped to `limit` rows starting at `offset` so a several-
-/// thousand-video library never has to be pulled into memory at once. Returns the page of videos
-/// alongside the total count of rows matching the filters (ignoring limit/offset), which the
-/// frontend uses for "X of Y results" and to know whether there's another page to load.
-/// `include_content` gates whether transcript/summary text is decoded and returned at all — pass
-/// `false` for grid/list views that only need metadata and the has_transcript/has_summary flags.
+/// Pages the Library grid: optionally filtered by `filter_kind` ("transcript"/"summary"/
+/// None-or-"all"), ordered per `sort_field`/`sort_order` (see `library_order_by`), and capped to
+/// `limit` rows starting at `offset` so a several-thousand-video library never has to be pulled
+/// into memory at once. Returns the page of videos alongside the total count of rows matching the
+/// filters (ignoring limit/offset), which the frontend uses for "X of Y results" and to know
+/// whether there's another page to load. `include_content` gates whether transcript/summary text
+/// is decoded and returned at all — pass `false` for grid/list views that only need metadata and
+/// the has_transcript/has_summary flags.
 pub fn list_videos(
     db_path: &str,
-    video_type_filter: Option<&str>,
     filter_kind: Option<&str>,
     sort_field: Option<&str>,
     sort_order: Option<&str>,
@@ -24,13 +23,7 @@ pub fn list_videos(
 ) -> Result<(Vec<Video>, i64)> {
     let conn = Connection::open(db_path)?;
 
-    let video_type_where = match video_type_filter {
-        Some("short") => "video_type = 'short'",
-        Some("standard") => "video_type = 'standard'",
-        _ => "1=1",
-    };
-    let filter_where = filter_kind_where("", filter_kind);
-    let where_sql = format!("{video_type_where} AND {filter_where}");
+    let where_sql = filter_kind_where("", filter_kind);
 
     let total: i64 = conn.query_row(
         &format!("SELECT COUNT(*) FROM videos WHERE {where_sql}"),
@@ -67,15 +60,14 @@ pub fn save_video(
     view_count: i64,
     published_at: &str,
     handle: &str,
-    video_type: &str,
     summary: Option<&str>,
 ) -> Result<()> {
     let video_id = video_id.trim();
     let published_at = normalize_published_at(published_at);
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "INSERT INTO videos (video_id, title, author, length_seconds, transcript, view_count, published_at, handle, video_type, summary)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "INSERT INTO videos (video_id, title, author, length_seconds, transcript, view_count, published_at, handle, summary)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(video_id) DO UPDATE SET
             title=excluded.title,
             author=excluded.author,
@@ -84,9 +76,8 @@ pub fn save_video(
             view_count=excluded.view_count,
             published_at=excluded.published_at,
             handle=excluded.handle,
-            video_type=excluded.video_type,
             summary=COALESCE(excluded.summary, videos.summary)",
-        params![video_id, title, author, length, transcript, view_count, published_at, handle, video_type, summary],
+        params![video_id, title, author, length, transcript, view_count, published_at, handle, summary],
     )?;
     // The production database's own INSERT trigger defaults a new video's WDBS to the raw "θψ"
     // prefix marker when it can't infer anything smarter (see the schema handoff doc). Since
@@ -138,9 +129,9 @@ pub fn get_transcript(db_path: &str, video_id: &str) -> Result<Option<String>> {
 }
 
 /// Fetches full video details as a fixed-order tuple: (video_id, title, author, length_seconds,
-/// transcript, view_count, published_at, handle, video_type, date_added, summary, tags).
-/// Callers index into it positionally (see e.g. commands/youtube.rs's save_video and
-/// ollama::summarize_transcript) — keep that order in sync with any change here.
+/// transcript, view_count, published_at, handle, date_added, summary, tags). Callers index into
+/// it positionally (see e.g. commands/youtube.rs's save_video and ollama::summarize_transcript)
+/// — keep that order in sync with any change here.
 pub fn get_video_full(
     db_path: &str,
     video_id: &str,
@@ -157,11 +148,10 @@ pub fn get_video_full(
         String,
         String,
         String,
-        String,
     )>,
 > {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT video_id, title, author, length_seconds, transcript, view_count, published_at, handle, video_type, date_added, summary, tags FROM videos WHERE video_id = ?")?;
+    let mut stmt = conn.prepare("SELECT video_id, title, author, length_seconds, transcript, view_count, published_at, handle, date_added, summary, tags FROM videos WHERE video_id = ?")?;
     let mut rows = stmt.query(params![video_id])?;
     if let Some(row) = rows.next()? {
         Ok(Some((
@@ -185,14 +175,11 @@ pub fn get_video_full(
                 .unwrap_or_else(|| "".to_string()),
             row.get::<_, Option<String>>(8)
                 .unwrap_or(None)
-                .unwrap_or_else(|| "standard".to_string()),
+                .unwrap_or_else(|| "".to_string()),
             row.get::<_, Option<String>>(9)
                 .unwrap_or(None)
                 .unwrap_or_else(|| "".to_string()),
             row.get::<_, Option<String>>(10)
-                .unwrap_or(None)
-                .unwrap_or_else(|| "".to_string()),
-            row.get::<_, Option<String>>(11)
                 .unwrap_or(None)
                 .unwrap_or_else(|| "".to_string()),
         )))
@@ -202,40 +189,30 @@ pub fn get_video_full(
 }
 
 pub fn get_db_stats(db_path: &str) -> Result<i64> {
-    get_video_count(db_path, None, None)
+    get_video_count(db_path, None)
 }
 
-/// Counts videos matching an optional type filter and an optional case-sensitive substring
-/// match across title/author/handle/transcript (manually escaped and inlined into the query,
-/// not parameterized, since the LIKE pattern itself is built per-column here).
+/// Counts videos matching an optional case-sensitive substring match across title/author/handle/
+/// transcript (manually escaped and inlined into the query, not parameterized, since the LIKE
+/// pattern itself is built per-column here).
 pub fn get_video_count(
     db_path: &str,
-    video_type_filter: Option<&str>,
     search_query: Option<&str>,
 ) -> Result<i64> {
     let conn = Connection::open(db_path)?;
-
-    let video_type_where = match video_type_filter {
-        Some("short") => "video_type = 'short'",
-        Some("standard") => "video_type = 'standard'",
-        _ => "1=1",
-    };
 
     let search_where = match search_query {
         Some(q) if !q.is_empty() => {
             let escaped = q.replace('\'', "''");
             format!(
-                " AND (title LIKE '%{}%' OR author LIKE '%{}%' OR handle LIKE '%{}%' OR transcript LIKE '%{}%')",
+                "(title LIKE '%{}%' OR author LIKE '%{}%' OR handle LIKE '%{}%' OR transcript LIKE '%{}%')",
                 escaped, escaped, escaped, escaped
             )
         }
-        _ => String::new(),
+        _ => "1=1".to_string(),
     };
 
-    let query = format!(
-        "SELECT COUNT(*) FROM videos WHERE {} {}",
-        video_type_where, search_where
-    );
+    let query = format!("SELECT COUNT(*) FROM videos WHERE {}", search_where);
 
     let mut stmt = conn.prepare(&query)?;
     let count: i64 = stmt.query_row([], |row| row.get(0))?;

@@ -766,6 +766,7 @@ function App() {
                                             setDriveFilterLabel(label);
                                         }}
                                         refreshKey={driveVersion}
+                                        allowEditAlias={allowEditWDBS}
                                     />
                                     {allowEditWDBS && (
                                         <button

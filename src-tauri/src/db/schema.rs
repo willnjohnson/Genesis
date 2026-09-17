@@ -31,6 +31,22 @@ pub(crate) fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> 
     Ok(count > 0)
 }
 
+// Now that Kinesis creates its own bare-bones tblWDBS (see below) on every database, its mere
+// presence no longer tells apart a from-scratch/local database from a hand-maintained production
+// one with the real WDBS referential-integrity schema — both have the table now. Checking for one
+// of that schema's own triggers by name instead still distinguishes them: only a genuine
+// production database has ever created trgVideosBeforeUPD_Videos_ValidateWDBS (Kinesis never
+// creates it itself), so its presence is what the compatibility-trigger gate further down actually
+// needs to test for.
+fn trigger_exists(conn: &Connection, trigger_name: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?",
+        params![trigger_name],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 // Used to idempotently ALTER TABLE ... ADD COLUMN for columns introduced after a database was
 // first created — SQLite has no "ADD COLUMN IF NOT EXISTS", so callers check this first. Case-
 // folded so e.g. a pre-existing `WDBS` is recognized as satisfying a check for `wdbs` — SQLite
@@ -143,7 +159,47 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // genuinely different table name than `fts_videos` (differs by more than case, an added
     // underscore), so a database that already went through the earlier rename needs an actual
     // ALTER TABLE to come back, the same way the StopWords rename above needs one to go forward.
-    if table_exists(&conn, "fts_videos")? && !table_exists(&conn, "ftsVideos")? {
+    //
+    // Both names can end up coexisting — observed in practice on a database copied mid-migration
+    // (e.g. via a db-folder-location change that copies the file, then runs this same init_db
+    // against the copy) — where one is the real, populated FTS index and the other is an empty
+    // stray from a `CREATE VIRTUAL TABLE IF NOT EXISTS` that ran before the rename below had a
+    // chance to. Reconciled by keeping whichever one actually finds a real title in a MATCH query
+    // and dropping the other — NOT by comparing `SELECT COUNT(*)` between them (an external-
+    // content FTS5 table's plain COUNT(*) just passes through the content table's own row count
+    // regardless of whether its index was ever populated, so an empty, never-indexed stray reports
+    // the exact same count as a fully-indexed one) and NOT via `integrity-check` either (that only
+    // checks the index's internal consistency, not whether it actually reflects the content
+    // table's current rows — an empty index is trivially "consistent" with itself and passes it
+    // too). Deliberately conservative: if the evidence isn't clear-cut (no usable sample word, or
+    // both/neither table matches it), nothing is dropped — an extra unused table sitting around is
+    // a mess to clean up later, but silently deleting the wrong one because a heuristic guessed
+    // wrong is real data loss, so ambiguity here defaults to doing nothing rather than guessing.
+    if table_exists(&conn, "fts_videos")? && table_exists(&conn, "ftsVideos")? {
+        let sample_word: Option<String> = conn
+            .query_row("SELECT title FROM videos WHERE title IS NOT NULL AND title != ''", [], |row| row.get::<_, String>(0))
+            .ok()
+            .and_then(|title| {
+                title.split_whitespace()
+                    .find(|w| w.len() > 2 && w.chars().all(|c| c.is_alphanumeric()))
+                    .map(|w| w.to_string())
+            });
+        if let Some(word) = sample_word {
+            let phrase = format!("\"{word}\"");
+            let fts_videos_matches: i64 = conn
+                .query_row("SELECT COUNT(*) FROM fts_videos WHERE fts_videos MATCH ?1", params![phrase], |row| row.get(0))
+                .unwrap_or(0);
+            let ftsvideos_matches: i64 = conn
+                .query_row("SELECT COUNT(*) FROM ftsVideos WHERE ftsVideos MATCH ?1", params![phrase], |row| row.get(0))
+                .unwrap_or(0);
+            if fts_videos_matches > 0 && ftsvideos_matches == 0 {
+                conn.execute("DROP TABLE ftsVideos", [])?;
+                conn.execute("ALTER TABLE fts_videos RENAME TO ftsVideos", [])?;
+            } else if ftsvideos_matches > 0 && fts_videos_matches == 0 {
+                conn.execute("DROP TABLE fts_videos", [])?;
+            }
+        }
+    } else if table_exists(&conn, "fts_videos")? {
         conn.execute("ALTER TABLE fts_videos RENAME TO ftsVideos", [])?;
     }
 
@@ -158,7 +214,6 @@ pub fn init_db(db_path: &str) -> Result<()> {
             transcript   TEXT,
             summary      TEXT,
             view_count   INTEGER DEFAULT 0,
-            video_type   TEXT DEFAULT 'standard',
             published_at DATETIME,
             date_added   DATETIME DEFAULT CURRENT_TIMESTAMP,
             tags         TEXT DEFAULT '',
@@ -181,6 +236,19 @@ pub fn init_db(db_path: &str) -> Result<()> {
         conn.execute("ALTER TABLE videos ADD COLUMN tokens TEXT DEFAULT ''", [])?;
     }
 
+    // `video_type` ("short"/"standard", derived from length) never ended up wired to any shipped
+    // UI — no badge/filter reachable from the Library grid actually used it — and is being
+    // retired as dead weight. DROP INDEX before DROP COLUMN so a database that still has the
+    // index doesn't leave it dangling. Best-effort (not `?`): a hand-maintained production
+    // database may still have its own trigger (trgVideosBeforeINS_Videos_SyncBioHandle)
+    // referencing this column until that's updated separately on that database directly — SQLite
+    // refuses to drop a column any trigger still references, and that shouldn't block the rest of
+    // init_db (or app startup) from succeeding while it's pending.
+    if column_exists(&conn, "videos", "video_type")? {
+        let _ = conn.execute("DROP INDEX IF EXISTS idxVideosVideoType", []);
+        let _ = conn.execute("ALTER TABLE videos DROP COLUMN video_type", []);
+    }
+
     // Indexes backing the Library grid's sort/filter options. Without these, sorting a
     // several-thousand-row library by e.g. view count is a full table scan + temp-b-tree sort
     // on every query, even with a small LIMIT (verified via EXPLAIN QUERY PLAN). IF NOT EXISTS
@@ -188,21 +256,65 @@ pub fn init_db(db_path: &str) -> Result<()> {
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosDateAdded ON videos(date_added)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosPublishedAt ON videos(published_at)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosViewCount ON videos(view_count)", []);
-    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosVideoType ON videos(video_type)", []);
 
     // Warp Drive taxonomy: `WDBS` indirectly ties a video to a row in `tblWDBS` (the Warp Drive
-    // repository). `tblWDBS` itself, plus the computed/IMMUTABLE `fkWDBS` column that directly
-    // enforces that reference, are owned entirely by the hand-maintained production database this
-    // app is expected to run against — Kinesis itself never creates them (see the "internal use
-    // only" note in the schema handoff doc). `WDBS` is added here as a plain nullable column so
-    // Kinesis keeps working end-to-end (search, display, edit) against a from-scratch database
-    // too, without trying to reproduce the taxonomy machinery. No migration is needed for a
-    // database whose column ended up declared lowercase `wdbs` by an earlier revision of this file
-    // — SQLite matches identifiers case-insensitively, so `WDBS` and `wdbs` already refer to the
-    // exact same column (this check folds case for exactly that reason), and every query in this
-    // codebase now spells it uppercase regardless of which case a given database has it under.
+    // repository) — see db/wdbs.rs. The computed/IMMUTABLE `fkWDBS` column that directly enforces
+    // that reference, along with the referential-integrity trigger
+    // (trgVideosBeforeUPD_Videos_ValidateWDBS) and the rest of its 10-trigger schema, are still
+    // owned entirely by the hand-maintained production database this app is expected to run
+    // against — Kinesis never creates any of those (see the "internal use only" note in the schema
+    // handoff doc, and trigger_exists's own comment above for how the compatibility path further
+    // down tells a production database apart from a from-scratch one now that this is no longer
+    // true of tblWDBS itself). `WDBS` is added here as a plain nullable column so Kinesis keeps
+    // working end-to-end (search, display, edit) against a from-scratch database too, without
+    // trying to reproduce the taxonomy machinery. No migration is needed for a database whose
+    // column ended up declared lowercase `wdbs` by an earlier revision of this file — SQLite
+    // matches identifiers case-insensitively, so `WDBS` and `wdbs` already refer to the exact same
+    // column (this check folds case for exactly that reason), and every query in this codebase now
+    // spells it uppercase regardless of which case a given database has it under.
     if !column_exists(&conn, "videos", "WDBS")? {
         conn.execute("ALTER TABLE videos ADD COLUMN WDBS TEXT", [])?;
+    }
+
+    // tblWDBS itself: unlike fkWDBS/the validation trigger above, Kinesis now creates and owns
+    // this table directly (a change from earlier versions, which assumed it only ever existed
+    // because a hand-maintained production database provided it) — see db/wdbs.rs's
+    // ensure_wdbs_path_exists/get_wdbs_tree/set_wdbs_alias/set_wdbs_icon for what actually reads
+    // and writes it. `WDBS` is the display-format path (":UAP-GERB-VVV") of one taxonomy node;
+    // `lev` its depth (1 = top-level); `WDID` its own raw segment name; `WDInfo`/`WDIcon` the
+    // curated alias/icon a user can set on it (see WdbsTreePanel.tsx's right-click menu);
+    // `WDDefault` mirrors the production schema's own column of the same name (unused by Kinesis
+    // itself, kept only so a row shaped like this is also acceptable there).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tblWDBS (
+            WDBS      TEXT PRIMARY KEY,
+            lev       INTEGER NOT NULL DEFAULT 0,
+            WDID      TEXT NOT NULL DEFAULT '',
+            WDInfo    TEXT NOT NULL DEFAULT '',
+            WDIcon    TEXT NOT NULL DEFAULT '',
+            WDDefault INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    )?;
+    // Migrates a tblWDBS that predates the column shape above — either a hand-maintained
+    // production database using its older (`Keep`, `Lev`, `WDAlias`) shape, or a database created
+    // by an earlier revision of this app's own now-removed WDAlias-based alias support (see
+    // set_wdbs_alias's own history). `Lev`/`lev` differ only by case, which SQLite already treats
+    // as the same column, so a `column_exists_exact` check (unlike `column_exists`) is what's
+    // needed to tell "still declared as `Lev`" apart from "already `lev`". `Keep`/`WDAlias` are
+    // dropped outright — SQLite has supported DROP COLUMN since 3.35 (2021), well before the
+    // bundled version this app links against.
+    if column_exists_exact(&conn, "tblWDBS", "Lev")? && !column_exists_exact(&conn, "tblWDBS", "lev")? {
+        conn.execute("ALTER TABLE tblWDBS RENAME COLUMN Lev TO lev", [])?;
+    }
+    if column_exists(&conn, "tblWDBS", "Keep")? {
+        conn.execute("ALTER TABLE tblWDBS DROP COLUMN Keep", [])?;
+    }
+    if column_exists(&conn, "tblWDBS", "WDAlias")? {
+        conn.execute("ALTER TABLE tblWDBS DROP COLUMN WDAlias", [])?;
+    }
+    if !column_exists(&conn, "tblWDBS", "WDIcon")? {
+        conn.execute("ALTER TABLE tblWDBS ADD COLUMN WDIcon TEXT NOT NULL DEFAULT ''", [])?;
     }
 
     // Create stop_words table: common words culled out of generated FTS tokens
@@ -322,13 +434,14 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     )?;
 
-    // Warp Drive "symbolic links": a video's single canonical Warp Drive lives in videos.WDBS
-    // (owned by the production tblWDBS/fkWDBS schema — see above), but a video can additionally
-    // show up under any number of OTHER Warp Drive categories without changing that canonical
-    // value. This table is entirely Kinesis's own bookkeeping (not part of the production
-    // schema), so unlike WDBS/fkWDBS it's fully created and owned here regardless of whether
-    // tblWDBS is present. See db/wdbs.rs for how this and videos.WDBS are merged when building
-    // the Drive/Warp Drive tree and paging a category's videos.
+    // Warp Drive "symbolic links": a video's single canonical Warp Drive lives in videos.WDBS,
+    // validated (on a hand-maintained production database) against the production fkWDBS schema
+    // — see above — but a video can additionally show up under any number of OTHER Warp Drive
+    // categories without changing that canonical value. This table is entirely Kinesis's own
+    // bookkeeping (not part of the production schema), so unlike fkWDBS it's fully created and
+    // owned here regardless of which kind of database this is. See db/wdbs.rs for how this and
+    // videos.WDBS are merged when building the Drive/Warp Drive tree and paging a category's
+    // videos.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS video_wdbs_links (
             video_id TEXT NOT NULL,
@@ -337,17 +450,16 @@ pub fn init_db(db_path: &str) -> Result<()> {
         )",
         [],
     )?;
-    // Cleans up symlink rows when their video is deleted. Independent of the tblWDBS-gated
-    // trigger block further down — this table has nothing to do with the deprecated FTS
-    // triggers or the production schema, so it's always created.
-    let _ = conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_kinesis_wdbs_links_cascade_del
-        AFTER DELETE ON videos
-        BEGIN
-            DELETE FROM video_wdbs_links WHERE video_id = OLD.video_id;
-        END",
-        [],
-    );
+    // Cleans up symlink rows when their video is deleted — but only on a from-scratch database
+    // without the production schema (see the trigger_exists-gated block further down, where this
+    // is actually created): a hand-maintained production database now has its own equivalent
+    // (trgVideosAfterDEL_video_wdbs_links_RemoveRecords), so creating this one there too would
+    // just double-run the same DELETE on every video removal for no benefit. Unconditionally
+    // dropped here for any database that already has it from an earlier Kinesis version, now that
+    // it's redundant wherever the production trigger exists.
+    if trigger_exists(&conn, "trgVideosBeforeUPD_Videos_ValidateWDBS")? {
+        let _ = conn.execute("DROP TRIGGER IF EXISTS trg_kinesis_wdbs_links_cascade_del", []);
+    }
 
     // Initialize default settings if they don't exist
     let defaults = [
@@ -446,14 +558,19 @@ pub fn init_db(db_path: &str) -> Result<()> {
     let _ = conn.execute("DROP TRIGGER IF EXISTS trg_ftsVideos_BeforeDEL", []);
     let _ = conn.execute("DROP TRIGGER IF EXISTS trg_ftsVideos_AfterUPD", []);
 
-    // Compatibility path for databases that DON'T have the production tblWDBS/10-trigger schema
+    // Compatibility path for databases that DON'T have the production 10-trigger WDBS schema
     // (i.e. a from-scratch or pre-WDBS database created by this app itself, not the hand-
     // maintained one). Without this, such a database would silently lose FTS-sync-on-write and
     // biography cascade-delete entirely once the four deprecated triggers above are dropped.
     // Recreated under new names (not the deprecated ones) so they can never collide with
-    // whatever the production schema's own 10 triggers are named. Skipped entirely when tblWDBS
-    // is present, since that schema already does this (and more) itself — running both would
-    // double-insert into ftsVideos on every write.
+    // whatever the production schema's own 10 triggers are named. Skipped entirely when that
+    // production schema is present, since it already does this (and more) itself — running both
+    // would double-insert into ftsVideos on every write.
+    //
+    // Gated on trgVideosBeforeUPD_Videos_ValidateWDBS specifically (one of the production schema's
+    // own triggers), not on tblWDBS's existence — Kinesis creates a bare tblWDBS itself now (see
+    // above), so the table alone no longer tells a from-scratch database apart from a hand-
+    // maintained production one the way it used to.
     //
     // These bodies are only what a *freshly created* trigger gets — CREATE TRIGGER IF NOT EXISTS
     // is a no-op on a database where the trigger already exists from a previous run, and that
@@ -461,7 +578,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // back to ftsVideos above (an ALTER TABLE ... RENAME TO) already asked SQLite to rewrite every
     // reference to the old name across the whole schema, trigger bodies included, as part of that
     // same rename.
-    if !table_exists(&conn, "tblWDBS")? {
+    if !trigger_exists(&conn, "trgVideosBeforeUPD_Videos_ValidateWDBS")? {
         let _ = conn.execute(
             "CREATE TRIGGER IF NOT EXISTS trg_kinesis_fts_before_del
             BEFORE DELETE ON videos
@@ -500,6 +617,18 @@ pub fn init_db(db_path: &str) -> Result<()> {
                 VALUES ('delete', old.rowid, old.title, old.summary, old.tokens, old.WDBS);
                 INSERT INTO ftsVideos(rowid, title, summary, tokens, WDBS)
                 VALUES (new.rowid, new.title, new.summary, new.tokens, new.WDBS);
+            END",
+            [],
+        );
+        // Cleans up video_wdbs_links symlink rows when their video is deleted — needed here since
+        // a from-scratch database has no production trgVideosAfterDEL_video_wdbs_links_RemoveRecords
+        // of its own to do this (see the unconditional DROP further up, for when one shows up
+        // later via this same database gaining the production schema).
+        let _ = conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS trg_kinesis_wdbs_links_cascade_del
+            AFTER DELETE ON videos
+            BEGIN
+                DELETE FROM video_wdbs_links WHERE video_id = OLD.video_id;
             END",
             [],
         );
@@ -746,6 +875,58 @@ mod tests {
             [], |row| row.get(0),
         ).unwrap();
         assert_eq!(matched_id, "v1");
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn coexisting_fts_videos_and_ftsvideos_reconcile_to_whichever_has_real_data() {
+        // Simulates the split-brain state observed in practice: a real, populated `fts_videos`
+        // (from an earlier revision's rename) sitting alongside an empty stray `ftsVideos` (from
+        // a `CREATE VIRTUAL TABLE IF NOT EXISTS` that ran before this file's rename-back had a
+        // chance to fire, e.g. because the db file was copied mid-migration). init_db should keep
+        // the real data under `ftsVideos` and discard the empty stray, not the other way around.
+        let db_path = temp_db_path("fts_videos_coexist");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE fts_videos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE ftsVideos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
+            conn.execute("INSERT INTO videos (video_id, title, summary, tokens, WDBS) VALUES ('v1', 'Some Title', 'Some Summary', 'some title', ':UAP')", []).unwrap();
+            conn.execute("INSERT INTO fts_videos(rowid, title, summary, tokens, wdbs) VALUES (1, 'Some Title', 'Some Summary', 'some title', ':UAP')", []).unwrap();
+            // ftsVideos deliberately left empty, mirroring the stray table's real-world state.
+        }
+        init_db(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        assert!(table_exists(&conn, "ftsVideos").unwrap());
+        assert!(!table_exists(&conn, "fts_videos").unwrap());
+        let matched_id: String = conn.query_row(
+            "SELECT v.video_id FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE ftsVideos MATCH 'Some'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(matched_id, "v1");
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn coexisting_fts_videos_and_ftsvideos_are_left_untouched_when_ambiguous() {
+        // Neither table has a usable video to test a MATCH query against (no titles at all) — the
+        // reconciliation above must not guess in this case. Deleting the wrong one on a bad guess
+        // would be real data loss, so ambiguity here should mean "do nothing" rather than "pick
+        // one anyway". Both tables — and all their data — must still exist afterward.
+        let db_path = temp_db_path("fts_videos_ambiguous");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE fts_videos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE ftsVideos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
+            conn.execute("INSERT INTO videos (video_id, title, summary, tokens, WDBS) VALUES ('v1', NULL, NULL, '', ':UAP')", []).unwrap();
+        }
+        init_db(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        assert!(table_exists(&conn, "fts_videos").unwrap());
+        assert!(table_exists(&conn, "ftsVideos").unwrap());
         drop(conn);
         let _ = fs::remove_file(&db_path);
     }

@@ -11,6 +11,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { BRAND } from '../branding';
+import { handleWdbsInputChange } from '../lib/wdbs-input';
 
 interface GlossaryTerm {
     term: string;
@@ -702,7 +703,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                 autoFocus
                                                                 list="wdbs-suggestions"
                                                                 value={wdbsInput}
-                                                                onChange={(e) => setWdbsInput(e.target.value.toUpperCase())}
+                                                                onChange={(e) => handleWdbsInputChange(e, setWdbsInput)}
                                                                 onKeyDown={(e) => {
                                                                     if (e.key === 'Enter') handleSaveWdbs();
                                                                     if (e.key === 'Escape') { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(primaryWdbs)); setWdbsError(null); }
@@ -780,7 +781,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                     autoFocus
                                                                     list="wdbs-suggestions"
                                                                     value={linkInput}
-                                                                    onChange={(e) => setLinkInput(e.target.value.toUpperCase())}
+                                                                    onChange={(e) => handleWdbsInputChange(e, setLinkInput)}
                                                                     onKeyDown={(e) => {
                                                                         if (e.key === 'Enter') handleAddLink();
                                                                         if (e.key === 'Escape') { setIsAddingLink(false); setLinkInput(''); setLinkError(null); }
