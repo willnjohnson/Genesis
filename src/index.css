@@ -3,14 +3,61 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/*
+ * Theme system (see src/lib/themes.ts): every rule below that used to live under
+ * `:root:not(.dark) <selector> { ...: <hardcoded-hex> !important; }` now reads its color from a
+ * `--k-*` custom property instead, and applies unconditionally (no `.dark` gating) — the property
+ * itself carries whatever the active theme (Dark, Light, Dracula, an imported JSON, ...) says it
+ * should be. lib/themes.ts's applyTheme() is what actually sets these on <html> at runtime; the
+ * values here are just the Dark-theme defaults, so the very first paint (before that JS runs)
+ * matches what Dark already looked like pre-theme-system.
+ *
+ * A handful of rules are deliberately NOT tokenized and stay exactly as literal
+ * `:root:not(.dark)` overrides below (search for "not tokenized" in this file) — `.prose`'s
+ * colors (Tailwind Typography's own `dark:prose-invert` already owns dark mode for these; forcing
+ * a guessed dark value here risked a visible mismatch against its real computed colors) and bare
+ * `code`/`input`/`select` (dark mode never had a rule for these at all — every component sets its
+ * own explicit classes instead — so there's no dark value to preserve here in the first place).
+ * `.dark` itself is still toggled by lib/themes.ts (based on the active theme's `scheme`), which is
+ * what keeps these — and Tailwind's own `dark:` variant, used directly by a few components
+ * (BiographyView, Sidebar/TermDefinitionModal's `prose`, SearchBar's history dropdown, HistoryTab)
+ * — working unchanged.
+ */
 :root {
+    --k-bg: #0f0f0f;
+    --k-bg-121212: #121212; --k-bg-141414: #141414; --k-bg-1a1a1a: #1a1a1a; --k-bg-202020: #202020;
+    --k-bg-222222: #222222; --k-bg-272727: #272727; --k-bg-2a2a2a: #2a2a2a; --k-bg-303030: #303030;
+    --k-bg-333333: #333333; --k-bg-3f3f3f: #3f3f3f; --k-bg-444444: #444444;
+    --k-overlay-black-20: rgba(0,0,0,0.2); --k-overlay-black-40: rgba(0,0,0,0.4);
+    --k-overlay-black-60: rgba(0,0,0,0.6); --k-overlay-black-70: rgba(0,0,0,0.7); --k-overlay-black-80: rgba(0,0,0,0.8);
+    --k-bg-gray-900-50: rgba(17,24,39,0.5); --k-bg-gray-800: #1f2937; --k-bg-white-5: rgba(255,255,255,0.05);
+
+    --k-text-white: #ffffff; --k-text-aaaaaa: #aaaaaa; --k-text-888888: #888888;
+    --k-text-gray-200: #e5e7eb; --k-text-gray-300: #d1d5db; --k-text-gray-400: #9ca3af; --k-text-gray-500: #6b7280;
+    --k-text-gray-600: #4b5563; --k-text-gray-700: #374151; --k-text-gray-800: #1f2937; --k-text-gray-900: #111827;
+
+    --k-border-303030: #303030; --k-border-333: #333333; --k-border-333333: #333333; --k-border-383838: #383838;
+    --k-border-404040: #404040; --k-border-444: #444444; --k-border-505050: #505050;
+    --k-border-gray-700: #374151; --k-border-gray-800: #1f2937; --k-border-white-5: rgba(255,255,255,0.05);
+
+    --k-hover-bg-333333: #333333; --k-hover-bg-3f3f3f: #3f3f3f; --k-hover-bg-444: #444444; --k-hover-bg-444444: #444444;
+    --k-hover-bg-272727: #272727; --k-hover-bg-2a2a2a: #2a2a2a; --k-hover-bg-202020: #202020; --k-hover-bg-gray-700: #374151;
+    --k-hover-text-white: #ffffff; --k-hover-border-505050: #505050; --k-hover-border-555555: #555555;
+
+    --k-accent: #dc2626; --k-accent-hover: #ef4444; --k-success: #16a34a; --k-success-hover: #22c55e;
+    --k-info: #2563eb; --k-info-hover: #3b82f6; --k-purple: #9333ea; --k-text-on-accent: #ffffff;
+
+    --k-danger-surface: rgba(127,29,29,0.1); --k-danger-text: #ef4444; --k-danger-surface-hover: rgba(127,29,29,0.2);
+
+    --k-warning: #fb923c; --k-scrollbar-thumb: #717171; --k-scrollbar-thumb-hover: #aaaaaa;
+
     font-family: "Roboto", "Inter", system-ui, -apple-system, sans-serif;
     line-height: 1.5;
     font-weight: 400;
 
     color-scheme: dark;
-    color: #ffffff;
-    background-color: #0f0f0f;
+    color: var(--k-text-white);
+    background-color: var(--k-bg);
 
     font-synthesis: none;
     text-rendering: optimizeLegibility;
@@ -18,110 +65,206 @@
     -moz-osx-font-smoothing: grayscale;
 }
 
-/* Light mode styles - apply when .dark class is NOT present */
-:root:not(.dark) {
-    background-color: #fcfcfc;
-    color: #1a1a1a;
-}
-
-:root:not(.dark) body {
-    background-color: #fcfcfc;
-    color: #1a1a1a;
+body {
+    margin: 0;
+    background-color: var(--k-bg);
+    color: var(--k-text-white);
 }
 
 /* Backgrounds */
-:root:not(.dark) .bg-\[\#0f0f0f\] { background-color: #ffffff !important; }
-:root:not(.dark) .bg-\[\#121212\] { background-color: #f5f5f5 !important; }
-:root:not(.dark) .bg-\[\#141414\] { background-color: #f0f0f0 !important; }
-:root:not(.dark) .bg-\[\#1a1a1a\] { background-color: #f0f0f0 !important; }
-:root:not(.dark) .bg-\[\#202020\] { background-color: #e5e5e5 !important; }
-:root:not(.dark) .bg-\[\#222\] { background-color: #ebebeb !important; }
-:root:not(.dark) .bg-\[\#222222\] { background-color: #ebebeb !important; }
-:root:not(.dark) .bg-\[\#272727\] { background-color: #e8e8e8 !important; }
-:root:not(.dark) .bg-\[\#2a2a2a\] { background-color: #e0e0e0 !important; }
-:root:not(.dark) .bg-\[\#303030\] { background-color: #e0e0e0 !important; }
-:root:not(.dark) .bg-\[\#333\] { background-color: #d5d5d5 !important; }
-:root:not(.dark) .bg-\[\#333333\] { background-color: #d5d5d5 !important; }
-:root:not(.dark) .bg-\[\#3f3f3f\] { background-color: #d5d5d5 !important; }
-:root:not(.dark) .bg-\[\#444\] { background-color: #cccccc !important; }
-:root:not(.dark) .bg-white { background-color: #ffffff !important; }
-:root:not(.dark) .bg-black\/20 { background-color: #f5f5f5 !important; }
-:root:not(.dark) .bg-black\/40 { background-color: rgba(0, 0, 0, 0.05) !important; }
-:root:not(.dark) .bg-black\/60 { background-color: rgba(0, 0, 0, 0.08) !important; }
-:root:not(.dark) .bg-black\/70 { background-color: rgba(0, 0, 0, 0.4) !important; }
-:root:not(.dark) .bg-black\/80 { background-color: rgba(0, 0, 0, 0.45) !important; }
-:root:not(.dark) .bg-black { background-color: #000000 !important; }
-:root:not(.dark) .bg-gray-900\/50 { background-color: #e8e8e8 !important; }
-:root:not(.dark) .bg-gray-800 { background-color: #d5d5d5 !important; }
-:root:not(.dark) .bg-white\/5 { background-color: #f9f9f9 !important; }
+.bg-\[\#0f0f0f\] { background-color: var(--k-bg) !important; }
+.bg-\[\#121212\] { background-color: var(--k-bg-121212) !important; }
+.bg-\[\#141414\] { background-color: var(--k-bg-141414) !important; }
+.bg-\[\#1a1a1a\] { background-color: var(--k-bg-1a1a1a) !important; }
+.bg-\[\#202020\] { background-color: var(--k-bg-202020) !important; }
+.bg-\[\#222\] { background-color: var(--k-bg-222222) !important; }
+.bg-\[\#222222\] { background-color: var(--k-bg-222222) !important; }
+.bg-\[\#272727\] { background-color: var(--k-bg-272727) !important; }
+.bg-\[\#2a2a2a\] { background-color: var(--k-bg-2a2a2a) !important; }
+.bg-\[\#303030\] { background-color: var(--k-bg-303030) !important; }
+.bg-\[\#333\] { background-color: var(--k-bg-333333) !important; }
+.bg-\[\#333333\] { background-color: var(--k-bg-333333) !important; }
+.bg-\[\#3f3f3f\] { background-color: var(--k-bg-3f3f3f) !important; }
+.bg-\[\#444\] { background-color: var(--k-bg-444444) !important; }
+.bg-black\/20 { background-color: var(--k-overlay-black-20) !important; }
+.bg-black\/40 { background-color: var(--k-overlay-black-40) !important; }
+.bg-black\/60 { background-color: var(--k-overlay-black-60) !important; }
+.bg-black\/70 { background-color: var(--k-overlay-black-70) !important; }
+.bg-black\/80 { background-color: var(--k-overlay-black-80) !important; }
+.bg-gray-900\/50 { background-color: var(--k-bg-gray-900-50) !important; }
+.bg-gray-800 { background-color: var(--k-bg-gray-800) !important; }
+.bg-white\/5 { background-color: var(--k-bg-white-5) !important; }
+/* Close enough to an already-covered shade (1 hex step) to just share its token rather than add a
+   near-duplicate variable — see BiographyView.tsx. */
+.bg-\[\#1b1b1b\] { background-color: var(--k-bg-1a1a1a) !important; }
+.hover\:bg-\[\#262626\]:hover { background-color: var(--k-hover-bg-272727) !important; }
 
 /* Text colors */
-:root:not(.dark) .text-white { color: #1a1a1a !important; }
-:root:not(.dark) .text-\[\#aaaaaa\] { color: #5c5c5c !important; }
-:root:not(.dark) .text-\[\#888888\] { color: #555555 !important; }
-:root:not(.dark) .text-gray-200 { color: #222222 !important; }
-:root:not(.dark) .text-gray-300 { color: #333333 !important; }
-:root:not(.dark) .text-gray-400 { color: #555555 !important; }
-:root:not(.dark) .text-gray-500 { color: #666666 !important; }
-:root:not(.dark) .text-gray-600 { color: #555555 !important; }
-:root:not(.dark) .text-gray-700 { color: #444444 !important; }
-:root:not(.dark) .text-gray-800 { color: #222222 !important; }
-:root:not(.dark) .text-gray-900 { color: #1a1a1a !important; }
-:root:not(.dark) .text-black { color: #000000 !important; }
+.text-white { color: var(--k-text-white) !important; }
+.text-\[\#aaaaaa\] { color: var(--k-text-aaaaaa) !important; }
+.text-\[\#888888\] { color: var(--k-text-888888) !important; }
+.text-gray-200 { color: var(--k-text-gray-200) !important; }
+.text-gray-300 { color: var(--k-text-gray-300) !important; }
+.text-gray-400 { color: var(--k-text-gray-400) !important; }
+.text-gray-500 { color: var(--k-text-gray-500) !important; }
+.text-gray-600 { color: var(--k-text-gray-600) !important; }
+.text-gray-700 { color: var(--k-text-gray-700) !important; }
+.text-gray-800 { color: var(--k-text-gray-800) !important; }
+.text-gray-900 { color: var(--k-text-gray-900) !important; }
+.text-\[\#444\] { color: var(--k-border-444) !important; }
+.border-white { border-color: var(--k-text-white) !important; }
+.text-blue-400 { color: var(--k-info) !important; }
+.hover\:text-blue-400:hover { color: var(--k-info) !important; }
+.hover\:text-blue-300:hover { color: var(--k-info-hover) !important; }
+.focus\:border-blue-600:focus { border-color: var(--k-info) !important; }
+.hover\:text-\[\#aaa\]:hover { color: var(--k-text-aaaaaa) !important; }
+.hover\:text-\[\#aaaaaa\]:hover { color: var(--k-text-aaaaaa) !important; }
+/* `group-hover:` needs the ancestor-hover selector shape, not a plain class match — a bare
+   `.group-hover\:text-[#888] { ... }` rule would apply unconditionally instead of only on hover. */
+.group:hover .group-hover\:text-\[\#888\] { color: var(--k-text-888888) !important; }
 
 /* Border colors */
-:root:not(.dark) .border-\[\#303030\] { border-color: #d8d8d8 !important; }
-:root:not(.dark) .border-\[\#333\] { border-color: #cccccc !important; }
-:root:not(.dark) .border-\[\#333333\] { border-color: #dddddd !important; }
-:root:not(.dark) .border-\[\#383838\] { border-color: #cccccc !important; }
-:root:not(.dark) .border-\[\#404040\] { border-color: #cccccc !important; }
-:root:not(.dark) .border-\[\#444\] { border-color: #bbbbbb !important; }
-:root:not(.dark) .border-\[\#444444\] { border-color: #bbbbbb !important; }
-:root:not(.dark) .border-\[\#505050\] { border-color: #999999 !important; }
-:root:not(.dark) .border-gray-700 { border-color: #cccccc !important; }
-:root:not(.dark) .border-gray-800 { border-color: #bbbbbb !important; }
-:root:not(.dark) .border-white\/5 { border-color: #e5e5e5 !important; }
+.border-\[\#303030\] { border-color: var(--k-border-303030) !important; }
+.border-\[\#272727\] { border-color: var(--k-bg-272727) !important; }
+.border-\[\#333\] { border-color: var(--k-border-333) !important; }
+.border-\[\#333333\] { border-color: var(--k-border-333333) !important; }
+.border-\[\#383838\] { border-color: var(--k-border-383838) !important; }
+.border-\[\#404040\] { border-color: var(--k-border-404040) !important; }
+.border-\[\#444\] { border-color: var(--k-border-444) !important; }
+.border-\[\#444444\] { border-color: var(--k-border-444) !important; }
+.border-\[\#505050\] { border-color: var(--k-border-505050) !important; }
+.border-\[\#3f3f3f\] { border-color: var(--k-bg-3f3f3f) !important; }
+.border-\[\#222\] { border-color: var(--k-bg-222222) !important; }
+.border-gray-700 { border-color: var(--k-border-gray-700) !important; }
+.border-gray-800 { border-color: var(--k-border-gray-800) !important; }
+.border-white\/5 { border-color: var(--k-border-white-5) !important; }
 
 /* Hover states */
-:root:not(.dark) .hover\:bg-\[\#333\]:hover { background-color: #d0d0d0 !important; }
-:root:not(.dark) .hover\:bg-\[\#333333\]:hover { background-color: #d0d0d0 !important; }
-:root:not(.dark) .hover\:bg-\[\#3f3f3f\]:hover { background-color: #d0d0d0 !important; }
-:root:not(.dark) .hover\:bg-\[\#444\]:hover { background-color: #cccccc !important; }
-:root:not(.dark) .hover\:bg-\[\#444444\]:hover { background-color: #d5d5d5 !important; }
-:root:not(.dark) .hover\:bg-\[\#272727\]:hover { background-color: #dddddd !important; }
-:root:not(.dark) .hover\:bg-\[\#2a2a2a\]:hover { background-color: #e5e5e5 !important; }
-:root:not(.dark) .hover\:bg-gray-700:hover { background-color: #cccccc !important; }
-:root:not(.dark) .hover\:text-white:hover { color: #000000 !important; }
-:root:not(.dark) .hover\:border-\[\#505050\]:hover { border-color: #999999 !important; }
-:root:not(.dark) .hover\:border-\[\#555555\]:hover { border-color: #777777 !important; }
+.hover\:bg-\[\#333\]:hover { background-color: var(--k-hover-bg-333333) !important; }
+.hover\:bg-\[\#333333\]:hover { background-color: var(--k-hover-bg-333333) !important; }
+.hover\:bg-\[\#3f3f3f\]:hover { background-color: var(--k-hover-bg-3f3f3f) !important; }
+.hover\:bg-\[\#444\]:hover { background-color: var(--k-hover-bg-444) !important; }
+.hover\:bg-\[\#444444\]:hover { background-color: var(--k-hover-bg-444444) !important; }
+.hover\:bg-\[\#272727\]:hover { background-color: var(--k-hover-bg-272727) !important; }
+.hover\:bg-\[\#2a2a2a\]:hover { background-color: var(--k-hover-bg-2a2a2a) !important; }
+.hover\:bg-\[\#202020\]:hover { background-color: var(--k-hover-bg-202020) !important; }
+.hover\:bg-gray-700:hover { background-color: var(--k-hover-bg-gray-700) !important; }
+.hover\:text-white:hover { color: var(--k-hover-text-white) !important; }
+.hover\:border-\[\#505050\]:hover { border-color: var(--k-hover-border-505050) !important; }
+.hover\:border-\[\#555555\]:hover { border-color: var(--k-hover-border-555555) !important; }
 
-/* Invert logic for standard Light Theme buttons */
+/* Brand/semantic buttons. `.bg-red-600:hover` etc. match on the :hover pseudo-class alone —
+   independent of whichever other classes an element also has — so they already take priority
+   over a button's own separate `hover:bg-red-500`/`hover:bg-red-700` class (equal specificity,
+   later in the cascade); see themes.ts's own comment on accent-hover for why its dark value is
+   Tailwind's red-500, not `--k-accent` itself. */
+.bg-red-600 { background-color: var(--k-accent) !important; color: var(--k-text-on-accent) !important; }
+.bg-red-600:hover { background-color: var(--k-accent-hover) !important; }
+.border-red-600 { border-color: var(--k-accent) !important; }
+.focus\:border-red-600\/50:focus { border-color: color-mix(in srgb, var(--k-accent) 50%, transparent) !important; }
+.bg-red-600\/10 { background-color: color-mix(in srgb, var(--k-accent) 10%, transparent) !important; }
+.bg-red-600\/25 { background-color: color-mix(in srgb, var(--k-accent) 25%, transparent) !important; }
+.border-red-600\/20 { border-color: color-mix(in srgb, var(--k-accent) 20%, transparent) !important; }
+.bg-blue-600 { background-color: var(--k-info) !important; color: var(--k-text-on-accent) !important; }
+.bg-blue-600:hover { background-color: var(--k-info-hover) !important; }
+.hover\:bg-blue-500:hover { background-color: var(--k-info-hover) !important; }
+.bg-green-600 { background-color: var(--k-success) !important; color: var(--k-text-on-accent) !important; }
+.bg-green-600:hover { background-color: var(--k-success-hover) !important; }
+.bg-purple-600 { background-color: var(--k-purple) !important; color: var(--k-text-on-accent) !important; }
+.text-purple-600 { color: var(--k-purple) !important; }
+.hover\:bg-purple-600\/10:hover { background-color: color-mix(in srgb, var(--k-purple) 10%, transparent) !important; }
+
+/* Gradient buttons — always white text regardless of theme, for contrast against the gradient */
+.summarize-btn, .summarize-btn svg { color: #ffffff !important; }
+
+/* Lightbulb icon / shortcut hints / bookmarked-video marker — the app's "warning/caution/hint"
+   color family (distinct from accent/danger/success). */
+.hover\:text-orange-400:hover { color: var(--k-warning) !important; }
+.text-orange-400 { color: var(--k-warning) !important; }
+.text-yellow-600 { color: var(--k-warning) !important; }
+.fill-yellow-600 { fill: var(--k-warning) !important; }
+
+/* Sidebar - Delete button, and remove/delete affordances elsewhere */
+.bg-red-900\/10 { background-color: var(--k-danger-surface) !important; }
+.text-red-500 { color: var(--k-danger-text) !important; }
+.hover\:bg-red-900\/20:hover { background-color: var(--k-danger-surface-hover) !important; }
+.hover\:text-red-400:hover { color: var(--k-danger-text) !important; }
+.text-red-400 { color: var(--k-danger-text) !important; }
+.text-red-600 { color: var(--k-danger-text) !important; }
+.hover\:text-red-500:hover { color: var(--k-danger-text) !important; }
+.hover\:text-red-300:hover { color: var(--k-danger-text) !important; }
+.focus\:border-red-500:focus { border-color: var(--k-danger-text) !important; }
+/* The small inline error-box pattern (bg-red-900/20 + border-red-500/30) used throughout the
+   Wdbs-menu and BulkAssign popovers, and Sidebar. */
+.bg-red-900\/20 { background-color: color-mix(in srgb, var(--k-danger-text) 20%, transparent) !important; }
+.border-red-500\/30 { border-color: color-mix(in srgb, var(--k-danger-text) 30%, transparent) !important; }
+
+/* "Confirm/save" affordances (Check-icon buttons in the Wdbs and BulkAssign menus), the "API Key
+   is Active"/"Default" status-badge pattern (bg-green-500/10 + border-green-500/30 + text-
+   green-400), and other plain green usages — all the same "success" concept. */
+.text-green-500 { color: var(--k-success) !important; }
+.hover\:text-green-400:hover { color: var(--k-success) !important; }
+.text-green-400 { color: var(--k-success) !important; }
+.text-green-600 { color: var(--k-success) !important; }
+.border-green-500 { border-color: var(--k-success) !important; }
+.bg-green-500\/10 { background-color: color-mix(in srgb, var(--k-success) 10%, transparent) !important; }
+.bg-green-500\/30 { background-color: color-mix(in srgb, var(--k-success) 30%, transparent) !important; }
+.bg-green-500\/50 { background-color: color-mix(in srgb, var(--k-success) 50%, transparent) !important; }
+.border-green-500\/30 { border-color: color-mix(in srgb, var(--k-success) 30%, transparent) !important; }
+.hover\:bg-green-500:hover { background-color: var(--k-success) !important; }
+.bg-green-600\/10 { background-color: color-mix(in srgb, var(--k-success) 10%, transparent) !important; }
+.hover\:bg-green-600\/10:hover { background-color: color-mix(in srgb, var(--k-success) 10%, transparent) !important; }
+
+/* Notification.tsx's info/error border, and a few remaining plain danger/opacity variants. */
+.border-blue-500 { border-color: var(--k-info) !important; }
+.border-red-500 { border-color: var(--k-danger-text) !important; }
+.bg-red-500\/10 { background-color: color-mix(in srgb, var(--k-danger-text) 10%, transparent) !important; }
+.bg-red-500\/30 { background-color: color-mix(in srgb, var(--k-danger-text) 30%, transparent) !important; }
+.border-red-500\/20 { border-color: color-mix(in srgb, var(--k-danger-text) 20%, transparent) !important; }
+.hover\:bg-red-700:hover { background-color: var(--k-danger-text) !important; }
+.text-red-500\/70 { color: color-mix(in srgb, var(--k-danger-text) 70%, transparent) !important; }
+.decoration-red-500\/30 { text-decoration-color: color-mix(in srgb, var(--k-danger-text) 30%, transparent) !important; }
+
+/* Muted caption/placeholder text — several distinct near-grays used interchangeably across the
+   app for the same "de-emphasized helper text" role; mapped onto the two closest existing muted
+   text tokens rather than adding near-duplicate variables for each one. */
+.text-\[\#555\] { color: var(--k-text-aaaaaa) !important; }
+.text-\[\#666\] { color: var(--k-text-888888) !important; }
+.text-\[\#666666\] { color: var(--k-text-888888) !important; }
+.text-\[\#777\] { color: var(--k-text-888888) !important; }
+.placeholder-\[\#444\]::placeholder { color: var(--k-border-444) !important; }
+.placeholder-\[\#505050\]::placeholder { color: var(--k-border-505050) !important; }
+.placeholder-\[\#555\]::placeholder { color: var(--k-text-aaaaaa) !important; }
+.placeholder-\[\#555555\]::placeholder { color: var(--k-text-aaaaaa) !important; }
+.placeholder-\[\#666666\]::placeholder { color: var(--k-text-888888) !important; }
+.placeholder-gray-500::placeholder { color: var(--k-text-gray-500) !important; }
+.placeholder-gray-600::placeholder { color: var(--k-text-gray-600) !important; }
+
+.hover\:border-\[\#404040\]:hover { border-color: var(--k-border-404040) !important; }
+.hover\:border-\[\#444\]:hover { border-color: var(--k-border-444) !important; }
+
+/* Scrollbar */
+::-webkit-scrollbar-thumb {
+    background: var(--k-scrollbar-thumb);
+    border-radius: 10px;
+    border: 4px solid var(--k-bg);
+    min-height: 40px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--k-scrollbar-thumb-hover);
+}
+
+/* ==================== */
+/* Rules NOT tokenized — see this file's header comment for why. Still gated on `.dark` (kept
+   alive by lib/themes.ts's applyTheme toggling it per-theme `scheme`), so these still switch
+   correctly between a dark-scheme theme (Dark, Dracula, Nord, ...) and Light, same as before;
+   they just don't pick up a *specific* palette's exact colors the way the tokenized rules above
+   do — see index.css's header comment and themes.ts's own module comment for the reasoning. */
+/* ==================== */
+
 :root:not(.dark) .bg-white.text-black { background-color: #ffffff !important; color: #000000 !important; border: 1px solid #cccccc !important; }
 :root:not(.dark) .bg-white.text-black:hover { background-color: #f5f5f5 !important; border-color: #aaaaaa !important; }
 
-/* Gradient buttons - always white text */
-:root:not(.dark) .summarize-btn { color: #ffffff !important; }
-:root:not(.dark) .summarize-btn svg { color: #ffffff !important; }
-
-/* Red buttons in Light Mode */
-:root:not(.dark) .bg-red-600 { background-color: #cc0000 !important; color: #ffffff !important; }
-:root:not(.dark) .bg-red-600:hover { background-color: #aa0000 !important; }
-
-/* Blue buttons in Light Mode */
-:root:not(.dark) .bg-blue-600 { background-color: #2563eb !important; color: #ffffff !important; }
-:root:not(.dark) .bg-blue-600:hover { background-color: #1d4ed8 !important; }
-
-/* Purple items in Light Mode */
-:root:not(.dark) .bg-purple-600 { background-color: #9333ea !important; color: #ffffff !important; }
-
-/* Green buttons in Light Mode */
-:root:not(.dark) .bg-green-600 { background-color: #16a34a !important; color: #ffffff !important; }
-:root:not(.dark) .bg-green-600:hover { background-color: #15803d !important; }
-
-/* Sidebar/Card fixes */
-:root:not(.dark) .selection\:bg-\[\#3f3f3f\] { selection-background-color: #dddddd !important; }
-
-/* Input fields */
 :root:not(.dark) input,
 :root:not(.dark) select {
     background-color: #f5f5f5 !important;
@@ -129,48 +272,11 @@
     border-color: #cccccc !important;
 }
 
-/* Code blocks */
 :root:not(.dark) code {
     background-color: #f0f0f0 !important;
     color: #333333 !important;
 }
 
-/* Scrollbar */
-:root:not(.dark) ::-webkit-scrollbar-thumb {
-    background: #cccccc;
-    border: 4px solid #f1f1f1;
-}
-:root:not(.dark) ::-webkit-scrollbar-thumb:hover {
-    background: #999999;
-}
-
-/* ==================== */
-/* Component-specific light mode fixes */
-/* ==================== */
-
-/* SettingsModal - tabs */
-:root:not(.dark) .bg-\[\#303030\] { background-color: #e0e0e0 !important; }
-:root:not(.dark) .hover\:bg-\[\#202020\]:hover { background-color: #d5d5d5 !important; }
-
-/* SearchBar - tooltip */
-:root:not(.dark) .bg-\[\#1a1a1a\] { background-color: #f0f0f0 !important; }
-:root:not(.dark) .border-\[\#333\] { border-color: #cccccc !important; }
-:root:not(.dark) .text-gray-200 { color: #333333 !important; }
-:root:not(.dark) .text-gray-300 { color: #444444 !important; }
-:root:not(.dark) .text-gray-500 { color: #666666 !important; }
-
-/* Lightbulb icon - orange on hover */
-:root:not(.dark) .hover\:text-orange-400:hover { color: #c2410c !important; }
-/* Shortcut hints in tooltip - darker orange for light bg */
-:root:not(.dark) .text-orange-400 { color: #c2410c !important; }
-
-/* Sidebar - divider */
-:root:not(.dark) .hover\:bg-\[\#272727\]:hover { background-color: #bbbbbb !important; }
-
-/* Sidebar - transcript text */
-:root:not(.dark) .text-gray-300 { color: #333333 !important; }
-
-/* Sidebar - markdown content */
 :root:not(.dark) .prose { color: #333333 !important; }
 :root:not(.dark) .prose h1 { color: #111111 !important; }
 :root:not(.dark) .prose h2 { color: #222222 !important; }
@@ -179,6 +285,8 @@
 :root:not(.dark) .prose code { color: #333333 !important; }
 :root:not(.dark) .prose blockquote { border-left-color: #ccc !important; color: #555 !important; font-style: italic !important; }
 :root:not(.dark) .prose blockquote p { color: #555 !important; }
+:root:not(.dark) .prose th { background-color: #e0e0e0 !important; color: #111 !important; border-color: #ccc !important; }
+:root:not(.dark) .prose td { border-color: #ccc !important; }
 
 /* Reduce markdown spacing */
 .prose p { margin-top: 0.25rem !important; margin-bottom: 0.25rem !important; }
@@ -206,22 +314,6 @@
     color: #fff !important;
     font-weight: 700 !important;
 }
-:root:not(.dark) .prose th { background-color: #e0e0e0 !important; color: #111 !important; border-color: #ccc !important; }
-:root:not(.dark) .prose td { border-color: #ccc !important; }
-
-/* Sidebar - Delete button */
-:root:not(.dark) .bg-red-900\/10 { background-color: #ffebee !important; }
-:root:not(.dark) .text-red-500 { color: #cc0000 !important; }
-:root:not(.dark) .hover\:bg-red-900\/20:hover { background-color: #ffcdd2 !important; }
-
-:root.dark body {
-    background-color: #0f0f0f;
-    color: white;
-}
-
-body {
-    margin: 0;
-}
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
@@ -232,23 +324,20 @@ body {
     background: transparent;
 }
 
-::-webkit-scrollbar-thumb {
-    background: #717171;
-    border-radius: 10px;
-    border: 4px solid #0f0f0f;
-    min-height: 40px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: #aaaaaa;
-}
-
 .custom-scrollbar::-webkit-scrollbar {
     width: 16px;
 }
 
+/* Sidebar, WdbsTreePanel, VideoTagsPanel, PhotosynthesisPanel, and the Wdbs*Menu popovers all use
+   this narrower scrollbar variant. It used to be hardcoded (the original app never had a
+   light-mode override for it, unlike the plain ::-webkit-scrollbar-thumb above) — now shares the
+   same --k-scrollbar-thumb tokens as the main one, so it's consistent across the app instead of
+   being the one scrollbar that doesn't follow the active theme. */
 .custom-scrollbar::-webkit-scrollbar-thumb {
-    background: #3f3f3f;
-    border: 3px solid #0f0f0f;
+    background: var(--k-scrollbar-thumb);
+    border: 3px solid var(--k-bg);
     min-height: 40px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: var(--k-scrollbar-thumb-hover);
 }

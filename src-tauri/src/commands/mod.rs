@@ -6,6 +6,8 @@ pub mod glossary;
 pub mod biography;
 pub mod io;
 pub mod wdbs;
+pub mod export;
+pub mod similar;
 
 pub use settings::*;
 pub use youtube::*;
@@ -15,3 +17,5 @@ pub use glossary::*;
 pub use biography::*;
 pub use io::*;
 pub use wdbs::*;
+pub use export::*;
+pub use similar::*;

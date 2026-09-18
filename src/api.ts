@@ -199,6 +199,10 @@ export async function checkVideoExists(id: string): Promise<boolean> {
     return await invoke("check_video_exists", { videoId: id });
 }
 
+export async function getSimilarVideos(videoId: string, limit?: number): Promise<Video[]> {
+    return await invoke("get_similar_videos", { videoId, limit: limit ?? null });
+}
+
 export async function resolveChannel(query: string): Promise<ChannelInfo> {
     return await invoke("resolve_channel", { query });
 }
@@ -305,6 +309,17 @@ export async function selectFolder(): Promise<string | null> {
 
 export async function setDbPath(path: string): Promise<string> {
     return await invoke("set_db_path_override", { folderPath: path });
+}
+
+export interface ExportSummary {
+    videos_exported: number;
+    glossary_terms: number;
+    biographies: number;
+    folder_path: string;
+}
+
+export async function exportToObsidian(folderPath: string, containerName: string, videosLabel: string): Promise<ExportSummary> {
+    return await invoke("export_to_obsidian", { folderPath, containerName, videosLabel });
 }
 
 export interface AppInfo {
@@ -508,6 +523,7 @@ export interface WdbsNode {
 export const WDBS_ICON_KEYS = [
     "star", "company", "person", "music", "sports", "gaming", "podcast", "fitness", "food",
     "news", "education", "comedy", "tech", "finance", "guides",
+    "health", "privacy", "repair", "coding", "art", "reading", "project", "ai",
 ] as const;
 export type WdbsIconKey = typeof WDBS_ICON_KEYS[number];
 

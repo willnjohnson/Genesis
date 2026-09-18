@@ -93,7 +93,7 @@ pub(crate) fn backfill_missing_wdbs_paths(conn: &Connection) -> Result<()> {
 /// encode_wdbs_display) apply — turns a WdbsNode.path (e.g. "θψCRYPTO_JOHN") back into the ":"/
 /// "-" display form tblWDBS.WDBS stores (":CRYPTO-JOHN"), so a tree node's alias can be looked up
 /// or updated by joining/matching against it.
-fn storage_to_display_path(storage_path: &str) -> String {
+pub(crate) fn storage_to_display_path(storage_path: &str) -> String {
     let body = storage_path.strip_prefix("θψ").unwrap_or(storage_path);
     format!(":{}", body.replace('_', "-"))
 }
@@ -168,6 +168,7 @@ pub struct WdbsNode {
 pub const WDBS_ICONS: &[&str] = &[
     "star", "company", "person", "music", "sports", "gaming", "podcast", "fitness", "food",
     "news", "education", "comedy", "tech", "finance", "guides",
+    "health", "privacy", "repair", "coding", "art", "reading", "project", "ai",
 ];
 
 struct TrieNode {
@@ -438,4 +439,18 @@ pub fn clear_video_wdbs_links(db_path: &str, video_id: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute("DELETE FROM video_wdbs_links WHERE video_id = ?1", params![video_id])?;
     Ok(())
+}
+
+/// Every (video_id, wdbs) symlink pair across the whole library, storage-encoded — used by
+/// commands::export::export_to_obsidian to write a stub "See: [[...]]" note in each secondary
+/// category a video is linked into, alongside its canonical one.
+pub fn get_all_video_wdbs_links(db_path: &str) -> Result<Vec<(String, String)>> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare("SELECT video_id, wdbs FROM video_wdbs_links")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
 }

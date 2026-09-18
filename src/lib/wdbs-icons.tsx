@@ -1,4 +1,4 @@
-import { Star, Building2, User, Music, Trophy, Gamepad2, Mic, Dumbbell, Utensils, Newspaper, GraduationCap, Drama, Cpu, TrendingUp, BookOpen, type LucideIcon } from 'lucide-react';
+import { Star, Building2, User, Music, Trophy, Gamepad2, Mic, Dumbbell, Utensils, Newspaper, GraduationCap, Drama, Cpu, TrendingUp, BookOpen, Heart, KeyRound, Hammer, Code2, Paintbrush, Library, Folder, Bot, type LucideIcon } from 'lucide-react';
 import type { WdbsIconKey } from '../api';
 
 // One entry per WDBS_ICON_KEYS value (api.ts) — keep both in sync with db::WDBS_ICONS on the Rust
@@ -20,6 +20,14 @@ export const WDBS_ICON_OPTIONS: { key: WdbsIconKey; label: string; Icon: LucideI
     { key: 'tech', label: 'Tech', Icon: Cpu },
     { key: 'finance', label: 'Finance', Icon: TrendingUp },
     { key: 'guides', label: 'Guides', Icon: BookOpen },
+    { key: 'health', label: 'Health', Icon: Heart },
+    { key: 'privacy', label: 'Privacy', Icon: KeyRound },
+    { key: 'repair', label: 'Repair', Icon: Hammer },
+    { key: 'coding', label: 'Coding', Icon: Code2 },
+    { key: 'art', label: 'Art', Icon: Paintbrush },
+    { key: 'reading', label: 'Reading', Icon: Library },
+    { key: 'project', label: 'Project', Icon: Folder },
+    { key: 'ai', label: 'AI', Icon: Bot },
 ];
 
 const ICON_BY_KEY = new Map(WDBS_ICON_OPTIONS.map(opt => [opt.key, opt.Icon]));

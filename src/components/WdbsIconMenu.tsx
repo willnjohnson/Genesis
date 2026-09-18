@@ -33,22 +33,25 @@ export function WdbsIconMenu({ x, y, segment, currentIcon, onSelect, onClose, sa
         return () => document.removeEventListener('mousedown', handler);
     }, [onClose]);
 
+    // Capped rather than sized to fit every icon exactly — the picker (WDBS_ICON_OPTIONS) keeps
+    // growing, and a fixed-to-content height would need bumping again each time. Past the cap the
+    // grid scrolls internally instead.
     const MENU_WIDTH = 224;
-    const MENU_HEIGHT = 290;
+    const MAX_MENU_HEIGHT = 320;
     const left = Math.min(x, window.innerWidth - MENU_WIDTH - 12);
-    const top = Math.min(y, window.innerHeight - MENU_HEIGHT - 12);
+    const top = Math.min(y, window.innerHeight - MAX_MENU_HEIGHT - 12);
 
     return (
         <div
             ref={containerRef}
-            style={{ left, top, width: MENU_WIDTH }}
-            className="fixed z-[200] bg-[#1a1a1a] border border-[#333] rounded-xl shadow-2xl p-3 animate-in fade-in zoom-in-95 duration-150"
+            style={{ left, top, width: MENU_WIDTH, maxHeight: MAX_MENU_HEIGHT }}
+            className="fixed z-[200] bg-[#1a1a1a] border border-[#333] rounded-xl shadow-2xl p-3 animate-in fade-in zoom-in-95 duration-150 flex flex-col"
             onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
         >
-            <div className="text-xs font-bold text-white mb-2 truncate">
+            <div className="text-xs font-bold text-white mb-2 truncate shrink-0">
                 Icon for {segment}
             </div>
-            <div className="grid grid-cols-4 gap-1.5">
+            <div className="grid grid-cols-4 gap-1.5 overflow-y-auto custom-scrollbar pr-0.5 min-h-0">
                 <button
                     onClick={() => onSelect('')}
                     disabled={saving}
@@ -72,7 +75,7 @@ export function WdbsIconMenu({ x, y, segment, currentIcon, onSelect, onClose, sa
                 ))}
             </div>
             {error && (
-                <div className="mt-2 text-[10px] text-red-400 bg-red-900/20 border border-red-500/30 rounded-md px-2 py-1.5">
+                <div className="mt-2 text-[10px] text-red-400 bg-red-900/20 border border-red-500/30 rounded-md px-2 py-1.5 shrink-0">
                     {error}
                 </div>
             )}

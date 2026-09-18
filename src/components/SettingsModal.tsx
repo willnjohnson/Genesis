@@ -1,4 +1,4 @@
-import { X, Settings, Key, HardDrive, Monitor, History, Cpu } from "lucide-react";
+import { X, Settings, Key, HardDrive, Monitor, History, Cpu, Palette, FileDown } from "lucide-react";
 import { useState, useEffect } from "react";
 import { BRAND } from '../branding';
 import {
@@ -10,8 +10,10 @@ import {
 import { ApiKeyTab } from "./settings/ApiKeyTab";
 import { DatabaseTab } from "./settings/DatabaseTab";
 import { DisplayTab } from "./settings/DisplayTab";
+import { ThemeTab } from "./settings/ThemeTab";
 import { HistoryTab } from "./settings/HistoryTab";
 import { PluginsTab } from "./settings/PluginsTab";
+import { ExportTab } from "./settings/ExportTab";
 
 interface Props {
     isOpen: boolean;
@@ -30,14 +32,16 @@ interface Props {
     showSynthesizeUpload?: boolean;
 }
 
-type Tab = 'api' | 'db' | 'display' | 'history' | 'plugins';
+type Tab = 'api' | 'db' | 'display' | 'theme' | 'history' | 'plugins' | 'export';
 
 const TAB_CONFIG: { id: Tab; label: string; Icon: React.ElementType }[] = [
     { id: 'api',     label: 'API Key',  Icon: Key },
     { id: 'db',      label: 'Database', Icon: HardDrive },
     { id: 'display', label: 'Display',  Icon: Monitor },
+    { id: 'theme',   label: 'Theme',    Icon: Palette },
     { id: 'history', label: 'History',  Icon: History },
     { id: 'plugins', label: 'Plugins',  Icon: Cpu },
+    { id: 'export',  label: 'Export',   Icon: FileDown },
 ];
 
 export function SettingsModal({
@@ -190,6 +194,12 @@ export function SettingsModal({
                                 onUpdate={handleUpdateDisplay}
                             />
                         )}
+                        {!loading && activeTab === 'theme' && (
+                            <ThemeTab
+                                settings={displaySettings}
+                                onUpdate={handleUpdateDisplay}
+                            />
+                        )}
                         {!loading && activeTab === 'history' && (
                             <HistoryTab
                                 entries={history}
@@ -206,6 +216,9 @@ export function SettingsModal({
                                     setHistory([]);
                                 }}
                             />
+                        )}
+                        {!loading && activeTab === 'export' && (
+                            <ExportTab />
                         )}
                         {activeTab === 'plugins' && (
                             <PluginsTab

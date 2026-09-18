@@ -144,10 +144,10 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                                 <ul className="space-y-1.5 pl-2">
                                     {groupedTerms[char].map(t => (
                                         <li key={t.term} className="text-gray-300 flex items-center group">
-                                            <div className="w-1.5 h-1.5 rounded-full bg-[#444] mr-3 shrink-0 group-hover:bg-red-400 transition-colors"></div>
+                                            <div className="w-1.5 h-1.5 rounded-full bg-[#444] mr-3 shrink-0 group-hover:bg-[var(--k-accent)] transition-colors"></div>
                                             <button
                                                 onClick={() => setSelectedTerm(t)}
-                                                className="group-hover:text-red-400 transition-colors cursor-pointer text-base font-medium text-left flex-1 hover:underline hover:decoration-dotted hover:underline-offset-4"
+                                                className="group-hover:text-[var(--k-accent)] transition-colors cursor-pointer text-base font-medium text-left flex-1 hover:underline hover:decoration-dotted hover:underline-offset-4"
                                             >
                                                 {t.term}
                                             </button>

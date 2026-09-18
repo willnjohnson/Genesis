@@ -366,7 +366,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         <form onSubmit={handleSubmit} className="w-full mb-4 px-4 relative z-50">
             <div className={`flex items-stretch justify-center transition-all ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
                 <div ref={containerRef} className="relative flex-1">
-                    <div className={`flex flex-wrap items-center bg-[#121212] border border-[#404040] ${isLibraryOrGlossary ? 'rounded-full' : 'rounded-l-full'} focus-within:ring-1 focus-within:ring-[red] transition-all min-h-11 py-1 px-3 gap-2`}>
+                    <div className={`flex flex-wrap items-center bg-[#121212] border border-[#404040] ${isLibraryOrGlossary ? 'rounded-full' : 'rounded-l-full'} focus-within:ring-1 focus-within:ring-[var(--k-accent)] transition-all min-h-11 py-1 px-3 gap-2`}>
                         {facets.map((f, i) => (
                             <div key={`${f.type}-${i}`} className="relative flex items-center gap-1.5 bg-[#272727] border border-[#444444] text-[#aaaaaa] rounded-full px-3 py-0.5 animate-in zoom-in-95 duration-200 shrink-0 select-none facet-menu-container">
                                 <button
@@ -396,13 +396,13 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                                     key={af.type}
                                                     type="button"
                                                     onClick={() => handleFacetChange(i, af.type)}
-                                                    className={`w-full text-left px-3 py-2 text-[11px] font-semibold transition-colors flex items-center justify-between group ${f.type === af.type ? 'text-red-500 bg-red-400/5 cursor-default' : 'text-gray-400 hover:text-white hover:bg-[#2a2a2a] cursor-pointer'}`}
+                                                    className={`w-full text-left px-3 py-2 text-[11px] font-semibold transition-colors flex items-center justify-between group ${f.type === af.type ? 'text-[var(--k-accent)] bg-[color-mix(in_srgb,var(--k-accent)_5%,transparent)] cursor-default' : 'text-gray-400 hover:text-white hover:bg-[#2a2a2a] cursor-pointer'}`}
                                                 >
                                                     <div className="flex items-center gap-2">
                                                         {getFacetIcon(af.type)}
                                                         {af.label}
                                                     </div>
-                                                    {f.type === af.type && <div className="w-1.5 h-1.5 rounded-full bg-red-500" />}
+                                                    {f.type === af.type && <div className="w-1.5 h-1.5 rounded-full bg-[var(--k-accent)]" />}
                                                 </button>
                                             ))}
                                         </div>
@@ -491,24 +491,24 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
 
                     {/* Search History Dropdown */}
                     {showHistory && !isLibraryOrGlossary && filteredHistory.length > 0 && (
-                        <div className="absolute top-full left-0 right-0 mt-1.5 bg-white dark:bg-[#141414] border border-gray-200 dark:border-[#303030] rounded-xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
-                            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 dark:border-[#272727]">
-                                <History className="w-3.5 h-3.5 text-gray-400 dark:text-[#666]" />
-                                <span className="text-[11px] font-bold text-gray-400 dark:text-[#555] uppercase tracking-widest">Recent Searches</span>
+                        <div className="absolute top-full left-0 right-0 mt-1.5 bg-[#141414] border border-[#303030] rounded-xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
+                            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[#272727]">
+                                <History className="w-3.5 h-3.5 text-[#666]" />
+                                <span className="text-[11px] font-bold text-[#555] uppercase tracking-widest">Recent Searches</span>
                             </div>
                             <ul className="max-h-72 overflow-y-auto">
                                 {filteredHistory.map((entry) => (
-                                    <li key={entry.id} className="flex items-center group hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
+                                    <li key={entry.id} className="flex items-center group hover:bg-white/5 transition-colors">
                                         <button
                                             type="button"
                                             onClick={() => handleHistorySelect(entry)}
                                             className="flex items-center gap-3 px-4 py-2.5 text-left flex-1 min-w-0"
                                         >
-                                            <Clock className="w-3.5 h-3.5 text-gray-400 dark:text-[#555] shrink-0 group-hover:text-gray-600 dark:group-hover:text-[#888] transition-colors" />
-                                            <span className="text-sm text-gray-600 dark:text-[#aaaaaa] group-hover:text-gray-900 dark:group-hover:text-white transition-colors truncate flex-1">
+                                            <Clock className="w-3.5 h-3.5 text-[#555] shrink-0 group-hover:text-[#888] transition-colors" />
+                                            <span className="text-sm text-[#aaaaaa] group-hover:text-white transition-colors truncate flex-1">
                                                 {decodeHtmlEntities(entry.search_query)}
                                             </span>
-                                            <span className="text-[10px] text-gray-400 dark:text-[#444] shrink-0 ml-2">
+                                            <span className="text-[10px] text-[#444] shrink-0 ml-2">
                                                 {new Date(entry.searchedAt).toLocaleDateString()}
                                             </span>
                                         </button>
@@ -520,7 +520,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                                 await del(entry.id);
                                                 setHistory(prev => prev.filter(h => h.id !== entry.id));
                                             }}
-                                            className="pr-3 pl-1 py-2.5 text-gray-300 dark:text-[#444] hover:text-red-500 transition-colors cursor-pointer shrink-0"
+                                            className="pr-3 pl-1 py-2.5 text-[#444] hover:text-red-500 transition-colors cursor-pointer shrink-0"
                                             title="Remove from history"
                                         >
                                             <X className="w-3.5 h-3.5" />

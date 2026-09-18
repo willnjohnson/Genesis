@@ -47,7 +47,9 @@ export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
 
                 {/* Content */}
                 <div className="p-6 bg-[#0f0f0f] overflow-y-auto flex-1">
-                    <div className="leading-relaxed prose dark:prose-invert prose-lg max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
+                    {/* prose-sm, not prose-lg — kept in parity with BiographyModal/Sidebar's Summary
+                        panel, both of which moved off prose-lg for reading oversized next to them. */}
+                    <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
                         <ReactMarkdown
                             remarkPlugins={[remarkGfm]}
                             components={{

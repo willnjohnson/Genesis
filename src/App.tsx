@@ -5,10 +5,12 @@ import {
     type Video, type BiographyEntry, saveTags, getBiography,
 } from "./api";
 import { saveImageAs } from "./lib/save-image-as";
+import { applyTheme, resolveTheme, loadCustomThemes } from "./lib/themes";
 import { SearchBar, type Facet } from "./components/SearchBar";
 import { VideoList } from "./components/VideoList";
 import { Sidebar } from "./components/Sidebar";
 import { BRAND } from "./branding";
+import { BrandLogo } from "./components/BrandLogo";
 import { Notification, type NotificationType } from "./components/Notification";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SettingsModal } from "./components/SettingsModal";
@@ -272,11 +274,11 @@ function App() {
 
     // ── Theme / display settings ─────────────────────────────────────────────
     useEffect(() => {
-        getDisplaySettings().then(settings => {
-            document.documentElement.classList.toggle('dark', settings.theme === 'dark');
+        Promise.all([getDisplaySettings(), loadCustomThemes()]).then(([settings, customThemes]) => {
+            applyTheme(resolveTheme(settings.theme, customThemes));
             setVideoListMode((settings.videoListMode as 'grid' | 'compact') || 'grid');
             setNavigationOrientation((settings.navigationOrientation as 'horizontal' | 'vertical') || 'horizontal');
-        }).catch(() => document.documentElement.classList.add('dark'));
+        }).catch(() => applyTheme(resolveTheme(undefined, [])));
     }, []);
 
     // ── Scroll-to-top ────────────────────────────────────────────────────────
@@ -364,14 +366,30 @@ function App() {
         } catch { /* ignore */ }
     };
 
-    const handleSearchInLibrary = (term: string, mode: 'tag' | 'library') => {
-        // First switch to library to ensure fresh mount
-        setViewMode('library');
-        // Close sidebar if open
+    // Shared by Glossary's "Search by Tag"/"Search in Library/Portal" and Biography's "View
+    // More" — all three jump into the Library/Portal grid with a specific query. If the Drive
+    // panel was left open with a Warp Drive category selected, `library.wdbsFilter` stays set
+    // and useLibrary's fetch routes the query through getVideosByWdbs instead of plain
+    // searchLibrary — that endpoint doesn't understand facet syntax (`handle:`/`tag_search:`/...)
+    // the way searchLibrary does, so the query came back malformed and the fetch failed outright
+    // ("Failed to Load Portal/Library"), on top of silently (and confusingly) scoping the search
+    // to whatever category happened to still be selected. Closing the Drive panel (and the bulk-
+    // assign state that only makes sense while it's open — mirrors the panel's own toggle-off
+    // handler below) before setting the query avoids both problems.
+    const goToLibrarySearch = useCallback((query: string) => {
+        setShowDrivePanel(false);
+        library.setWdbsFilter(null);
+        setDriveFilterLabel('');
+        setBulkAssignMode(false);
+        setBulkSelectedIds(new Set());
+        setBulkAssignMenu(null);
         setSidebarOpen(false);
-        // Then set query - will be picked up on next render
-        const query = mode === 'tag' ? `tag_search:${term}` : term;
+        setViewMode('library');
         library.setLibrarySearch(query);
+    }, [library]);
+
+    const handleSearchInLibrary = (term: string, mode: 'tag' | 'library') => {
+        goToLibrarySearch(mode === 'tag' ? `tag_search:${term}` : term);
     };
 
     const handleViewBiography = useCallback(async (channelHandle: string) => {
@@ -498,10 +516,7 @@ function App() {
                 <div className="fixed left-0 top-0 h-full w-16 bg-[#0f0f0f] border-r border-[#272727] z-40 flex flex-col items-center py-6">
                     {/* Logo */}
                     <div className="mb-8">
-                        <img
-                            src={BRAND.logo}
-                            alt={BRAND.name}
-                            className="w-8 h-8 pointer-events-auto"
+                        <BrandLogo
                             onContextMenu={(e) => {
                                 e.preventDefault();
                                 e.stopPropagation();
@@ -572,10 +587,7 @@ function App() {
                     {navigationOrientation === 'horizontal' && (
                         <div className="flex items-center justify-between mb-6 relative border-b border-[#272727] pb-2">
                             <div className="flex items-center gap-3">
-                                <img
-                                    src={BRAND.logo}
-                                    alt={BRAND.name}
-                                    className="w-8 h-8 pointer-events-auto"
+                                <BrandLogo
                                     onContextMenu={(e) => {
                                         e.preventDefault();
                                         e.stopPropagation();
@@ -584,7 +596,7 @@ function App() {
                                 />
                                 <div className="flex flex-col">
                                     <h1 className="text-2xl font-bold tracking-tighter text-white">
-                                        <span className="text-red-500">{BRAND.name.substring(0, 3)}</span>{BRAND.name.substring(3)}
+                                        <span className="text-[var(--k-accent)]">{BRAND.name.substring(0, 3)}</span>{BRAND.name.substring(3)}
                                     </h1>
                                     <span className="text-xs text-gray-500 -mt-0.5">{BRAND.tagline}</span>
                                 </div>
@@ -670,7 +682,7 @@ function App() {
                                     }
                                     return next;
                                 })}
-                                className={`shrink-0 p-2.5 mb-4 rounded-lg border transition-all cursor-pointer ${showDrivePanel ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#606060]'}`}
+                                className={`shrink-0 p-2.5 mb-4 rounded-lg border transition-all cursor-pointer ${showDrivePanel ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
                                 title={`Toggle ${BRAND.driveLabel}`}
                             >
                                 <HardDrive className="w-5 h-5" />
@@ -708,7 +720,7 @@ function App() {
                 </header>
                 {search.error && (
                     <div className="mt-8 text-center animate-in fade-in duration-300">
-                        <div className="text-[#ff4e4e] font-medium bg-[#ff4e4e]/10 px-6 py-3 rounded-lg border border-[#ff4e4e]/20 inline-block mx-auto text-sm">
+                        <div className="text-red-500 font-medium bg-red-900/10 px-6 py-3 rounded-lg border border-red-600/20 inline-block mx-auto text-sm">
                             {search.error}
                         </div>
                     </div>
@@ -722,7 +734,7 @@ function App() {
                              allowModification={allowModificationGlossary}
                          />
                      ) : viewMode === 'biography' ? (
-                          <BiographyView searchQuery={biographySearchQuery} onVideoSelect={handleSelectVideo} onViewMore={(handle) => { setViewMode('library'); library.setLibrarySearch(`handle:${handle.replace('@', '')}`); }} allowEditBio={allowEditBio} />
+                          <BiographyView searchQuery={biographySearchQuery} onVideoSelect={handleSelectVideo} onViewMore={(handle) => goToLibrarySearch(`handle:${handle.replace('@', '')}`)} allowEditBio={allowEditBio} />
                      ) : viewMode === 'search' ? (
                         <>
                             <VideoList
@@ -775,7 +787,7 @@ function App() {
                                                 if (!next) setBulkSelectedIds(new Set());
                                                 return next;
                                             })}
-                                            className={`mt-3 w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${bulkAssignMode ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#606060]'}`}
+                                            className={`mt-3 w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${bulkAssignMode ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
                                             title={`Select videos, then right-click to assign them to a ${BRAND.driveLabel} category`}
                                         >
                                             <MousePointerClick className="w-3.5 h-3.5" />
@@ -870,6 +882,7 @@ function App() {
                     library.refreshLibrary();
                 }}
                 onWdbsChanged={() => setDriveVersion(v => v + 1)}
+                onVideoSelect={handleSelectVideo}
             />
 
             <SettingsModal
@@ -922,8 +935,7 @@ function App() {
                     onClose={() => setSelectedBiography(null)}
                     onVideoSelect={handleSelectVideo}
                     onViewMore={(handle) => {
-                        setViewMode('library');
-                        library.setLibrarySearch(`handle:${handle}`);
+                        goToLibrarySearch(`handle:${handle}`);
                         setSelectedBiography(null);
                     }}
                     allowEditBio={allowEditBio}

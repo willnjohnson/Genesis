@@ -217,12 +217,12 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                         <ul className="space-y-1.5 pl-2">
                             {grouped[char].map((person) => (
                                 <li key={person.handle} className="text-gray-300 group flex items-center">
-                                    <div className="w-1.5 h-1.5 rounded-full bg-[#444] mr-3 shrink-0 group-hover:bg-red-400 transition-colors"></div>
+                                    <div className="w-1.5 h-1.5 rounded-full bg-[#444] mr-3 shrink-0 group-hover:bg-[var(--k-accent)] transition-colors"></div>
                                      <button
                                          onClick={() => setSelected(person)}
                                          className="flex-1 text-left cursor-pointer"
                                      >
-                                         <span className="group-hover:underline group-hover:decoration-dotted group-hover:underline-offset-4 group-hover:text-red-400 transition-all text-base font-medium">
+                                         <span className="group-hover:underline group-hover:decoration-dotted group-hover:underline-offset-4 group-hover:text-[var(--k-accent)] transition-all text-base font-medium">
                                              {person.displayName || person.handle}
                                          </span>
                                          <span className="ml-1.5 text-xs text-gray-500">({person.handle})</span>
@@ -269,13 +269,13 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
 
             {editing && (
                 <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200" onClick={() => setEditing(null)}>
-                    <form onSubmit={saveEdit} onClick={(e) => e.stopPropagation()} className="bg-white dark:bg-[#0f0f0f] border border-gray-200 dark:border-[#303030] rounded-2xl w-full max-w-4xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
-                <div className="px-6 py-4 border-b border-gray-200 dark:border-[#303030] flex items-center justify-between bg-gray-100 dark:bg-[#141414]">
-                            <div className="text-black dark:text-gray-200">
+                    <form onSubmit={saveEdit} onClick={(e) => e.stopPropagation()} className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-4xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+                <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
+                            <div className="text-gray-200">
                                 <h2 className="text-lg font-bold">Edit Bio</h2>
-                                <p className="text-xs text-gray-500 dark:text-gray-400">{editing.displayName || editing.handle} ({editing.handle})</p>
+                                <p className="text-xs text-gray-400">{editing.displayName || editing.handle} ({editing.handle})</p>
                             </div>
-                            <button type="button" onClick={() => setEditing(null)} className="text-gray-500 dark:text-gray-500 hover:text-black dark:hover:text-white transition-colors cursor-pointer">
+                            <button type="button" onClick={() => setEditing(null)} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
                                 <X className="w-5 h-5" />
                             </button>
                         </div>
@@ -289,7 +289,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                                     onChange={(e) => setEditing(prev => ({ ...prev, bio: e.target.value }))}
                                     onKeyDown={(e) => handleMarkdownKeyDown(e, editing?.bio || '', (val) => setEditing(prev => ({ ...prev, bio: val })))}
                                     rows={16}
-                                    className="w-full bg-gray-100 dark:bg-[#121212] border border-gray-300 dark:border-[#333] text-black dark:text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all resize-none placeholder-gray-500 dark:placeholder-gray-600"
+                                    className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all resize-none placeholder-gray-600"
                                     placeholder="Describe who this person is (Markdown supported)... Tip: paste your existing YouTube channel description here as a starting point."
                                 />
                             </div>
@@ -310,8 +310,8 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                                                  title={config.label}
                                                   className={`flex items-center justify-center w-10 h-10 rounded-lg shrink-0 transition-colors cursor-pointer ${
                                                       isActive
-                                                          ? 'bg-blue-600 text-white'
-                                                          : 'bg-gray-200 dark:bg-[#1b1b1b] border border-gray-300 dark:border-[#333] text-gray-600 dark:text-gray-400 hover:text-black dark:hover:text-white hover:bg-gray-300 dark:hover:bg-[#262626]'
+                                                          ? 'bg-blue-600'
+                                                          : 'bg-[#1b1b1b] border border-[#333] text-gray-400 hover:text-white hover:bg-[#262626]'
                                                   }`}
                                              >
                                                  <Icon className="w-5 h-5" />
@@ -330,15 +330,15 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                                     type="text"
                                     value={editing ? (editing[activeSocialTab] || '') : ''}
                                     onChange={(e) => setEditing({ ...editing, [activeSocialTab]: e.target.value })}
-                                    className="w-full bg-gray-100 dark:bg-[#121212] border border-gray-300 dark:border-[#333] text-black dark:text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all placeholder-gray-500 dark:placeholder-gray-600"
+                                    className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all placeholder-gray-600"
                                     placeholder={socialTabConfig[activeSocialTab].placeholder}
                                 />
                             </div>
                         </div>
 
-                        <div className="px-6 py-4 border-t border-gray-200 dark:border-[#303030] flex justify-end gap-3 bg-gray-100 dark:bg-[#141414]">
-                            <button type="button" onClick={() => setEditing(null)} className="px-4 py-2 rounded-lg bg-gray-200 dark:bg-[#222222] border border-gray-300 dark:border-[#383838] hover:bg-gray-300 dark:hover:bg-[#3f3f3f] cursor-pointer text-black dark:text-white text-sm font-semibold transition-colors">Cancel</button>
-                            <button type="submit" className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-all text-sm font-bold cursor-pointer">Save Bio</button>
+                        <div className="px-6 py-4 border-t border-[#303030] flex justify-end gap-3 bg-[#141414]">
+                            <button type="button" onClick={() => setEditing(null)} className="px-4 py-2 rounded-lg bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] cursor-pointer text-white text-sm font-semibold transition-colors">Cancel</button>
+                            <button type="submit" className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 transition-all text-sm font-bold cursor-pointer">Save Bio</button>
                         </div>
                     </form>
                 </div>
@@ -388,20 +388,20 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200" onClick={onClose}>
-            <div onClick={(e) => e.stopPropagation()} className="bg-white dark:bg-[#0f0f0f] border border-gray-200 dark:border-[#303030] rounded-2xl w-full max-w-7xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 h-[90vh]">
-                        <div className="px-6 py-4 border-b border-gray-200 dark:border-[#303030] flex items-center justify-between bg-gray-100 dark:bg-[#141414]">
+            <div onClick={(e) => e.stopPropagation()} className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-7xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 h-[90vh]">
+                        <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
                     <div className="flex items-center gap-3 pr-4 overflow-hidden">
                         <FileText className="w-5 h-5 text-gray-400 shrink-0" />
-                        <h2 className="text-xl font-bold text-black dark:text-white truncate">{title}</h2>
-                        <span className="text-xs text-gray-500 dark:text-gray-400">{biography.handle}</span>
+                        <h2 className="text-xl font-bold text-white truncate">{title}</h2>
+                        <span className="text-xs text-gray-400">{biography.handle}</span>
                     </div>
                      <div className="flex items-center gap-2">
                          {onEdit && allowEditBio !== false && (
-                             <button onClick={onEdit} className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-500 text-white cursor-pointer">
+                             <button onClick={onEdit} className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-500 cursor-pointer">
                                  Edit Bio
                              </button>
                          )}
-                         <button onClick={onClose} className="text-gray-500 dark:text-gray-500 hover:text-black dark:hover:text-white transition-colors cursor-pointer">
+                         <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
                              <X className="w-5 h-5" />
                          </button>
                      </div>
@@ -409,8 +409,8 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
 
                   <div className="flex-1 flex flex-col lg:flex-row min-h-0">
                       {/* Main Content: Bio */}
-                       <div className="flex-1 border-b lg:border-b-0 lg:border-r border-gray-200 dark:border-[#272727] overflow-y-auto p-6">
-                           <h3 className="text-lg font-bold text-black dark:text-white mb-4">About</h3>
+                       <div className="flex-1 border-b lg:border-b-0 lg:border-r border-[#272727] overflow-y-auto p-6">
+                           <h3 className="text-lg font-bold text-white mb-4">About</h3>
                            {/* Font size/markdown look-and-feel kept in parity with the video Summary panel
                                (prose-sm — see Sidebar.tsx) rather than the previous prose-lg, which read
                                oversized next to it. */}
@@ -444,16 +444,16 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
 
                        {/* Sidebar Content: Latest Videos — kept narrower than the About panel gets wide
                            (was w-96) so About has more horizontal room for markdown text. */}
-                       <div className="w-full lg:w-80 bg-gray-50 dark:bg-[#0f0f0f] flex flex-col p-6 space-y-4">
+                       <div className="w-full lg:w-80 bg-[#0f0f0f] flex flex-col p-6 space-y-4">
                           <div className="flex items-center justify-between mb-4">
-                              <h3 className="text-lg font-bold text-black dark:text-white">Latest Videos</h3>
+                              <h3 className="text-lg font-bold text-white">Latest Videos</h3>
                              {videos.length > 0 && (
                                  <button
                                      onClick={() => {
                                          onViewMore?.(biography.handle);
                                          onClose();
                                      }}
-                                      className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors cursor-pointer p-1"
+                                      className="text-xs font-semibold text-blue-400 hover:text-blue-300 transition-colors cursor-pointer p-1"
                                  >
                                      View More
                                  </button>
@@ -462,10 +462,10 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
 
                          {loadingVideos ? (
                              <div className="flex items-center justify-center py-8">
-                                  <div className="w-4 h-4 border-2 border-black dark:border-white border-t-transparent rounded-full animate-spin" />
+                                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                              </div>
                          ) : videos.length === 0 ? (
-                              <div className="text-center text-gray-600 dark:text-gray-500 py-8">
+                              <div className="text-center text-gray-500 py-8">
                                  <p>No videos found for this channel</p>
                              </div>
                          ) : (
@@ -487,7 +487,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                                                  <span className="text-xs text-gray-500">No Thumbnail</span>
                                              </div>
                                          )}
-                                          <h4 className="text-sm text-black dark:text-white leading-tight flex-1">{video.title}</h4>
+                                          <h4 className="text-sm text-white leading-tight flex-1">{video.title}</h4>
                                      </div>
                                  ))}
                              </div>
@@ -497,7 +497,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
 
                 {/* Sticky Footer: Social Icons */}
                 {activeSocials.length > 0 && (
-                    <div className="flex-shrink-0 border-t border-gray-200 dark:border-[#272727] bg-white dark:bg-[#0f0f0f] px-6 py-4">
+                    <div className="flex-shrink-0 border-t border-[#272727] bg-[#0f0f0f] px-6 py-4">
                         <div className="flex flex-wrap gap-2">
                             {activeSocials.map((key) => {
                                 const config = socialConfig[key];
@@ -508,7 +508,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                                          key={key}
                                          onClick={() => openExternalUrl(rawValue)}
                                          title={config.label}
-                                         className="flex items-center justify-center w-10 h-10 rounded-lg bg-gray-200 dark:bg-[#1b1b1b] border border-gray-300 dark:border-[#333] text-gray-600 dark:text-gray-400 hover:text-black dark:hover:text-white hover:bg-gray-300 dark:hover:bg-[#262626] hover:border-blue-600/50 transition-all cursor-pointer"
+                                         className="flex items-center justify-center w-10 h-10 rounded-lg bg-[#1b1b1b] border border-[#333] text-gray-400 hover:text-white hover:bg-[#262626] hover:border-blue-600/50 transition-all cursor-pointer"
                                      >
                                         <Icon className="w-5 h-5" />
                                     </button>

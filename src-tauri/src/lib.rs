@@ -15,7 +15,7 @@ pub(crate) const DRIVE_LABEL: &str = "Drive";
 #[cfg(not(feature = "genesis"))]
 pub(crate) const DRIVE_LABEL: &str = "Warp Drive";
 
-const VERSION: &str = "0.4.1";
+const VERSION: &str = "0.4.2";
 
 fn get_window_title() -> String {
     format!("{} v{}", APP_NAME, VERSION)
@@ -233,6 +233,10 @@ pub fn run() {
             commands::get_biographies,
             commands::get_biography,
             commands::update_biography,
+            // Export
+            commands::export_to_obsidian,
+            // Similar Videos
+            commands::get_similar_videos,
             get_app_info,
             get_embed_server_port,
         ])

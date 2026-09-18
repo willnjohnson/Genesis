@@ -1,4 +1,4 @@
-import { Sun, Moon, LayoutGrid, List, AlignJustify, AlignLeft } from "lucide-react";
+import { LayoutGrid, List, AlignJustify, AlignLeft } from "lucide-react";
 import { BRAND } from "../../branding";
 import { type DisplaySettings } from "../../api";
 
@@ -27,14 +27,6 @@ function Toggle({ on, onChange }: { on: boolean; onChange: () => void }) {
 }
 
 export function DisplayTab({ settings, currentVideoListMode, currentNavigationOrientation, onUpdate }: Props) {
-    const isDark = settings.theme === 'dark';
-
-    const toggleTheme = () => {
-        const newTheme = isDark ? 'light' : 'dark';
-        onUpdate({ theme: newTheme });
-        document.documentElement.classList.toggle('dark', newTheme === 'dark');
-    };
-
     return (
         <div className="space-y-8 animate-in slide-in-from-right-4 duration-300">
             <div>
@@ -65,25 +57,6 @@ export function DisplayTab({ settings, currentVideoListMode, currentNavigationOr
                             <span className="text-xs text-[#aaaaaa]">Expand {BRAND.name} to fill your primary monitor</span>
                         </div>
                         <Toggle on={settings.fullscreen} onChange={() => onUpdate({ fullscreen: !settings.fullscreen })} />
-                    </div>
-
-                    {/* Theme */}
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <span className="text-sm font-semibold text-white block">Theme</span>
-                            <span className="text-xs text-[#aaaaaa]">Switch between light and dark mode</span>
-                        </div>
-                        <button
-                            onClick={toggleTheme}
-                            className={`w-14 h-7 rounded-full transition-colors relative cursor-pointer flex items-center px-0.5 ${isDark ? 'bg-purple-600' : 'bg-yellow-400'}`}
-                        >
-                            <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full transition-all flex items-center justify-center ${isDark ? 'left-0.5' : 'left-7'}`}>
-                                {isDark
-                                    ? <Moon className="w-3.5 h-3.5 text-purple-800" />
-                                    : <Sun className="w-3.5 h-3.5 text-yellow-600" />
-                                }
-                            </div>
-                        </button>
                     </div>
 
                     {/* Video list layout */}

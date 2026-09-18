@@ -463,13 +463,13 @@ interface VideoCardProps {
 function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowDeletion, onSaveImageAs, bulkAssignMode = false, selected = false, onToggleSelect, onBulkContextMenu }: VideoCardProps) {
     return (
         <div
-            className={`group flex flex-col gap-2 cursor-pointer rounded-lg transition-all ${selected ? 'ring-2 ring-red-500 ring-offset-2 ring-offset-[#0f0f0f]' : ''}`}
+            className={`group flex flex-col gap-2 cursor-pointer rounded-lg transition-all ${selected ? 'ring-2 ring-[var(--k-accent)] ring-offset-2 ring-offset-[var(--k-bg)]' : ''}`}
             onClick={(e) => bulkAssignMode ? onToggleSelect?.(e) : onSelect(video)}
             onContextMenu={bulkAssignMode ? (e) => { e.preventDefault(); onBulkContextMenu?.(e.clientX, e.clientY); } : undefined}
         >
             <div className={`${compact ? 'aspect-[16/9]' : 'aspect-video'} w-full rounded-lg overflow-hidden bg-[#272727] relative`}>
                 {bulkAssignMode && (
-                    <div className={`absolute inset-0 z-10 transition-colors ${selected ? 'bg-red-600/25' : 'bg-black/0 group-hover:bg-black/10'}`} />
+                    <div className={`absolute inset-0 z-10 transition-colors ${selected ? 'bg-[color-mix(in_srgb,var(--k-accent)_25%,transparent)]' : 'bg-black/0 group-hover:bg-black/10'}`} />
                 )}
                 <img
                     src={video.thumbnail}
@@ -501,11 +501,11 @@ function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowD
                             {video.author || "YouTube Creator"}
                         </span>
 
-                        <div className="flex items-center gap-1">
+                        <div className="whitespace-nowrap overflow-hidden text-ellipsis">
                             <span title={`Views: ${parseViewCount(video.viewCount).toLocaleString('en-US')}`}>
                                 {formatViewCount(video.viewCount)} views
                             </span>
-                            <span className="text-[8px]">•</span>
+                            <span className="text-[8px] mx-1">•</span>
                             <span title={`Timestamp: ${video.publishedAt || 'Unknown'}`}>
                                 {formatDate(video.publishedAt)}
                             </span>
@@ -513,9 +513,12 @@ function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowD
 
                         {video.dateAdded && (
                             <div className="flex items-center justify-between mt-0.5 font-medium text-[10px]">
-                                <div className="flex items-center gap-1 text-yellow-600">
-                                    <Bookmark className="w-2.5 h-2.5 fill-yellow-600" />
-                                    <span title={`Timestamp: ${video.dateAdded}`}>
+                                <div className="flex items-center gap-1 text-yellow-600 min-w-0">
+                                    <Bookmark className="w-2.5 h-2.5 fill-yellow-600 shrink-0" />
+                                    <span
+                                        className="whitespace-nowrap overflow-hidden text-ellipsis"
+                                        title={`Timestamp: ${video.dateAdded}`}
+                                    >
                                         {formatDate(video.dateAdded)}
                                     </span>
                                 </div>

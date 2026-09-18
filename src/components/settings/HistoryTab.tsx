@@ -51,8 +51,8 @@ export function HistoryTab({ entries, onDeleteEntry, onClearDate, onClearAll }: 
                         <div key={date}>
                             <div className="flex items-center justify-between mb-2">
                                 <div className="flex items-center gap-2">
-                                    <Clock className="w-3.5 h-3.5 text-gray-400 dark:text-[#555]" />
-                                    <span className="text-[11px] font-bold text-gray-400 dark:text-[#555] uppercase tracking-widest">
+                                    <Clock className="w-3.5 h-3.5 text-[#555]" />
+                                    <span className="text-[11px] font-bold text-[#555] uppercase tracking-widest">
                                         {new Date(date + 'T12:00:00').toLocaleDateString(undefined, {
                                             weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
                                         })}
@@ -60,23 +60,23 @@ export function HistoryTab({ entries, onDeleteEntry, onClearDate, onClearAll }: 
                                 </div>
                                 <button
                                     onClick={() => onClearDate(date)}
-                                    className="text-[10px] font-bold text-gray-400 dark:text-[#555] hover:text-red-500 transition-colors cursor-pointer flex items-center gap-1"
+                                    className="text-[10px] font-bold text-[#555] hover:text-red-500 transition-colors cursor-pointer flex items-center gap-1"
                                 >
                                     <Trash2 className="w-3 h-3" />
                                     Clear day
                                 </button>
                             </div>
-                            <div className="bg-gray-50 dark:bg-[#141414] border border-gray-200 dark:border-[#222] rounded-xl overflow-hidden divide-y divide-gray-100 dark:divide-[#1e1e1e]">
+                            <div className="bg-[#141414] border border-[#222] rounded-xl overflow-hidden divide-y divide-[#1e1e1e]">
                                 {grouped[date].map(entry => (
-                                    <div key={entry.id} className="flex items-center gap-3 px-4 py-2.5 group hover:bg-gray-100 dark:hover:bg-white/[0.02] transition-colors">
-                                        <Clock className="w-3 h-3 text-gray-300 dark:text-[#444] shrink-0" />
-                                        <span className="flex-1 text-sm text-gray-600 dark:text-[#aaaaaa] truncate">{decodeHtmlEntities(entry.search_query)}</span>
-                                        <span className="text-[10px] text-gray-400 dark:text-[#444] shrink-0">
+                                    <div key={entry.id} className="flex items-center gap-3 px-4 py-2.5 group hover:bg-white/[0.02] transition-colors">
+                                        <Clock className="w-3 h-3 text-[#444] shrink-0" />
+                                        <span className="flex-1 text-sm text-[#aaaaaa] truncate">{decodeHtmlEntities(entry.search_query)}</span>
+                                        <span className="text-[10px] text-[#444] shrink-0">
                                             {entry.searchedAt.split(' ')[1]?.slice(0, 5) ?? ''}
                                         </span>
                                         <button
                                             onClick={() => onDeleteEntry(entry.id)}
-                                            className="p-1 hover:text-red-500 text-gray-300 dark:text-[#444] transition-all cursor-pointer shrink-0"
+                                            className="p-1 hover:text-red-500 text-[#444] transition-all cursor-pointer shrink-0"
                                             title="Remove"
                                         >
                                             <X className="w-3 h-3" />

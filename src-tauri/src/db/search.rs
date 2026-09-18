@@ -1,6 +1,7 @@
 use crate::Video;
 use regex::Regex;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
+use std::collections::HashSet;
 use super::summaries::has_real_summary;
 
 // Canonical column order for every video_row() caller, as a single source of truth: video_id,
@@ -346,4 +347,243 @@ pub(crate) fn regenerate_tokens_from_transcript(conn: &Connection, video_id: &st
         params![video_id],
     )?;
     Ok(())
+}
+
+// Lowercases, replaces every non-alphanumeric character with a space, and splits on whitespace —
+// the same cleaning `regenerate_tokens_from_transcript` applies to transcript words, reused here
+// for title/name text that never goes through that SQL pipeline.
+fn clean_words(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// "More like this": finds other videos similar to `video_id` by BM25-ranking the `ftsVideos`
+/// index against a term list built from the seed video's own `tokens` (transcript-derived,
+/// already deduped/stopword-filtered) and title words, then moving any candidate that shares a
+/// curated glossary tag with the seed ahead of ones that don't (see the tag-tiering step below).
+/// The seed's own author/handle words are excluded from that term list — without this, two videos
+/// from the same channel would often look "similar" purely because the channel's own name is
+/// repeated in both (self-intros, outros), which isn't real topical similarity. Needs no
+/// precomputed/stored state: it's a live query against the same FTS5 index regular search already
+/// uses, so a newly added video is eligible the instant its `ftsVideos` row exists, same as search
+/// results are.
+pub fn get_similar_videos(db_path: &str, video_id: &str, limit: i64) -> Result<Vec<Video>> {
+    let conn = Connection::open(db_path)?;
+
+    let seed = conn
+        .query_row(
+            "SELECT tokens, title, author, handle, tags FROM videos WHERE video_id = ?1",
+            params![video_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                ))
+            },
+        )
+        .optional()?;
+    let Some((tokens, title, author, handle, seed_tags_raw)) = seed else {
+        return Ok(vec![]);
+    };
+    let seed_tags: HashSet<String> = seed_tags_raw.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+
+    // The seed's own channel name (both fields, since either can be set independently) — every
+    // word of it is excluded from the term list below.
+    let mut exclude: HashSet<String> = HashSet::new();
+    for name in [author.as_deref(), handle.as_deref()].into_iter().flatten() {
+        exclude.extend(clean_words(name));
+    }
+
+    let stopwords: HashSet<String> = {
+        let mut stmt = conn.prepare("SELECT culls FROM stop_words")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let collected: HashSet<String> = rows.filter_map(|r| r.ok()).collect();
+        collected
+    };
+
+    // `tokens` is already clean/deduped/stopword-filtered by regenerate_tokens_from_transcript —
+    // just split it. Title words get the same treatment inline since they never go through that
+    // pipeline. No frequency/importance ordering survives the DISTINCT in `tokens`, so the MAX_TERMS
+    // cap below takes an arbitrary subset rather than the "most distinctive" terms — bm25's own
+    // IDF weighting during the actual MATCH is what does the real relevance work, so this bounds
+    // query size without materially hurting ranking quality.
+    const MAX_TERMS: usize = 100;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut terms: Vec<String> = Vec::new();
+    for w in tokens.split_whitespace() {
+        if terms.len() >= MAX_TERMS {
+            break;
+        }
+        if exclude.contains(w) {
+            continue;
+        }
+        if seen.insert(w.to_string()) {
+            terms.push(w.to_string());
+        }
+    }
+    for w in clean_words(&title) {
+        if terms.len() >= MAX_TERMS {
+            break;
+        }
+        if w.len() <= 2 || stopwords.contains(&w) || exclude.contains(&w) {
+            continue;
+        }
+        if seen.insert(w.clone()) {
+            terms.push(w);
+        }
+    }
+
+    if terms.is_empty() {
+        // No transcript and a too-short/generic title — nothing to match on. An empty FTS5 MATCH
+        // string is a syntax error, not "match everything", so this must be skipped rather than
+        // run (same rule build_fts_query's own docs call out).
+        return Ok(vec![]);
+    }
+
+    let match_query = terms.join(" OR ");
+    let columns = video_columns_sql("v.");
+    // bm25() column weights follow ftsVideos' own column order (title, summary, tokens, WDBS):
+    // a shared title word counts for more than a shared summary word, more than a shared
+    // transcript token, and WDBS (a taxonomy code, not real language) is zeroed out entirely so
+    // it can't coincidentally influence ranking. Lower bm25() is a better match, hence ASC.
+    //
+    // Pulls more candidates than `limit` so the tag-tiering step below has a real pool to promote
+    // matches from — a candidate that shares a tag with the seed but ranks outside the top `limit`
+    // on raw BM25 alone still needs to be in hand to be promoted ahead of ones that don't share a
+    // tag. Bounded well below "the whole library" so this stays cheap regardless of `limit`.
+    let overfetch = (limit.saturating_mul(5)).clamp(limit, 200);
+    let sql = format!(
+        "SELECT {columns}
+         FROM videos AS v
+         JOIN ftsVideos ON v.rowid = ftsVideos.rowid
+         WHERE ftsVideos MATCH ?1 AND v.video_id != ?2
+         ORDER BY bm25(ftsVideos, 2.0, 1.5, 1.0, 0.0) ASC
+         LIMIT ?3"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let video_iter = stmt.query_map(params![match_query, video_id, overfetch], |row| video_row(row, false))?;
+    let mut candidates = Vec::new();
+    for v in video_iter {
+        candidates.push(v?);
+    }
+
+    // A shared curated glossary tag is a stronger, human-judged similarity signal than incidental
+    // keyword overlap — promote every tag-sharing candidate ahead of every non-sharing one.
+    // `Iterator::partition` preserves relative order within each side, so the existing BM25 order
+    // is kept as the tiebreaker inside both tiers.
+    if !seed_tags.is_empty() {
+        let (shares_tag, rest): (Vec<Video>, Vec<Video>) = candidates.into_iter().partition(|v| {
+            v.tags
+                .as_deref()
+                .map(|t| t.split(',').any(|tag| seed_tags.contains(tag.trim())))
+                .unwrap_or(false)
+        });
+        candidates = shares_tag.into_iter().chain(rest).collect();
+    }
+
+    candidates.truncate(limit as usize);
+    Ok(candidates)
+}
+
+#[cfg(test)]
+mod similar_videos_tests {
+    use crate::db;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_db_path() -> String {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir()
+            .join(format!("kinesis_similar_videos_test_{}.db", n))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    #[test]
+    fn excludes_shared_channel_name_but_ranks_real_topical_overlap() {
+        let db_path = temp_db_path();
+        db::init_db(&db_path).unwrap();
+
+        // vidA and vidB are from the same channel and both repeat the channel's own name, but
+        // are otherwise about unrelated topics — without excluding the channel name from the
+        // match terms, that shared "Same Channel" mention alone would make them look similar.
+        db::save_video(
+            &db_path, "vidA", "Quantum Computing Basics", "Same Channel", 600,
+            "Discussing quantum computing breakthroughs and quantum error correction algorithms with quantum bits. Same Channel here to explain more.",
+            100, "2026-01-01T00:00:00Z", "@samechannel", None,
+        ).unwrap();
+        db::save_video(
+            &db_path, "vidB", "Cooking Pasta Tonight", "Same Channel", 600,
+            "Cooking a delicious pasta dinner tonight with fresh tomatoes and basil. Same Channel back again with another recipe.",
+            100, "2026-01-02T00:00:00Z", "@samechannel", None,
+        ).unwrap();
+        // vidC is from a different channel entirely but genuinely overlaps with vidA's topic.
+        db::save_video(
+            &db_path, "vidC", "Quantum Error Correction Explained", "Different Creator", 600,
+            "Quantum computing is advancing fast, with new quantum error correction techniques emerging using quantum bits every year.",
+            100, "2026-01-03T00:00:00Z", "@differentcreator", None,
+        ).unwrap();
+        // vidD has no transcript and no title — nothing to match on at all.
+        db::save_video(&db_path, "vidD", "", "Nobody", 0, "", 0, "2026-01-04T00:00:00Z", "", None).unwrap();
+
+        let results = db::get_similar_videos(&db_path, "vidA", 10).unwrap();
+        let ids: Vec<&str> = results.iter().map(|v| v.id.as_str()).collect();
+
+        assert!(ids.contains(&"vidC"), "a genuinely topical overlap should surface as similar: {:?}", ids);
+        assert!(!ids.contains(&"vidB"), "sharing only the channel's own repeated name shouldn't count as similar: {:?}", ids);
+        assert!(!ids.contains(&"vidA"), "the seed video should never recommend itself");
+
+        let empty = db::get_similar_videos(&db_path, "vidD", 10).unwrap();
+        assert!(empty.is_empty(), "a video with no transcript/title and nothing to match on should return an empty list, not error");
+
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn shared_glossary_tag_outranks_stronger_raw_keyword_overlap() {
+        let db_path = temp_db_path();
+        db::init_db(&db_path).unwrap();
+
+        // vidA is the seed, tagged "Quantum Computing".
+        db::save_video(
+            &db_path, "vidA", "Quantum Computing Basics", "Creator A", 600,
+            "Quantum computing involves qubits entanglement superposition decoherence algorithms correction circuits gates processors.",
+            100, "2026-01-01T00:00:00Z", "@creatora", None,
+        ).unwrap();
+        db::save_tags(&db_path, "vidA", "Quantum Computing").unwrap();
+
+        // vidE shares far more raw vocabulary with vidA (would win on BM25 alone) but has no tags.
+        db::save_video(
+            &db_path, "vidE", "Deep Dive", "Creator E", 600,
+            "Quantum computing involves qubits entanglement superposition decoherence algorithms correction circuits gates processors technology.",
+            100, "2026-01-02T00:00:00Z", "@creatore", None,
+        ).unwrap();
+
+        // vidF shares much less raw vocabulary with vidA, but carries the same curated tag.
+        db::save_video(
+            &db_path, "vidF", "Beginner Concepts", "Creator F", 600,
+            "Qubits and superposition are core quantum computing concepts explained simply for beginners.",
+            100, "2026-01-03T00:00:00Z", "@creatorf", None,
+        ).unwrap();
+        db::save_tags(&db_path, "vidF", "Quantum Computing").unwrap();
+
+        let results = db::get_similar_videos(&db_path, "vidA", 10).unwrap();
+        let ids: Vec<&str> = results.iter().map(|v| v.id.as_str()).collect();
+        let pos_e = ids.iter().position(|&id| id == "vidE");
+        let pos_f = ids.iter().position(|&id| id == "vidF");
+
+        assert!(pos_e.is_some() && pos_f.is_some(), "both candidates should be found: {:?}", ids);
+        assert!(pos_f < pos_e, "a shared curated tag should outrank stronger raw keyword overlap alone: {:?}", ids);
+
+        std::fs::remove_file(&db_path).ok();
+    }
 }

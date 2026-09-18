@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Tags, Plus, X } from 'lucide-react';
+import { Plus, X } from 'lucide-react';
 
 interface GlossaryTerm {
     term: string;
@@ -16,7 +16,8 @@ interface Props {
 
 /** Displays a video's tags (as glossary-term chips) plus an "add tag" dropdown filtered to
  *  glossary terms not already applied. Clicking a chip opens its term definition (via
- *  `onSelectTerm`); the dropdown closes on an outside click. */
+ *  `onSelectTerm`); the dropdown closes on an outside click. Renders just the tag row — the
+ *  surrounding card/header is owned by Sidebar.tsx's Tags/Similar Videos tab switcher. */
 export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag, onSelectTerm }: Props) {
     const [showTagDropdown, setShowTagDropdown] = useState(false);
     const [tagFilter, setTagFilter] = useState("");
@@ -43,11 +44,6 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
     );
 
     return (
-        <div className="mt-6 p-4 bg-white/5 rounded-xl border border-white/5">
-            <div className="flex items-center gap-2 mb-3">
-                <Tags className="w-4 h-4 text-[#888888]" />
-                <span className="text-[10px] font-bold uppercase tracking-wider text-[#888888]">Video Tags</span>
-            </div>
             <div className="flex flex-wrap items-center gap-1.5">
                 {filtered.map((tag) => (
                     <button
@@ -129,6 +125,5 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
                     )}
                 </div>
             </div>
-        </div>
     );
 }

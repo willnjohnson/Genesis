@@ -1,12 +1,13 @@
-import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus } from 'lucide-react';
+import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, ListVideo } from 'lucide-react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink } from '../api';
+import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, type Video } from '../api';
 import { saveImageAs } from '../lib/save-image-as';
 import { handleMarkdownKeyDown } from '../lib/markdown-editor';
 import { useFindReplace } from './sidebar/useFindReplace';
 import { FindReplacePanel } from './sidebar/FindReplacePanel';
 import { PhotosynthesisPanel } from './sidebar/PhotosynthesisPanel';
 import { VideoTagsPanel } from './sidebar/VideoTagsPanel';
+import { SimilarVideosPanel } from './sidebar/SimilarVideosPanel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { TermDefinitionModal } from './TermDefinitionModal';
@@ -17,6 +18,11 @@ interface GlossaryTerm {
     term: string;
     definition: string;
 }
+
+// Persisted in the generic `settings` table (see api.ts's getSetting/setSetting) so the
+// video/transcript split ratio survives closing and reopening the sidebar, and relaunching
+// the app, instead of resetting to the 65% default every time.
+const SPLIT_PERCENT_SETTING_KEY = 'sidebarSplitPercent';
 
 interface Props {
     isOpen: boolean;
@@ -57,6 +63,9 @@ interface Props {
     // stale the moment they're rendered). `onWdbsUpdated` above only covers the primary value and
     // only updates this same video's own local state, not those other views.
     onWdbsChanged?: () => void;
+    // Swaps the Sidebar to show a different video in place (used by the Similar Videos tab) —
+    // same callback App.tsx already passes to VideoList/BiographyModal for this purpose.
+    onVideoSelect?: (video: Video) => void;
 }
 
 /**
@@ -68,12 +77,13 @@ interface Props {
  * directly, since the two panes are asymmetric (only the summary pane supports image hover-to-
  * delete) rather than a clean shared abstraction.
  */
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged }: Props) {
+export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onVideoSelect }: Props) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
     const [checkingDb, setCheckingDb] = useState(false);
     const [splitPercent, setSplitPercent] = useState(65);
+    const splitPercentRef = useRef(splitPercent);
     const [isResizing, setIsResizing] = useState(false);
     const isResizingRef = useRef(false);
     const autoSwitchedToSummaryRef = useRef(false);
@@ -112,6 +122,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [savingWdbs, setSavingWdbs] = useState(false);
     const [wdbsSuggestions, setWdbsSuggestions] = useState<string[]>([]);
     const [wdbsLinks, setWdbsLinks] = useState<string[]>([]);
+    const [leftTab, setLeftTab] = useState<'tags' | 'similar'>('tags');
+    const [similarVideos, setSimilarVideos] = useState<Video[]>([]);
+    const [loadingSimilar, setLoadingSimilar] = useState(false);
+    const fetchedSimilarForRef = useRef<string | null>(null);
     // The video's actual canonical WDBS, looked up from the database rather than trusted from the
     // `wdbs` prop — a video opened from Search carries a freshly-fetched YouTube `Video` object
     // that never has `wdbs` set, even when that video is already saved locally with one (see
@@ -156,6 +170,23 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         getEmbedServerPort().then(setEmbedPort).catch(() => setEmbedPort(null));
     }, []);
 
+    // Load the last-saved split ratio once on mount (the sidebar stays mounted while hidden, so
+    // this doesn't need to re-run on `isOpen`). Ignore anything that fails to parse into the same
+    // 30-85 range the drag handler itself enforces, so a corrupt/edited setting value can't wedge
+    // the panel into a degenerate layout.
+    useEffect(() => {
+        getSetting(SPLIT_PERCENT_SETTING_KEY).then(value => {
+            const parsed = value ? parseFloat(value) : NaN;
+            if (!isNaN(parsed) && parsed > 30 && parsed < 85) {
+                setSplitPercent(parsed);
+            }
+        }).catch(() => {});
+    }, []);
+
+    useEffect(() => {
+        splitPercentRef.current = splitPercent;
+    }, [splitPercent]);
+
     useEffect(() => {
         if (imageTab === 'venice' && !showSynthesizeVenice) {
             if (showSynthesizePixabay) setImageTab('pixabay');
@@ -178,6 +209,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const stopResizing = useCallback(() => {
         isResizingRef.current = false;
         setIsResizing(false);
+        setSetting(SPLIT_PERCENT_SETTING_KEY, String(splitPercentRef.current)).catch(() => {});
     }, []);
 
     const handleSaveImageAs = async (url: string) => {
@@ -515,6 +547,9 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         setLinkError(null);
         setPrimaryWdbs(wdbs);
         setWdbsInput(decodeWdbs(wdbs));
+        setLeftTab('tags');
+        setSimilarVideos([]);
+        fetchedSimilarForRef.current = null;
         if (videoId && existsInDb) {
             getVideoWdbsLinks(videoId).then(setWdbsLinks).catch(() => setWdbsLinks([]));
             // The `wdbs` prop is only ever populated for a video opened from Library/Portal, whose
@@ -530,6 +565,21 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             setWdbsLinks([]);
         }
     }, [videoId, wdbs, existsInDb]);
+
+    // Lazily loads similar videos only once the user actually switches to that tab (not
+    // prefetched for every opened video) — reset (both the list and this ref) whenever videoId
+    // changes, so switching back to this tab on a new video re-fetches instead of showing stale
+    // results. Tracked via a ref rather than `similarVideos.length > 0` — a video can legitimately
+    // have zero similar videos, and guarding on the result length instead of "have we fetched yet"
+    // meant that case reran the fetch forever (every resolve set loading back to false, which made
+    // the effect's own dependency change and fire again), flickering between the loading and empty
+    // states.
+    useEffect(() => {
+        if (leftTab !== 'similar' || !videoId || fetchedSimilarForRef.current === videoId) return;
+        fetchedSimilarForRef.current = videoId;
+        setLoadingSimilar(true);
+        getSimilarVideos(videoId).then(setSimilarVideos).catch(() => setSimilarVideos([])).finally(() => setLoadingSimilar(false));
+    }, [leftTab, videoId]);
 
     const handleSaveWdbs = useCallback(async () => {
         if (!videoId) return;
@@ -828,13 +878,41 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             )}
 
                                             {existsInDb && (
-                                                <VideoTagsPanel
-                                                    videoTags={videoTags}
-                                                    glossaryTerms={glossaryTerms}
-                                                    onAddTag={onAddTag}
-                                                    onRemoveTag={onRemoveTag}
-                                                    onSelectTerm={setSelectedTerm}
-                                                />
+                                                <div className="mt-6 p-4 bg-white/5 rounded-xl border border-white/5">
+                                                    <div className="flex items-center gap-4 mb-3">
+                                                        <button
+                                                            onClick={() => setLeftTab('tags')}
+                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${leftTab === 'tags' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                        >
+                                                            <Tags className="w-3.5 h-3.5" />
+                                                            Video Tags
+                                                            {leftTab === 'tags' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setLeftTab('similar')}
+                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${leftTab === 'similar' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                        >
+                                                            <ListVideo className="w-3.5 h-3.5" />
+                                                            Similar Videos
+                                                            {leftTab === 'similar' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
+                                                        </button>
+                                                    </div>
+                                                    {leftTab === 'tags' ? (
+                                                        <VideoTagsPanel
+                                                            videoTags={videoTags}
+                                                            glossaryTerms={glossaryTerms}
+                                                            onAddTag={onAddTag}
+                                                            onRemoveTag={onRemoveTag}
+                                                            onSelectTerm={setSelectedTerm}
+                                                        />
+                                                    ) : (
+                                                        <SimilarVideosPanel
+                                                            videos={similarVideos}
+                                                            loading={loadingSimilar}
+                                                            onSelect={(video) => onVideoSelect?.(video)}
+                                                        />
+                                                    )}
+                                                </div>
                                             )}
                                         </>
                                     ) : (
