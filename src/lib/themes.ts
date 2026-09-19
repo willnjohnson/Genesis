@@ -238,14 +238,14 @@ const FOREGLOW: ThemeColors = {
 };
 
 export const BUILTIN_THEMES: Theme[] = [
-    { name: 'dark', label: 'Cytokine', scheme: 'dark', builtin: true, colors: {
+    { name: 'dark', label: 'Erebos', scheme: 'dark', builtin: true, colors: {
         bg: RAW_TOKENS_DARK.bg, surface: RAW_TOKENS_DARK['bg-121212'], surfaceAlt: RAW_TOKENS_DARK['bg-1a1a1a'],
         surfaceRaised: RAW_TOKENS_DARK['bg-303030'], border: RAW_TOKENS_DARK['border-303030'], borderStrong: RAW_TOKENS_DARK['border-505050'],
         text: RAW_TOKENS_DARK['text-white'], textMuted: RAW_TOKENS_DARK['text-gray-400'],
         accent: RAW_TOKENS_DARK.accent, accentHover: RAW_TOKENS_DARK['accent-hover'],
         danger: RAW_TOKENS_DARK['danger-text'], success: RAW_TOKENS_DARK.success, warning: RAW_TOKENS_DARK.warning,
     } },
-    { name: 'light', label: 'Osteokine', scheme: 'light', builtin: true, colors: {
+    { name: 'light', label: 'Phos', scheme: 'light', builtin: true, colors: {
         bg: RAW_TOKENS_LIGHT.bg, surface: RAW_TOKENS_LIGHT['bg-121212'], surfaceAlt: RAW_TOKENS_LIGHT['bg-1a1a1a'],
         surfaceRaised: RAW_TOKENS_LIGHT['bg-303030'], border: RAW_TOKENS_LIGHT['border-303030'], borderStrong: RAW_TOKENS_LIGHT['border-505050'],
         text: RAW_TOKENS_LIGHT['text-white'], textMuted: RAW_TOKENS_LIGHT['text-gray-400'],
@@ -332,10 +332,22 @@ export async function loadCustomThemes(): Promise<Theme[]> {
         const raw = await getSetting(CUSTOM_THEMES_SETTING_KEY);
         if (!raw) return [];
         const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : [];
+        // The value can come from a sync server (an admin-enforced theme), so an entry with the
+        // wrong shape is dropped here instead of crashing applyTheme's color derivation later.
+        return Array.isArray(parsed) ? parsed.filter(isValidTheme) : [];
     } catch {
         return [];
     }
+}
+
+function isValidTheme(t: unknown): t is Theme {
+    if (!t || typeof t !== 'object') return false;
+    const theme = t as Record<string, unknown>;
+    if (typeof theme.name !== 'string' || typeof theme.label !== 'string') return false;
+    if (theme.scheme !== 'dark' && theme.scheme !== 'light') return false;
+    const colors = theme.colors as Record<string, unknown> | null;
+    if (!colors || typeof colors !== 'object') return false;
+    return THEME_COLOR_KEYS.every(key => typeof colors[key] === 'string' && (colors[key] as string).trim() !== '');
 }
 
 export async function saveCustomThemes(themes: Theme[]): Promise<void> {

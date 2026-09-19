@@ -35,11 +35,16 @@ pub fn open_db_location(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[command]
-pub async fn select_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+pub async fn select_folder(app: tauri::AppHandle, start_dir: Option<String>) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let dialog = app.dialog().clone();
-    tauri_plugin_dialog::FileDialogBuilder::new(dialog).pick_folder(move |f| {
+    let mut builder = tauri_plugin_dialog::FileDialogBuilder::new(dialog);
+    // Open where the caller last was, when that folder still exists.
+    if let Some(dir) = start_dir.filter(|d| std::path::Path::new(d).is_dir()) {
+        builder = builder.set_directory(dir);
+    }
+    builder.pick_folder(move |f| {
         let _ = tx.send(f.map(|p| p.to_string()));
     });
     rx.await.map_err(|e| e.to_string())
@@ -76,6 +81,8 @@ pub fn set_db_path_override(app: tauri::AppHandle, folder_path: String) -> Resul
     ConfManager::write_attr(&app, "db_path", &folder_path)?;
     *guard = Some(db_full_path.clone());
     db::init_db(&db_full_path).map_err(|e| format!("Failed to initialize DB at new location: {}", e))?;
+    // The new database has its own workspace name.
+    crate::refresh_window_title(&app);
 
     if old_path_buf.exists() {
         let _ = std::fs::remove_file(&old_db_path);
@@ -91,7 +98,20 @@ pub fn get_db_details(app: tauri::AppHandle) -> Result<DbDetails, String> {
     let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let video_count = db::get_db_stats(&path).map_err(|e| e.to_string())?;
     let history_count = db::get_history_stats(&path).map_err(|e| e.to_string())?;
-    Ok(DbDetails { path, size_bytes, video_count, history_count })
+    let stats = db::get_library_stats(&path).map_err(|e| e.to_string())?;
+    Ok(DbDetails {
+        path,
+        size_bytes,
+        video_count,
+        history_count,
+        channel_count: stats.channel_count,
+        drive_count: stats.drive_count,
+        glossary_count: stats.glossary_count,
+        quick_tag_count: stats.quick_tag_count,
+        biography_count: stats.biography_count,
+        attachment_count: stats.attachment_count,
+        attachment_bytes: stats.attachment_bytes,
+    })
 }
 
 #[command]
@@ -141,6 +161,10 @@ pub fn set_display_settings(app: tauri::AppHandle, settings: DisplaySettings) ->
 
 #[command]
 pub async fn get_setting(app: tauri::AppHandle, key: String) -> Result<Option<String>, String> {
+    // The sync access token is write-only from the webview's point of view.
+    if key == crate::sync::KEY_TOKEN {
+        return Err("This setting can't be read.".to_string());
+    }
     let db_path = get_db_path(&app);
     db::get_setting(&db_path, &key).map_err(|e| e.to_string())
 }
@@ -149,4 +173,13 @@ pub async fn get_setting(app: tauri::AppHandle, key: String) -> Result<Option<St
 pub async fn set_setting(app: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
     let db_path = get_db_path(&app);
     db::set_setting(&db_path, &key, &value).map_err(|e| e.to_string())
+}
+
+/// Several settings at once, for the UI's feature flags (the sync policy is applied).
+#[command]
+pub async fn get_settings(app: tauri::AppHandle, keys: Vec<String>) -> Result<std::collections::HashMap<String, Option<String>>, String> {
+    let db_path = get_db_path(&app);
+    // The sync token is write-only from the webview, like in get_setting.
+    let keys: Vec<String> = keys.into_iter().filter(|k| k != crate::sync::KEY_TOKEN).collect();
+    db::get_settings(&db_path, &keys).map_err(|e| e.to_string())
 }

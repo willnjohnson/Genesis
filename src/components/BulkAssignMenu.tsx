@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Check, X } from 'lucide-react';
 import { getWdbsSuggestions, decodeWdbs } from '../api';
-import { BRAND } from '../branding';
+import { useWorkspace } from '../hooks/useWorkspace';
 import { handleWdbsInputChange } from '../lib/wdbs-input';
 
 interface BulkAssignMenuProps {
@@ -16,11 +16,12 @@ interface BulkAssignMenuProps {
 
 /**
  * Small popover opened by right-clicking a video card in Bulk Assign Mode (see App.tsx) — lets
- * the user type or pick an existing Warp Drive category and apply it to every currently-selected
+ * the user type or pick an existing Drive category and apply it to every currently-selected
  * video in one action. Closes on outside-click or Escape, same pattern SearchBar.tsx uses for
  * its own history dropdown.
  */
 export function BulkAssignMenu({ x, y, count, onAssign, onClose, assigning = false, error }: BulkAssignMenuProps) {
+    const { labels } = useWorkspace();
     const [input, setInput] = useState('');
     const [suggestions, setSuggestions] = useState<string[]>([]);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -64,7 +65,7 @@ export function BulkAssignMenu({ x, y, count, onAssign, onClose, assigning = fal
                 {suggestions.map(s => <option key={s} value={s} />)}
             </datalist>
             <div className="text-xs font-bold text-white mb-2">
-                Assign {count} video{count === 1 ? '' : 's'} to {BRAND.driveLabel}
+                Assign {count} video{count === 1 ? '' : 's'} to {labels.aliasDriveName}
             </div>
             <div className="flex items-center gap-1.5">
                 <input

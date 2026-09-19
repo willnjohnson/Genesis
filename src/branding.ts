@@ -9,56 +9,30 @@ const BRANDING_ID = (import.meta.env.VITE_BRANDING as Brand) || 'kinesis';
 interface BrandConfig {
     id: Brand;
     name: string;
-    tagline: string;
     logo: string;
     repo: string;
     dbName: string;
     storageKey: string;
-    // UI-facing label for the saved-videos section (internal code/types keep calling this
-    // "Library" regardless — see hooks/useLibrary.ts — this only renames what the user sees).
-    // Kinesis demos as "Portal" (see the Library -> Portal enhancement doc) to gauge user
-    // reaction to the Warp Drive-aligned framing; Genesis keeps the plainer "Library".
-    libraryLabel: string;
-    // UI-facing label for the WDBS taxonomy tree browser (see components/WdbsTreePanel.tsx,
-    // toggled from the Library/Portal grid via App.tsx's Drive panel button) — a category-based
-    // way to browse saved videos alongside the grid's flat/search view. "Warp Drive" for Kinesis
-    // matches the Metabolic Warp Drive branding; Genesis keeps the plainer "Drive".
-    driveLabel: string;
-    // UI-facing label for a video's individual WDBS value (see components/Sidebar.tsx) — the
-    // internal name "WDBS" and the db/api layer are unaffected, this only renames what the user
-    // sees next to a single video's taxonomy code.
-    wdbsLabel: string;
-    // UI-facing label for the "Also in" symlink feature (see components/Sidebar.tsx) that lets a
-    // video additionally show up under other WDBS categories without changing its canonical one.
-    linkLabel: string;
 }
 
+// Section names (Search, Library, Drive, ...) are not per-brand: they're the workspace's aliases,
+// see lib/workspace.ts and the Workspace tab in Settings.
 const BRANDS: Record<Brand, BrandConfig> = {
     genesis: {
         id: 'genesis',
         name: 'Genesis',
-        tagline: 'YouTube Transcript Manager',
         logo: GenesisLogo,
         repo: 'https://github.com/willnjohnson/genesis',
         dbName: 'genesis_data.db',
-        storageKey: 'genesis_db_path',
-        libraryLabel: 'Library',
-        driveLabel: 'Drive',
-        wdbsLabel: 'Linktag',
-        linkLabel: 'Symlink'
+        storageKey: 'genesis_db_path'
     },
     kinesis: {
         id: 'kinesis',
         name: 'Kinesis',
-        tagline: 'Metabolic Warp Drive',
         logo: KinesisLogo,
         repo: 'https://github.com/willnjohnson/kinesis',
         dbName: 'kinesis_data.db',
-        storageKey: 'kinesis_db_path',
-        libraryLabel: 'Portal',
-        driveLabel: 'Warp Drive',
-        wdbsLabel: 'Warp',
-        linkLabel: 'Weft'
+        storageKey: 'kinesis_db_path'
     }
 };
 

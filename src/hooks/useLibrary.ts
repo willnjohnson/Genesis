@@ -5,7 +5,7 @@ import {
     type Video, type LibrarySortField, type LibrarySortOrder, type LibraryFilterKind
 } from "../api";
 import { type NotificationType } from "../components/Notification";
-import { BRAND } from "../branding";
+import { useWorkspace } from "./useWorkspace";
 
 // Bumped from 100 -> 300 per the search revision doc ("empirically verified to work great in
 // the Kinesis app").
@@ -33,6 +33,11 @@ export function useLibrary(
     filteredSearchVideos: Video[],
     setNotification: (n: { message: string; type: NotificationType } | null) => void,
 ) {
+    // Read through a ref so renaming the Library in Settings doesn't rebuild the callbacks below
+    // (or, worse, re-trigger the page-1 reload).
+    const { labels } = useWorkspace();
+    const libraryLabelRef = useRef(labels.aliasLibrary);
+    libraryLabelRef.current = labels.aliasLibrary;
     const [libraryVideos, setLibraryVideos] = useState<Video[]>([]);
     const [totalCount, setTotalCount] = useState(0);
     const [librarySearch, setLibrarySearch] = useState("");
@@ -123,7 +128,7 @@ export function useLibrary(
                 if (pluginSummarizeEnabled) refreshSummarizedCount();
             } catch {
                 if (requestIdRef.current === myRequestId) {
-                    setNotification({ message: `Failed to load ${BRAND.libraryLabel}`, type: "error" });
+                    setNotification({ message: `Failed to load ${libraryLabelRef.current}`, type: "error" });
                 }
             } finally {
                 if (requestIdRef.current === myRequestId) setLoading(false);
@@ -167,7 +172,7 @@ export function useLibrary(
             if (result.status === 'exists') {
                 setNotification({ message: `"${video.title.substring(0, 30)}..." already exists in DB.`, type: "info" });
             } else {
-                setNotification({ message: `Saved "${video.title.substring(0, 30)}..." to ${BRAND.libraryLabel}.`, type: "success" });
+                setNotification({ message: `Saved "${video.title.substring(0, 30)}..." to ${libraryLabelRef.current}.`, type: "success" });
                 // Re-fetch page 1 in the background so the new video lands in its correct sorted
                 // position and the total count picks it up, rather than guessing where a naive
                 // client-side prepend would belong under the active sort.
@@ -233,7 +238,7 @@ export function useLibrary(
     const handleSummarizeAll = useCallback(async () => {
         if (summarizeProgress || !pluginSummarizeEnabled) return;
         if (libraryVideos.length === 0 && totalCount === 0) {
-            setNotification({ message: `No videos in ${BRAND.libraryLabel} to summarize`, type: "info" });
+            setNotification({ message: `No videos in ${libraryLabelRef.current} to summarize`, type: "info" });
             return;
         }
         try {

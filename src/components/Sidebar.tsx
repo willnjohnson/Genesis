@@ -1,18 +1,24 @@
-import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, ListVideo } from 'lucide-react';
+import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, ListVideo, Paperclip, Monitor, Cloud } from 'lucide-react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, type Video } from '../api';
+import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, getWdbsAliases, type Video } from '../api';
 import { saveImageAs } from '../lib/save-image-as';
-import { handleMarkdownKeyDown } from '../lib/markdown-editor';
+import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
 import { useFindReplace } from './sidebar/useFindReplace';
 import { FindReplacePanel } from './sidebar/FindReplacePanel';
 import { PhotosynthesisPanel } from './sidebar/PhotosynthesisPanel';
 import { VideoTagsPanel } from './sidebar/VideoTagsPanel';
 import { SimilarVideosPanel } from './sidebar/SimilarVideosPanel';
+import { AttachmentsPanel } from './sidebar/AttachmentsPanel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { remarkHighlight } from '../lib/remark-highlight';
+import { markdownUrlTransform } from '../lib/internal-links';
+import { MarkdownLink } from './MarkdownLink';
 import { TermDefinitionModal } from './TermDefinitionModal';
-import { BRAND } from '../branding';
+import { useWorkspace } from '../hooks/useWorkspace';
 import { handleWdbsInputChange } from '../lib/wdbs-input';
+import { driveSegmentLabel } from '../lib/utils';
+import { useFlags } from '../hooks/useFlags';
 
 interface GlossaryTerm {
     term: string;
@@ -63,6 +69,9 @@ interface Props {
     // stale the moment they're rendered). `onWdbsUpdated` above only covers the primary value and
     // only updates this same video's own local state, not those other views.
     onWdbsChanged?: () => void;
+    // Makes the video's Drive and "Also in" tags clickable: closes this panel and shows that Drive in
+    // the Library/Portal. `path` is the storage form, `label` the name the tree shows for it.
+    onSelectDrive?: (path: string, label: string) => void;
     // Swaps the Sidebar to show a different video in place (used by the Similar Videos tab) —
     // same callback App.tsx already passes to VideoList/BiographyModal for this purpose.
     onVideoSelect?: (video: Video) => void;
@@ -77,7 +86,7 @@ interface Props {
  * directly, since the two panes are asymmetric (only the summary pane supports image hover-to-
  * delete) rather than a clean shared abstraction.
  */
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onVideoSelect }: Props) {
+export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, onVideoSelect }: Props) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
@@ -122,7 +131,15 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [savingWdbs, setSavingWdbs] = useState(false);
     const [wdbsSuggestions, setWdbsSuggestions] = useState<string[]>([]);
     const [wdbsLinks, setWdbsLinks] = useState<string[]>([]);
-    const [leftTab, setLeftTab] = useState<'tags' | 'similar'>('tags');
+    // Curated aliases of this video's Drive and "Also in" tags (storage path -> alias), shown as the
+    // tags' tooltips. Only Drives that have one are in here.
+    const [wdbsAliases, setWdbsAliases] = useState<Record<string, string>>({});
+    const [leftTab, setLeftTab] = useState<'tags' | 'similar' | 'attachments'>('tags');
+    // Feature flags a DB owner sets (see lib/flags.ts): parts of this panel can be hidden or made read-only.
+    const { flags } = useFlags();
+    const { labels } = useWorkspace();
+    const availableLeftTabs = ([flags.showVideoTags && 'tags', flags.showSimilarVideos && 'similar', flags.showAttachments && 'attachments'].filter(Boolean)) as ('tags' | 'similar' | 'attachments')[];
+    const activeLeftTab = availableLeftTabs.includes(leftTab) ? leftTab : availableLeftTabs[0];
     const [similarVideos, setSimilarVideos] = useState<Video[]>([]);
     const [loadingSimilar, setLoadingSimilar] = useState(false);
     const fetchedSimilarForRef = useRef<string | null>(null);
@@ -566,6 +583,19 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         }
     }, [videoId, wdbs, existsInDb]);
 
+    useEffect(() => {
+        const paths = [primaryWdbs, ...wdbsLinks].filter((p): p is string => !!p && !!decodeWdbs(p));
+        if (!existsInDb || paths.length === 0) {
+            setWdbsAliases({});
+            return;
+        }
+        let cancelled = false;
+        getWdbsAliases(paths)
+            .then(a => { if (!cancelled) setWdbsAliases(a); })
+            .catch(() => { if (!cancelled) setWdbsAliases({}); });
+        return () => { cancelled = true; };
+    }, [existsInDb, primaryWdbs, wdbsLinks]);
+
     // Lazily loads similar videos only once the user actually switches to that tab (not
     // prefetched for every opened video) — reset (both the list and this ref) whenever videoId
     // changes, so switching back to this tab on a new video re-fetches instead of showing stale
@@ -595,7 +625,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         } catch (e: any) {
             // update_wdbs already turns a SQLite trigger rejection into a plain-language message
             // (see commands::wdbs::update_wdbs) — surface it as-is.
-            setWdbsError(typeof e === "string" ? e : e?.message ?? `Failed to update ${BRAND.wdbsLabel}.`);
+            setWdbsError(typeof e === "string" ? e : e?.message ?? `Failed to update ${labels.aliasDriveLink}.`);
         } finally {
             setSavingWdbs(false);
         }
@@ -612,7 +642,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             setIsAddingLink(false);
             onWdbsChanged?.();
         } catch (e: any) {
-            setLinkError(typeof e === "string" ? e : e?.message ?? `Failed to ${BRAND.linkLabel.toLowerCase()} ${BRAND.wdbsLabel}.`);
+            setLinkError(typeof e === "string" ? e : e?.message ?? `Failed to ${labels.aliasDriveSymlink.toLowerCase()} ${labels.aliasDriveLink}.`);
         } finally {
             setSavingLink(false);
         }
@@ -665,7 +695,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                     <button
                                         onClick={showBiography ? () => onHandleClick?.(handle.startsWith('@') ? handle : `@${handle}`) : undefined}
                                         className={`text-xs text-[#aaaaaa] ${showBiography ? 'hover:text-red-400 cursor-pointer' : ''} text-left`}
-                                        title={showBiography ? "View Bio" : undefined}
+                                        title={showBiography ? `View ${labels.aliasBiographyItem}` : undefined}
                                     >
                                         {handle.startsWith('@') ? handle : `@${handle}`}
                                     </button>
@@ -717,6 +747,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                 <div className="flex-1 overflow-y-auto p-6 flex flex-col custom-scrollbar">
                                     {videoId && isOpen ? (
                                         <>
+                                            {flags.showVideoPlayer && (
                                             <div className={`aspect-video w-full bg-black rounded-lg overflow-hidden border border-gray-800 relative group ${isResizing ? 'pointer-events-none' : ''}`}>
                                                  <iframe
                                                      width="100%"
@@ -728,6 +759,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                      referrerPolicy="strict-origin-when-cross-origin"
                                                      allowFullScreen
                                                  />
+                                                {flags.showOpenInYouTube && (
                                                 <div className="absolute bottom-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                                     <button
                                                         onClick={() => openExternalUrl(`https://www.youtube.com/watch?v=${videoId}`)}
@@ -737,15 +769,27 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         Open in YouTube
                                                     </button>
                                                 </div>
+                                                )}
                                             </div>
+                                            )}
+                                            {/* With the player hidden the overlay button has nothing to sit on. */}
+                                            {!flags.showVideoPlayer && flags.showOpenInYouTube && (
+                                                <button
+                                                    onClick={() => openExternalUrl(`https://www.youtube.com/watch?v=${videoId}`)}
+                                                    className="self-start bg-[#272727] hover:bg-[#3f3f3f] text-white px-3 py-1.5 rounded-md text-[10px] font-bold flex items-center gap-1.5 border border-white/10 cursor-pointer"
+                                                >
+                                                    <ExternalLink className="w-3 h-3" />
+                                                    Open in YouTube
+                                                </button>
+                                            )}
 
-                                            {existsInDb && (
+                                            {existsInDb && flags.showDrive && (
                                                 <>
                                                 <datalist id="wdbs-suggestions">
                                                     {wdbsSuggestions.map(s => <option key={s} value={s} />)}
                                                 </datalist>
                                                 <div className="mt-3 flex items-center gap-2 text-xs">
-                                                    <span className="text-[#666666] uppercase font-bold tracking-wider text-[10px] shrink-0">{BRAND.wdbsLabel}:</span>
+                                                    <span className="text-[#666666] uppercase font-bold tracking-wider text-[10px] shrink-0">{labels.aliasDriveLink}:</span>
                                                     {isEditingWdbs ? (
                                                         <>
                                                             <input
@@ -781,11 +825,21 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         </>
                                                     ) : (
                                                         <>
-                                                            <span className="text-[#aaaaaa] font-mono truncate">{decodeWdbs(primaryWdbs) || "N/A"}</span>
+                                                            {onSelectDrive && hasPrimaryWdbs ? (
+                                                                <button
+                                                                    onClick={() => onSelectDrive(primaryWdbs!, driveSegmentLabel(decodeWdbs(primaryWdbs)))}
+                                                                    title={wdbsAliases[primaryWdbs!] ?? decodeWdbs(primaryWdbs)}
+                                                                    className="text-[#aaaaaa] hover:text-white hover:underline underline-offset-2 font-mono truncate transition-colors cursor-pointer text-left"
+                                                                >
+                                                                    {decodeWdbs(primaryWdbs)}
+                                                                </button>
+                                                            ) : (
+                                                                <span className="text-[#aaaaaa] font-mono truncate" title={hasPrimaryWdbs ? (wdbsAliases[primaryWdbs!] ?? decodeWdbs(primaryWdbs)) : undefined}>{decodeWdbs(primaryWdbs) || "N/A"}</span>
+                                                            )}
                                                             {allowEditWDBS && (
                                                                 <button
                                                                     onClick={() => setIsEditingWdbs(true)}
-                                                                    title={`Edit ${BRAND.wdbsLabel}`}
+                                                                    title={`Edit ${labels.aliasDriveLink}`}
                                                                     className="text-gray-500 hover:text-blue-400 transition-colors cursor-pointer p-1 shrink-0"
                                                                 >
                                                                     <Pencil className="w-3.5 h-3.5" />
@@ -812,11 +866,21 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                 key={link}
                                                                 className="flex items-center gap-1 bg-[#1a1a1a] border border-[#333] rounded-md pl-2 pr-1 py-0.5 text-[11px] text-[#aaaaaa] font-mono"
                                                             >
-                                                                {decodeWdbs(link)}
+                                                                {onSelectDrive ? (
+                                                                    <button
+                                                                        onClick={() => onSelectDrive(link, driveSegmentLabel(decodeWdbs(link)))}
+                                                                        title={wdbsAliases[link] ?? decodeWdbs(link)}
+                                                                        className="hover:text-white hover:underline underline-offset-2 transition-colors cursor-pointer"
+                                                                    >
+                                                                        {decodeWdbs(link)}
+                                                                    </button>
+                                                                ) : (
+                                                                    <span title={wdbsAliases[link] ?? decodeWdbs(link)}>{decodeWdbs(link)}</span>
+                                                                )}
                                                                 {allowEditWDBS && (
                                                                     <button
                                                                         onClick={() => handleRemoveLink(link)}
-                                                                        title={`Remove ${BRAND.linkLabel.toLowerCase()}`}
+                                                                        title={`Remove ${labels.aliasDriveSymlink.toLowerCase()}`}
                                                                         className="text-gray-500 hover:text-red-400 transition-colors cursor-pointer p-0.5"
                                                                     >
                                                                         <X className="w-3 h-3" />
@@ -843,7 +907,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                 <button
                                                                     onClick={handleAddLink}
                                                                     disabled={savingLink || !linkInput.trim()}
-                                                                    title={`Add ${BRAND.linkLabel.toLowerCase()}`}
+                                                                    title={`Add ${labels.aliasDriveSymlink.toLowerCase()}`}
                                                                     className="text-green-500 hover:text-green-400 transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
                                                                 >
                                                                     <Check className="w-3.5 h-3.5" />
@@ -860,11 +924,11 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         ) : (
                                                             <button
                                                                 onClick={() => setIsAddingLink(true)}
-                                                                title={`${BRAND.linkLabel} to another ${BRAND.wdbsLabel}`}
+                                                                title={`${labels.aliasDriveSymlink} to another ${labels.aliasDriveLink}`}
                                                                 className="flex items-center gap-1 text-gray-500 hover:text-blue-400 transition-colors cursor-pointer px-1.5 py-0.5 rounded-md border border-dashed border-[#333] hover:border-blue-400/50 text-[11px]"
                                                             >
                                                                 <Plus className="w-3 h-3" />
-                                                                {BRAND.linkLabel}
+                                                                {labels.aliasDriveSymlink}
                                                             </button>
                                                         ))}
                                                     </div>
@@ -877,33 +941,54 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                 </>
                                             )}
 
-                                            {existsInDb && (
+                                            {existsInDb && availableLeftTabs.length > 0 && (
                                                 <div className="mt-6 p-4 bg-white/5 rounded-xl border border-white/5">
                                                     <div className="flex items-center gap-4 mb-3">
+                                                        {flags.showVideoTags && (
                                                         <button
                                                             onClick={() => setLeftTab('tags')}
-                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${leftTab === 'tags' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'tags' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                         >
                                                             <Tags className="w-3.5 h-3.5" />
                                                             Video Tags
-                                                            {leftTab === 'tags' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
+                                                            {activeLeftTab === 'tags' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                         </button>
+                                                        )}
+                                                        {flags.showSimilarVideos && (
                                                         <button
                                                             onClick={() => setLeftTab('similar')}
-                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${leftTab === 'similar' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'similar' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                         >
                                                             <ListVideo className="w-3.5 h-3.5" />
                                                             Similar Videos
-                                                            {leftTab === 'similar' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
+                                                            {activeLeftTab === 'similar' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                         </button>
+                                                        )}
+                                                        {flags.showAttachments && (
+                                                        <button
+                                                            onClick={() => setLeftTab('attachments')}
+                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'attachments' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                        >
+                                                            <Paperclip className="w-3.5 h-3.5" />
+                                                            Attachments
+                                                            {activeLeftTab === 'attachments' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
+                                                        </button>
+                                                        )}
                                                     </div>
-                                                    {leftTab === 'tags' ? (
+                                                    {activeLeftTab === 'tags' ? (
                                                         <VideoTagsPanel
                                                             videoTags={videoTags}
                                                             glossaryTerms={glossaryTerms}
+                                                            canEdit={flags.allowEditTags}
                                                             onAddTag={onAddTag}
                                                             onRemoveTag={onRemoveTag}
                                                             onSelectTerm={setSelectedTerm}
+                                                        />
+                                                    ) : activeLeftTab === 'attachments' ? (
+                                                        <AttachmentsPanel
+                                                            key={videoId}
+                                                            videoId={videoId}
+                                                            canEdit={flags.editAttachments}
                                                         />
                                                     ) : (
                                                         <SimilarVideosPanel
@@ -1005,7 +1090,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         {showFindReplace ? 'Close Find' : 'Find & Replace'}
                                                     </button>
                                                 )}
-                                                {!showSummary && !isEditingTranscript && pluginPhotosynthesisEnabled && !hideTranscriptEditButton && (
+                                                {!showSummary && !isEditingTranscript && pluginPhotosynthesisEnabled && !hideTranscriptEditButton && flags.allowEditTranscript && (
                                                     <button
                                                         onClick={() => {
                                                             setIsEditingTranscript(true);
@@ -1018,7 +1103,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         <Pencil className="w-3 h-3" />
                                                     </button>
                                                 )}
-                                                {showSummary && !isEditingSummary && summary && pluginPhotosynthesisEnabled && (
+                                                {showSummary && !isEditingSummary && summary && pluginPhotosynthesisEnabled && flags.allowEditSummary && (
                                                     <button
                                                         onClick={() => {
                                                             setIsEditingSummary(true);
@@ -1080,6 +1165,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                      summaryBackdropRef.current.scrollLeft = e.currentTarget.scrollLeft;
                                                                  }
                                                              }}
+                                                             onContextMenu={handleMarkdownContextMenu}
                                                              onKeyDown={(e) => {
                                                                  handleMarkdownKeyDown(e, editedSummary, setEditedSummary);
                                                                  if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
@@ -1096,19 +1182,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                          <div className="flex-1 relative rounded-lg border border-[#333] bg-black/20 overflow-hidden">
                                                              <div className="absolute inset-0 p-3 overflow-y-auto custom-scrollbar">
                                                                  <ReactMarkdown
-                                                                     remarkPlugins={[remarkGfm]}
+                                                                     remarkPlugins={[remarkGfm, remarkHighlight]}
+ urlTransform={markdownUrlTransform}
                                                                      components={{
-                                                                         a: ({ node, ...props }) => (
-                                                                             <a
-                                                                                 {...props}
-                                                                                 href="#"
-                                                                                 onClick={(e) => {
-                                                                                     e.preventDefault();
-                                                                                     if (props.href) openExternalUrl(props.href);
-                                                                                 }}
-                                                                                 className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
-                                                                             />
-                                                                         ),
+                                                                         a: MarkdownLink,
                                                                           img: ({ node, ...props }) => (
                                                                              (() => {
                                                                                  const src = props.src || '';
@@ -1186,19 +1263,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                     </button>
                                                     <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none">
                                                         <ReactMarkdown
-                                                            remarkPlugins={[remarkGfm]}
+                                                            remarkPlugins={[remarkGfm, remarkHighlight]}
+ urlTransform={markdownUrlTransform}
                                                             components={{
-                                                                a: ({ node, ...props }) => (
-                                                                    <a
-                                                                        {...props}
-                                                                        href="#"
-                                                                        onClick={(e) => {
-                                                                            e.preventDefault();
-                                                                            if (props.href) openExternalUrl(props.href);
-                                                                        }}
-                                                                        className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
-                                                                    />
-                                                                ),
+                                                                a: MarkdownLink,
                                                                  img: ({ node, ...props }) => (
                                                                      <img
                                                                          {...props}
@@ -1217,18 +1285,22 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                     ) : showPromptEditor && pluginSummarizeEnabled ? (
                                         <div className="flex-1 flex flex-col gap-4">
                                             {/* Prompt Tabs */}
-                                            <div className="flex bg-black/20 p-1 rounded-lg border border-white/5 gap-1 shadow-inner">
+                                            <div className="flex items-center gap-4">
                                                 <button
                                                     onClick={() => setPromptTab('local')}
-                                                    className={`flex-1 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all cursor-pointer ${promptTab === 'local' ? 'bg-white text-black shadow-lg scale-[1.02]' : 'text-[#666] hover:text-[#aaa]'}`}
+                                                    className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${promptTab === 'local' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                 >
+                                                    <Monitor className="w-3.5 h-3.5" />
                                                     Local (Ollama)
+                                                    {promptTab === 'local' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                 </button>
                                                 <button
                                                     onClick={() => setPromptTab('cloud')}
-                                                    className={`flex-1 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all cursor-pointer ${promptTab === 'cloud' ? 'bg-white text-black shadow-lg scale-[1.02]' : 'text-[#666] hover:text-[#aaa]'}`}
+                                                    className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${promptTab === 'cloud' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                 >
+                                                    <Cloud className="w-3.5 h-3.5" />
                                                     Cloud (Venice)
+                                                    {promptTab === 'cloud' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                 </button>
                                             </div>
 
@@ -1314,6 +1386,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                         transcriptBackdropRef.current.scrollLeft = e.currentTarget.scrollLeft;
                                                                     }
                                                                 }}
+                                                                onContextMenu={handleMarkdownContextMenu}
                                                                 onKeyDown={(e) => {
                                                                     handleMarkdownKeyDown(e, editedTranscript, setEditedTranscript);
                                                                     if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
@@ -1330,19 +1403,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                             <div className="flex-1 relative rounded-lg border border-[#333] bg-black/20 overflow-hidden">
                                                                 <div className="absolute inset-0 p-3 overflow-y-auto custom-scrollbar">
                                                                     <ReactMarkdown
-                                                                        remarkPlugins={[remarkGfm]}
+                                                                        remarkPlugins={[remarkGfm, remarkHighlight]}
+ urlTransform={markdownUrlTransform}
                                                                         components={{
-                                                                            a: ({ node, ...props }) => (
-                                                                                <a
-                                                                                    {...props}
-                                                                                    href="#"
-                                                                                    onClick={(e) => {
-                                                                                        e.preventDefault();
-                                                                                        if (props.href) openExternalUrl(props.href);
-                                                                                    }}
-                                                                                    className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
-                                                                                />
-                                                                            ),
+                                                                            a: MarkdownLink,
                                                                              img: ({ node, ...props }) => (
                                                                                  <img
                                                                                      {...props}
@@ -1459,7 +1523,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         {showPromptEditor ? 'Hide' : 'Show'}
                                                     </button>
                                                 ) : (
-                                                    <span className="text-[9px] text-[#666666] uppercase font-bold">(Save to {BRAND.libraryLabel} to Edit)</span>
+                                                    <span className="text-[9px] text-[#666666] uppercase font-bold">(Save to {labels.aliasLibrary} to Edit)</span>
                                                 )}
                                             </div>
                                         </div>
@@ -1479,17 +1543,17 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             <button
                                                 onClick={onDelete}
                                                 disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
-                                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to delete" : `Delete from ${BRAND.libraryLabel}`}
+                                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to delete" : `Delete from ${labels.aliasLibrary}`}
                                                 className={`flex-1 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                                             >
                                                 <Trash2 className="w-3.5 h-3.5" />
                                                 Delete
                                             </button>
-                                        ) : !existsInDb ? (
+                                        ) : !existsInDb && flags.allowSaveToLibrary ? (
                                             <button
                                                 onClick={handleOnSave}
                                                 disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
-                                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to save" : `Save to ${BRAND.libraryLabel}`}
+                                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to save" : `Save to ${labels.aliasLibrary}`}
                                                 className={`flex-1 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                                             >
                                                 <Save className="w-3.5 h-3.5" />

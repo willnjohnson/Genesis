@@ -41,9 +41,9 @@ async fn ensure_biography_seeded(db_path: &str, handle: &str, author: &str, know
         _ => crate::youtube::extract_channel_id(handle).await.ok().flatten(),
     };
 
-    let api_key = db::get_setting(db_path, "api_key").ok().flatten();
-    let subscriber_count = match (&channel_id, &api_key) {
-        (Some(cid), Some(key)) => fetch_subscriber_count(key, cid).await.unwrap_or(UNKNOWN_SUBSCRIBER_COUNT),
+    let route = crate::sync::license::route(db_path, "youtube");
+    let subscriber_count = match (&channel_id, &route) {
+        (Some(cid), Some(route)) => fetch_subscriber_count(route, cid).await.unwrap_or(UNKNOWN_SUBSCRIBER_COUNT),
         _ => UNKNOWN_SUBSCRIBER_COUNT,
     };
 
@@ -313,6 +313,14 @@ pub async fn delete_video(app: tauri::AppHandle, video_id: String) -> Result<Str
     let db_path = get_db_path(&app);
     db::delete_video(&db_path, &video_id).map_err(|e| e.to_string())?;
     Ok("Deleted".to_string())
+}
+
+/// One saved video (with its summary and transcript), for opening a link that points at it.
+/// None when it isn't in this library.
+#[command]
+pub async fn get_video_by_id(app: tauri::AppHandle, video_id: String) -> Result<Option<crate::Video>, String> {
+    let db_path = get_db_path(&app);
+    db::get_video_by_id(&db_path, &video_id, true).map_err(|e| e.to_string())
 }
 
 #[command]

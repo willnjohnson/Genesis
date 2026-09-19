@@ -96,9 +96,11 @@ pub fn get_biography_by_handle(db_path: &str, handle: &str) -> Result<Option<Bio
     let mut stmt = conn.prepare(
         "SELECT handle, display_name, bio, wikipedia, website, twitter, instagram, facebook, threads, youtube, tiktok, twitch, reddit, discord
          FROM biographies
-         WHERE LOWER(handle) = LOWER(?)",
+         WHERE LOWER(LTRIM(handle, '@')) = LOWER(?)",
     )?;
-    let mut rows = stmt.query(params![handle.trim()])?;
+    // The leading "@" is optional on either side: "@Name", "Name" and "name" all find the same
+    // biography (links to a biography, see db/links.rs, carry the handle without it).
+    let mut rows = stmt.query(params![handle.trim().trim_start_matches('@')])?;
     if let Some(row) = rows.next()? {
         Ok(Some((
             row.get(0)?,

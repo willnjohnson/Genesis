@@ -1,5 +1,5 @@
 use crate::{Video, types::normalize_published_at};
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 use super::summaries::{append_channel_info_footer, clean_blockquote_lines, clear_transcript_after_summary, has_real_summary};
 use super::settings::get_setting_bool;
 use super::search::{regenerate_tokens_from_transcript, video_row, video_columns_sql, filter_kind_where, library_order_by};
@@ -102,11 +102,50 @@ pub fn save_video(
 }
 
 /// Deletes a video by id. The FTS-index cleanup and biography cascade-delete happen via
-/// SQLite triggers (see db/schema.rs), not here.
+/// SQLite triggers (see db/schema.rs), not here. Links to the video (and to its channel's
+/// biography, if that went with it) are removed from the text that held them, see db/links.rs.
 pub fn delete_video(db_path: &str, video_id: &str) -> Result<()> {
+    use super::links::{apply_link_edits, LinkEdit, LinkKind};
     let conn = Connection::open(db_path)?;
+    let handle: Option<String> = conn
+        .query_row("SELECT handle FROM videos WHERE video_id = ?", params![video_id], |r| r.get(0))
+        .optional()?
+        .flatten();
     conn.execute("DELETE FROM videos WHERE video_id = ?", params![video_id])?;
+
+    let mut edits = vec![LinkEdit::Unlink(LinkKind::Video, video_id.to_string())];
+    if let Some(handle) = handle.filter(|h| !h.trim().is_empty()) {
+        let bio_remains: bool = conn
+            .query_row(
+                "SELECT 1 FROM biographies WHERE lower(handle) = lower(?)",
+                params![handle],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap_or(None)
+            .is_some();
+        if !bio_remains {
+            edits.push(LinkEdit::Unlink(LinkKind::Bio, handle));
+        }
+    }
+    drop(conn);
+    // The delete itself has succeeded; a failure tidying links must not undo or hide that.
+    if let Err(e) = apply_link_edits(db_path, &edits) {
+        log::warn!("Couldn't remove links to deleted video {video_id}: {e}");
+    }
     Ok(())
+}
+
+/// One saved video by id, or None when it isn't in the library.
+pub fn get_video_by_id(db_path: &str, video_id: &str, include_content: bool) -> Result<Option<Video>> {
+    let conn = Connection::open(db_path)?;
+    let columns = video_columns_sql("");
+    conn.query_row(
+        &format!("SELECT {columns} FROM videos WHERE video_id = ?1"),
+        params![video_id.trim()],
+        |row| video_row(row, include_content),
+    )
+    .optional()
 }
 
 pub fn check_video_exists(db_path: &str, video_id: &str) -> Result<bool> {
@@ -190,6 +229,104 @@ pub fn get_video_full(
 
 pub fn get_db_stats(db_path: &str) -> Result<i64> {
     get_video_count(db_path, None)
+}
+
+/// What the library holds, for Settings > Database.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LibraryStats {
+    pub channel_count: i64,
+    /// Every Drive entry at any depth, counting the levels above an assigned one too (a video in
+    /// ":UAP-GERB" makes both ":UAP" and ":UAP-GERB" exist). The unassigned placeholder isn't one.
+    pub drive_count: i64,
+    /// Standard Glossary Tags (with a definition) and Quick Tags (without), counted separately.
+    pub glossary_count: i64,
+    pub quick_tag_count: i64,
+    pub biography_count: i64,
+    pub attachment_count: i64,
+    /// What attachments take up in the database (after compression), each distinct file once.
+    pub attachment_bytes: i64,
+}
+
+pub fn get_library_stats(db_path: &str) -> Result<LibraryStats> {
+    let conn = Connection::open(db_path)?;
+    // A table that isn't there (an older or hand-made database) counts as empty.
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0) };
+
+    let mut drives: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut paths: Vec<String> = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT WDBS FROM videos WHERE WDBS IS NOT NULL AND WDBS != ''
+         UNION SELECT wdbs FROM video_wdbs_links WHERE wdbs != ''",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+            paths.extend(rows.filter_map(|r| r.ok()));
+        }
+    }
+    for path in paths {
+        if super::wdbs::is_unassigned_sentinel(&path) {
+            continue;
+        }
+        let body = path.strip_prefix("θψ").unwrap_or(&path);
+        let mut prefix = String::new();
+        for segment in body.split('_').filter(|s| !s.is_empty()) {
+            if !prefix.is_empty() {
+                prefix.push('_');
+            }
+            prefix.push_str(segment);
+            drives.insert(prefix.clone());
+        }
+    }
+
+    Ok(LibraryStats {
+        channel_count: count("SELECT COUNT(DISTINCT LOWER(LTRIM(handle, '@'))) FROM videos WHERE handle IS NOT NULL AND TRIM(handle, '@ ') != ''"),
+        drive_count: drives.len() as i64,
+        glossary_count: count("SELECT COUNT(*) FROM glossary WHERE TRIM(definition) != ''"),
+        quick_tag_count: count("SELECT COUNT(*) FROM glossary WHERE TRIM(definition) = ''"),
+        biography_count: count("SELECT COUNT(*) FROM biographies"),
+        attachment_count: count("SELECT COUNT(*) FROM video_attachments"),
+        attachment_bytes: count("SELECT COALESCE(SUM(stored_size), 0) FROM attachment_blobs"),
+    })
+}
+
+#[cfg(test)]
+mod library_stats_tests {
+    use super::*;
+    use crate::db::{add_video_wdbs_link, init_db, update_video_wdbs};
+
+    #[test]
+    fn counts_what_the_library_holds() {
+        let path = std::env::temp_dir().join(format!("kinesis_libstats_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = path.to_string_lossy().to_string();
+        init_db(&db).unwrap();
+        assert_eq!(get_library_stats(&db).unwrap(), LibraryStats::default());
+
+        for (id, handle) in [("a", "@One"), ("b", "@one"), ("c", "@Two"), ("d", "@Two")] {
+            save_video(&db, id, id, "Author", 60, "words", 1, "2026-01-01T00:00:00Z", handle, None).unwrap();
+        }
+        update_video_wdbs(&db, "a", "θψUAP_GERB").unwrap();
+        update_video_wdbs(&db, "b", "θψUAP").unwrap();
+        update_video_wdbs(&db, "c", "θψCRYPTO_DOAC_X").unwrap();
+        add_video_wdbs_link(&db, "a", "θψNEWS").unwrap();
+        update_video_wdbs(&db, "d", ":").unwrap();
+
+        let conn = Connection::open(&db).unwrap();
+        conn.execute("INSERT INTO glossary (term, definition) VALUES ('Halving', 'Cuts rewards'), ('Blank', '  '), ('Quick', '')", []).unwrap();
+        conn.execute("INSERT INTO biographies (handle, display_name) VALUES ('@One', 'One')", []).unwrap();
+        drop(conn);
+        crate::db::attachments::add_attachment(&db, "a", "n.txt", b"hello ".repeat(100)).unwrap();
+
+        let stats = get_library_stats(&db).unwrap();
+        assert_eq!(stats.channel_count, 2, "@One and @one are one channel");
+        // UAP, UAP_GERB, CRYPTO, CRYPTO_DOAC, CRYPTO_DOAC_X, NEWS. The ":" placeholder isn't one.
+        assert_eq!(stats.drive_count, 6);
+        assert_eq!(stats.glossary_count, 1);
+        assert_eq!(stats.quick_tag_count, 2);
+        assert_eq!(stats.biography_count, 1);
+        assert_eq!(stats.attachment_count, 1);
+        assert!(stats.attachment_bytes > 0 && stats.attachment_bytes < 600);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// Counts videos matching an optional case-sensitive substring match across title/author/handle/

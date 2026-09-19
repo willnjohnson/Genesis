@@ -2,6 +2,8 @@ import { Component, type ErrorInfo, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { FlagsProvider } from './components/FlagsProvider'
+import { WorkspaceProvider } from './components/WorkspaceProvider'
 // image save handler for desktop builds
 import { setupImageSaveHandler } from './lib/image-save';
 
@@ -36,7 +38,11 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boole
 
 createRoot(document.getElementById('root')!).render(
   <ErrorBoundary>
-    <App />
+    <FlagsProvider>
+      <WorkspaceProvider>
+        <App />
+      </WorkspaceProvider>
+    </FlagsProvider>
   </ErrorBoundary>
 );
 

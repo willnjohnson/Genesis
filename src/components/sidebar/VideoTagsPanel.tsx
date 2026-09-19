@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Plus, X } from 'lucide-react';
+import { useWorkspace } from '../../hooks/useWorkspace';
 
 interface GlossaryTerm {
     term: string;
@@ -12,13 +13,17 @@ interface Props {
     onAddTag?: (term: string) => void;
     onRemoveTag?: (term: string) => void;
     onSelectTerm: (term: GlossaryTerm) => void;
+    /** False = read-only: tags are shown and open their definition, but can't be added or removed
+     *  (a DB owner's allowEditTags flag). */
+    canEdit?: boolean;
 }
 
 /** Displays a video's tags (as glossary-term chips) plus an "add tag" dropdown filtered to
  *  glossary terms not already applied. Clicking a chip opens its term definition (via
  *  `onSelectTerm`); the dropdown closes on an outside click. Renders just the tag row — the
  *  surrounding card/header is owned by Sidebar.tsx's Tags/Similar Videos tab switcher. */
-export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag, onSelectTerm }: Props) {
+export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag, onSelectTerm, canEdit = true }: Props) {
+    const { labels } = useWorkspace();
     const [showTagDropdown, setShowTagDropdown] = useState(false);
     const [tagFilter, setTagFilter] = useState("");
 
@@ -58,6 +63,7 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
                         className="group flex items-center gap-1 px-2.5 py-1 bg-[#222222] border border-[#383838] rounded-md text-[11px] text-white hover:bg-[#333333] transition-all cursor-pointer"
                     >
                         {tag}
+                        {canEdit && (
                         <button
                             onClick={(e) => {
                                 e.stopPropagation();
@@ -67,15 +73,17 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
                         >
                             <X className="w-3 h-3" />
                         </button>
+                        )}
                     </button>
                 ))}
 
-                {filtered.length === 0 && (
+                {canEdit && filtered.length === 0 && (
                     <span className="text-[11px] text-[#666666] font-medium italic select-none">
                         Create a new tag
                     </span>
                 )}
 
+                {canEdit && (
                 <div className="relative tag-dropdown-container">
                     <button
                         onClick={(e) => {
@@ -92,7 +100,7 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
                             <div className="p-3 border-b border-[#303030] bg-white/5">
                                 <input
                                     type="text"
-                                    placeholder="Filter glossary terms..."
+                                    placeholder={`Filter ${labels.aliasGlossary.toLowerCase()} terms...`}
                                     value={tagFilter}
                                     onChange={(e) => setTagFilter(e.target.value)}
                                     className="w-full bg-[#222222] border border-[#383838] rounded-md px-3 py-1.5 text-[11px] text-white placeholder-[#666666] focus:outline-none focus:border-red-500"
@@ -124,6 +132,7 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
                         </div>
                     )}
                 </div>
+                )}
             </div>
     );
 }

@@ -1,6 +1,7 @@
 import { LayoutGrid, List, AlignJustify, AlignLeft } from "lucide-react";
 import { BRAND } from "../../branding";
 import { type DisplaySettings } from "../../api";
+import { useLockedSettings, LOCKED_TITLE } from "../../hooks/useLockedSettings";
 
 const RESOLUTIONS = [
     "600x600", "800x600", "1024x768", "1280x720",
@@ -27,6 +28,9 @@ function Toggle({ on, onChange }: { on: boolean; onChange: () => void }) {
 }
 
 export function DisplayTab({ settings, currentVideoListMode, currentNavigationOrientation, onUpdate }: Props) {
+    const isLocked = useLockedSettings();
+    const listLocked = isLocked('video_list_mode');
+    const navLocked = isLocked('navigation_orientation');
     return (
         <div className="space-y-8 animate-in slide-in-from-right-4 duration-300">
             <div>
@@ -65,8 +69,9 @@ export function DisplayTab({ settings, currentVideoListMode, currentNavigationOr
                             <span className="text-sm font-semibold text-white block">Video List Layout</span>
                             <span className="text-xs text-[#aaaaaa]">Choose between grid and compact layout</span>
                         </div>
-                        <div className="flex gap-2 bg-[#121212] border border-[#303030] rounded-md p-0.5">
+                        <div className={`flex gap-2 bg-[#121212] border border-[#303030] rounded-md p-0.5 ${listLocked ? 'opacity-50' : ''}`} title={listLocked ? LOCKED_TITLE : undefined}>
                             <button
+                                disabled={listLocked}
                                 onClick={() => onUpdate({ videoListMode: 'grid' })}
                                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentVideoListMode === 'grid' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
                             >
@@ -74,6 +79,7 @@ export function DisplayTab({ settings, currentVideoListMode, currentNavigationOr
                                 Grid
                             </button>
                             <button
+                                disabled={listLocked}
                                 onClick={() => onUpdate({ videoListMode: 'compact' })}
                                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentVideoListMode === 'compact' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
                             >
@@ -89,8 +95,9 @@ export function DisplayTab({ settings, currentVideoListMode, currentNavigationOr
                             <span className="text-sm font-semibold text-white block">Navigation Orientation</span>
                             <span className="text-xs text-[#aaaaaa]">Choose horizontal/vertical layout</span>
                         </div>
-                        <div className="flex gap-2 bg-[#121212] border border-[#303030] rounded-md p-0.5">
+                        <div className={`flex gap-2 bg-[#121212] border border-[#303030] rounded-md p-0.5 ${navLocked ? 'opacity-50' : ''}`} title={navLocked ? LOCKED_TITLE : undefined}>
                             <button
+                                disabled={navLocked}
                                 onClick={() => onUpdate({ navigationOrientation: 'horizontal' })}
                                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentNavigationOrientation === 'horizontal' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
                             >
@@ -98,6 +105,7 @@ export function DisplayTab({ settings, currentVideoListMode, currentNavigationOr
                                 Horizontal
                             </button>
                             <button
+                                disabled={navLocked}
                                 onClick={() => onUpdate({ navigationOrientation: 'vertical' })}
                                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentNavigationOrientation === 'vertical' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
                             >

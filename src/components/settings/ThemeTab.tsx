@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import type { ChangeEvent, MouseEvent } from 'react';
 import { Check, Trash2, Upload, Copy } from 'lucide-react';
 import { type DisplaySettings } from '../../api';
+import { useLockedSettings, LOCKED_TITLE } from '../../hooks/useLockedSettings';
+import { useFlags } from '../../hooks/useFlags';
 import {
     BUILTIN_THEMES, applyTheme, loadCustomThemes, saveCustomThemes,
     parseThemeJson, isThemeError, resolveTheme, type Theme,
@@ -31,13 +33,22 @@ export function ThemeTab({ settings, onUpdate }: Props) {
     }, []);
 
     const activeName = settings.theme;
+    const isLocked = useLockedSettings();
+    // The server enforces either the active theme or the custom theme list itself.
+    const themeLocked = isLocked('theme');
+    const themesLocked = themeLocked || isLocked('customThemes');
+    // A DB owner can switch off importing, copying a template and deleting custom themes altogether.
+    const { flags } = useFlags();
+    const customAllowed = flags.allowCustomThemes;
 
     const handleSelect = (theme: Theme) => {
+        if (themeLocked) return;
         applyTheme(theme);
         onUpdate({ theme: theme.name });
     };
 
     const handleImportClick = () => {
+        if (themesLocked || !customAllowed) return;
         setError(null);
         fileInputRef.current?.click();
     };
@@ -86,6 +97,7 @@ export function ThemeTab({ settings, onUpdate }: Props) {
 
     const handleDelete = async (theme: Theme, e: MouseEvent) => {
         e.stopPropagation();
+        if (themesLocked || !customAllowed) return;
         const next = customThemes.filter(t => t.name !== theme.name);
         setCustomThemes(next);
         await saveCustomThemes(next);
@@ -101,7 +113,9 @@ export function ThemeTab({ settings, onUpdate }: Props) {
         <div className="space-y-8 animate-in slide-in-from-right-4 duration-300">
             <div>
                 <h3 className="text-base font-bold mb-2">Theme</h3>
-                <p className="text-xs text-[#aaaaaa] mb-6">Choose a color theme, or import your own.</p>
+                <p className="text-xs text-[#aaaaaa] mb-6">
+                    {themeLocked ? "Your theme is managed by your sync server." : "Choose a color theme, or import your own."}
+                </p>
 
                 {loading ? (
                     <div className="text-center text-gray-500 text-xs py-8">Loading...</div>
@@ -111,16 +125,23 @@ export function ThemeTab({ settings, onUpdate }: Props) {
                             <button
                                 key={theme.name}
                                 onClick={() => handleSelect(theme)}
-                                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-all cursor-pointer ${activeName === theme.name ? 'border-[var(--k-accent)] bg-[#303030]' : 'border-[#303030] bg-[#121212] hover:border-[#505050]'}`}
+                                disabled={themeLocked}
+                                title={themeLocked ? LOCKED_TITLE : undefined}
+                                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-all cursor-pointer disabled:cursor-default disabled:opacity-60 ${activeName === theme.name ? 'border-[var(--k-accent)] bg-[#303030]' : 'border-[#303030] bg-[#121212] hover:border-[#505050]'}`}
                             >
-                                <span className="flex -space-x-1 shrink-0">
-                                    <span className="w-4 h-4 rounded-full border border-black/30" style={{ backgroundColor: theme.colors.bg }} />
-                                    <span className="w-4 h-4 rounded-full border border-black/30" style={{ backgroundColor: theme.colors.surface }} />
-                                    <span className="w-4 h-4 rounded-full border border-black/30" style={{ backgroundColor: theme.colors.accent }} />
+                                {/* Tricolor pill: background | surface | accent, left to right. The mid-gray
+                                    outline and dividers stay visible on both very dark and very light
+                                    colors, so neighboring segments (or the pill and the card) never blend. */}
+                                <span className="flex w-10 h-4 rounded-[8px_2px_8px_2px] overflow-hidden border border-[#808080]/35 shrink-0">
+                                    <span className="flex-1" style={{ backgroundColor: theme.colors.bg }} />
+                                    <span className="w-px bg-[#808080]/35" />
+                                    <span className="flex-1" style={{ backgroundColor: theme.colors.surface }} />
+                                    <span className="w-px bg-[#808080]/35" />
+                                    <span className="flex-1" style={{ backgroundColor: theme.colors.accent }} />
                                 </span>
                                 <span className="flex-1 text-sm font-semibold text-white truncate">{theme.label}</span>
                                 {activeName === theme.name && <Check className="w-4 h-4 text-[var(--k-accent)] shrink-0" />}
-                                {!theme.builtin && (
+                                {!theme.builtin && customAllowed && (
                                     <button
                                         onClick={(e) => handleDelete(theme, e)}
                                         title="Remove theme"
@@ -134,13 +155,16 @@ export function ThemeTab({ settings, onUpdate }: Props) {
                     </div>
                 )}
 
+                {customAllowed && (
                 <div className="mt-4 flex flex-wrap gap-2">
                     <button
                         onClick={handleImportClick}
-                        className="flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-[#404040] text-sm font-semibold text-[#aaaaaa] hover:text-white hover:border-[#505050] transition-colors cursor-pointer"
+                        disabled={themesLocked}
+                        title={themesLocked ? LOCKED_TITLE : undefined}
+                        className="flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-[#404040] text-sm font-semibold text-[#aaaaaa] hover:text-white hover:border-[#505050] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default"
                     >
                         <Upload className="w-4 h-4" />
-                        Import Theme...
+                        Import Theme
                     </button>
                     <button
                         onClick={handleCopyTemplate}
@@ -157,10 +181,8 @@ export function ThemeTab({ settings, onUpdate }: Props) {
                         onChange={handleFileChange}
                         className="hidden"
                     />
-                    <p className="text-[10px] text-gray-500 mt-2">
-                        A JSON file with bg, surface, surfaceAlt, surfaceRaised, border, borderStrong, text, textMuted, accent, accentHover, danger, and success colors.
-                    </p>
                 </div>
+                )}
 
                 {error && (
                     <div className="mt-3 text-[10px] text-red-400 bg-red-900/20 border border-red-500/30 rounded-md px-2 py-1.5">

@@ -164,4 +164,11 @@ pub struct DbDetails {
     pub size_bytes: u64,
     pub video_count: i64,
     pub history_count: i64,
+    pub channel_count: i64,
+    pub drive_count: i64,
+    pub glossary_count: i64,
+    pub quick_tag_count: i64,
+    pub biography_count: i64,
+    pub attachment_count: i64,
+    pub attachment_bytes: i64,
 }

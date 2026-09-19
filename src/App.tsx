@@ -1,9 +1,15 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
-    getApiKey, getSetting, setDbPath, openExternalUrl, bulkUpdateVideoWdbs,
+    getApiKey, getKeyStatus, getSetting, setDbPath, openExternalUrl, bulkUpdateVideoWdbs,
     type Video, type BiographyEntry, saveTags, getBiography,
+    getVideoById, getGlossaryTerms, getWdbsTree, decodeWdbs, type WdbsNode,
 } from "./api";
+import { driveSegmentLabel } from "./lib/utils";
+import { setInternalLinkHandler, linkKindLabel, type LinkKind } from "./lib/internal-links";
+import { LinkPicker } from "./components/LinkPicker";
+import { MarkdownContextMenu } from "./components/MarkdownContextMenu";
+import { TermDefinitionModal } from "./components/TermDefinitionModal";
 import { saveImageAs } from "./lib/save-image-as";
 import { applyTheme, resolveTheme, loadCustomThemes } from "./lib/themes";
 import { SearchBar, type Facet } from "./components/SearchBar";
@@ -22,6 +28,9 @@ import { WdbsTreePanel } from "./components/WdbsTreePanel";
 import { BulkAssignMenu } from "./components/BulkAssignMenu";
 import { useSearch } from "./hooks/useSearch";
 import { useLibrary } from "./hooks/useLibrary";
+import { useAutoSync } from "./hooks/useAutoSync";
+import { useFlags } from "./hooks/useFlags";
+import { useWorkspace } from "./hooks/useWorkspace";
 
 type ViewMode = 'search' | 'library' | 'glossary' | 'biography';
 
@@ -105,22 +114,16 @@ function App() {
     const [navigationOrientation, setNavigationOrientation] = useState<'horizontal' | 'vertical'>('horizontal');
     const [pluginSummarizeEnabled, setPluginSummarizeEnabled] = useState(false);
     const [pluginPhotosynthesisEnabled, setPluginPhotosynthesisEnabled] = useState(false);
-    const [showSearch, setShowSearch] = useState(true);
-    const [allowDeletionLibrary, setAllowDeletionLibrary] = useState(true);
-    const [allowModificationGlossary, setAllowModificationGlossary] = useState(true);
-
-    // New granular visibility flags
-    const [showSummarizeButton, setShowSummarizeButton] = useState(true);
-    const [showSummarizeOllama, setShowSummarizeOllama] = useState(true);
-    const [showSummarizeVenice, setShowSummarizeVenice] = useState(true);
-    const [showSynthesizeVenice, setShowSynthesizeVenice] = useState(true);
-    const [showSynthesizePixabay, setShowSynthesizePixabay] = useState(true);
-    const [showSynthesizeUpload, setShowSynthesizeUpload] = useState(true);
-    const [showBiography, setShowBiography] = useState(true);
-    const [showDrive, setShowDrive] = useState(true);
-    const [allowEditBio, setAllowEditBio] = useState(true);
-    const [allowEditTranscriptOnNA, setAllowEditTranscriptOnNA] = useState(true);
-    const [allowEditWDBS, setAllowEditWDBS] = useState(false);
+    // Feature flags: settings-table rows a DB owner sets (or a sync server enforces) to hide or
+    // disable parts of the app. See lib/flags.ts and docs/customizing.md.
+    const { flags, loaded: flagsLoaded, reload: reloadFlags } = useFlags();
+    const { labels, reload: reloadWorkspace } = useWorkspace();
+    const {
+        showSearch, allowDeletionLibrary, allowModificationGlossary, showSummarizeButton,
+        showSummarizeOllama, showSummarizeVenice, showSynthesizeVenice, showSynthesizePixabay,
+        showSynthesizeUpload, showBiography, showDrive, allowEditBio, allowEditTranscriptOnNA,
+        allowEditWDBS,
+    } = flags;
     // Bumped whenever a video's WDBS assignment or symlinks change (Sidebar's editor, bulk
     // assign) so WdbsTreePanel's per-category counts refetch — those mutations happen outside
     // the tree panel itself, which otherwise has no way to know its counts just went stale.
@@ -135,6 +138,8 @@ function App() {
     const [videoTags, setVideoTags] = useState<string[]>([]);
     const [sidebarInitialTab, setSidebarInitialTab] = useState<'transcript' | 'summary' | undefined>(undefined);
     const [selectedBiography, setSelectedBiography] = useState<BiographyEntry | null>(null);
+    // A glossary term opened from a link inside some markdown (see lib/internal-links.ts).
+    const [linkedTerm, setLinkedTerm] = useState<{ term: string; definition: string } | null>(null);
 
     // ── Hooks ────────────────────────────────────────────────────────────────
     const search = useSearch(hasApiKey);
@@ -185,6 +190,44 @@ function App() {
         return () => document.removeEventListener('keydown', handleKeyDown);
     }, []);
 
+    // Reads what App keeps in memory besides the feature flags (API access, plugin switches) and
+    // re-reads the flags. Runs at startup and after a sync, since a sync server can enforce any of them.
+    const loadFlags = useCallback(async () => {
+        // "Has API access" = an own YouTube key OR a sync-server license for it.
+        getKeyStatus().then(s => setHasApiKey(s.youtube.available)).catch(() => getApiKey().then(k => setHasApiKey(!!k)));
+        getSetting('plugin_summarize_enabled').then(v => setPluginSummarizeEnabled(v === 'true'));
+        getSetting('plugin_photosynthesis_enabled').then(v => setPluginPhotosynthesisEnabled(v === 'true'));
+        await Promise.all([reloadFlags(), reloadWorkspace()]);
+    }, [reloadFlags, reloadWorkspace]);
+
+    // Keep the current view reachable. The first time flags load it also opens the DB owner's
+    // defaultView; after that it only moves the user off a view that has just been hidden (a sync
+    // can hide one while it's open).
+    const appliedDefaultView = useRef(false);
+    useEffect(() => {
+        if (!flagsLoaded) return;
+        if (!appliedDefaultView.current) {
+            appliedDefaultView.current = true;
+            setViewMode(flags.pickView());
+            return;
+        }
+        setViewMode(v => (flags.viewVisible[v] ? v : flags.pickView()));
+    }, [flagsLoaded, flags]);
+
+    // Drive going away takes its panel and Bulk Assign Mode with it; so does losing edit rights.
+    useEffect(() => {
+        if (!showDrive) setShowDrivePanel(false);
+    }, [showDrive]);
+    useEffect(() => {
+        if (!showDrive || !allowEditWDBS) {
+            // Bulk Assign Mode's toggle button disappears when editing is disabled: exit the mode
+            // too so the grid doesn't stay stuck in bulk-select with no visible way out.
+            setBulkAssignMode(false);
+            setBulkSelectedIds(new Set());
+            setBulkAssignMenu(null);
+        }
+    }, [showDrive, allowEditWDBS]);
+
     useEffect(() => {
         const initialize = async () => {
             const savedPath = localStorage.getItem(BRAND.storageKey);
@@ -194,50 +237,12 @@ function App() {
                     : savedPath;
                 try { await setDbPath(folderPath); } catch { /* ignore */ }
             }
-            getApiKey().then(k => setHasApiKey(!!k));
-            getSetting('plugin_summarize_enabled').then(v => setPluginSummarizeEnabled(v === 'true'));
-            getSetting('plugin_photosynthesis_enabled').then(v => setPluginPhotosynthesisEnabled(v === 'true'));
-
-            // Load DB flags
-            const sSearch = await getSetting('showSearch').catch(() => 'true');
-            const sDelete = await getSetting('allowDeletionLibrary').catch(() => 'true');
-            const sGlossary = await getSetting('allowModificationGlossary').catch(() => 'true');
-            const sSumBtn = await getSetting('showSummarizeButton').catch(() => 'true');
-            const sSumOllama = await getSetting('showSummarizeOllama').catch(() => 'true');
-            const sSumVenice = await getSetting('showSummarizeVenice').catch(() => 'true');
-            const sSynVenice = await getSetting('showSynthesizeVenice').catch(() => 'true');
-            const sSynPixabay = await getSetting('showSynthesizePixabay').catch(() => 'true');
-            const sSynUpload = await getSetting('showSynthesizeUpload').catch(() => 'true');
-            const sBiography = await getSetting('showBiography').catch(() => 'true');
-            const sDrive = await getSetting('showDrive').catch(() => 'true');
-            const sAllowEditBio = await getSetting('allowEditBio').catch(() => 'true');
-            const sAllowEditTranscriptOnNA = await getSetting('allowEditTranscriptOnNA').catch(() => 'true');
-            const sAllowEditWDBS = await getSetting('allowEditWDBS').catch(() => 'false');
-
-            const showSearchVal = sSearch !== 'false';
-            setShowSearch(showSearchVal);
-            setAllowDeletionLibrary(sDelete !== 'false');
-            setAllowModificationGlossary(sGlossary !== 'false');
-            setShowSummarizeButton(sSumBtn !== 'false');
-            setShowSummarizeOllama(sSumOllama !== 'false');
-            setShowSummarizeVenice(sSumVenice !== 'false');
-            setShowSynthesizeVenice(sSynVenice !== 'false');
-            setShowSynthesizePixabay(sSynPixabay !== 'false');
-            setShowSynthesizeUpload(sSynUpload !== 'false');
-            setShowBiography(sBiography !== 'false');
-            setShowDrive(sDrive !== 'false');
-            setAllowEditBio(sAllowEditBio !== 'false');
-            setAllowEditTranscriptOnNA(sAllowEditTranscriptOnNA !== 'false');
-            setAllowEditWDBS(sAllowEditWDBS === 'true');
-
-            if (!showSearchVal) {
-                setViewMode('library');
-            }
+            await loadFlags();
         };
         initialize().catch(error => {
             console.error('Failed to initialize app:', error);
         });
-    }, []);
+    }, [loadFlags]);
 
     const handleSaveImageAs = useCallback(async (url: string) => {
         // Try to suggest a filename based on the URL or default
@@ -273,13 +278,28 @@ function App() {
     }, [handleSaveImageAs]);
 
     // ── Theme / display settings ─────────────────────────────────────────────
-    useEffect(() => {
-        Promise.all([getDisplaySettings(), loadCustomThemes()]).then(([settings, customThemes]) => {
+    // Also re-run after a sync: a server can enforce the theme, list mode and orientation.
+    const loadDisplay = useCallback(() => {
+        return Promise.all([getDisplaySettings(), loadCustomThemes()]).then(([settings, customThemes]) => {
             applyTheme(resolveTheme(settings.theme, customThemes));
             setVideoListMode((settings.videoListMode as 'grid' | 'compact') || 'grid');
             setNavigationOrientation((settings.navigationOrientation as 'horizontal' | 'vertical') || 'horizontal');
         }).catch(() => applyTheme(resolveTheme(undefined, [])));
     }, []);
+
+    useEffect(() => { loadDisplay(); }, [loadDisplay]);
+
+    // Everything a sync (or pack import) can change that App holds in memory: enforced flags, the
+    // theme, the license-backed key status, and the content itself.
+    const handleSyncApplied = useCallback(() => {
+        loadFlags().catch(console.error);
+        loadDisplay();
+        library.refreshLibrary();
+        library.refreshSummarizedCount();
+        setDriveVersion(v => v + 1);
+    }, [loadFlags, loadDisplay, library.refreshLibrary, library.refreshSummarizedCount]);
+
+    useAutoSync(handleSyncApplied);
 
     // ── Scroll-to-top ────────────────────────────────────────────────────────
     useEffect(() => {
@@ -388,6 +408,21 @@ function App() {
         library.setLibrarySearch(query);
     }, [library]);
 
+    // Biography's "In Drive" list: opens the Library/Portal with the Drive panel showing and that
+    // entry selected. Leftover search text is cleared first, since selecting a Drive keeps it
+    // (and would narrow the Drive's videos by it).
+    const goToLibraryDrive = useCallback((storagePath: string, label: string) => {
+        setBulkAssignMode(false);
+        setBulkSelectedIds(new Set());
+        setBulkAssignMenu(null);
+        setSidebarOpen(false);
+        setViewMode('library');
+        library.setLibrarySearch('');
+        library.setWdbsFilter(storagePath);
+        setDriveFilterLabel(label);
+        setShowDrivePanel(true);
+    }, [library]);
+
     const handleSearchInLibrary = (term: string, mode: 'tag' | 'library') => {
         goToLibrarySearch(mode === 'tag' ? `tag_search:${term}` : term);
     };
@@ -400,6 +435,62 @@ function App() {
         }
         setNotification({ message: `No biography found for ${channelHandle}`, type: "error" });
     }, []);
+
+    // What clicking an in-app link (`[text](kinesis://glossary/...)`) does. A target that has gone
+    // away, or a part of the app the DB owner has hidden, gets a message instead.
+    const handleOpenLink = useCallback(async (kind: LinkKind, key: string) => {
+        const say = (message: string) => setNotification({ message, type: "error" });
+        const unavailable = () => say(`${linkKindLabel(kind, labels)} links aren't available here.`);
+        try {
+            switch (kind) {
+                case 'glossary': {
+                    if (!flags.showGlossary) return unavailable();
+                    const found = (await getGlossaryTerms()).find(([term]) => term === key);
+                    if (!found || !found[1].trim()) return say(`"${key}" is no longer in the glossary.`);
+                    setSelectedBiography(null);
+                    setLinkedTerm({ term: found[0], definition: found[1] });
+                    return;
+                }
+                case 'bio': {
+                    if (!flags.showBiography) return unavailable();
+                    const bio = await getBiography(key);
+                    if (!bio) return say(`No biography found for ${key}.`);
+                    setLinkedTerm(null);
+                    setSelectedBiography(bio);
+                    return;
+                }
+                case 'video': {
+                    const video = await getVideoById(key);
+                    if (!video) return say("That video is no longer in the library.");
+                    setLinkedTerm(null);
+                    setSelectedBiography(null);
+                    await handleSelectVideo(video);
+                    return;
+                }
+                case 'drive': {
+                    if (!flags.showDrive) return unavailable();
+                    const find = (nodes: WdbsNode[]): WdbsNode | undefined => {
+                        for (const n of nodes) {
+                            if (n.path === key) return n;
+                            const inner = find(n.children);
+                            if (inner) return inner;
+                        }
+                        return undefined;
+                    };
+                    const node = find(await getWdbsTree());
+                    if (!node) return say(`${decodeWdbs(key) || key} has no videos any more.`);
+                    setLinkedTerm(null);
+                    setSelectedBiography(null);
+                    goToLibraryDrive(node.path, driveSegmentLabel(decodeWdbs(node.path)));
+                    return;
+                }
+            }
+        } catch (e) {
+            say(typeof e === 'string' ? e : (e as { message?: string })?.message ?? "Couldn't open that link.");
+        }
+    }, [flags.showGlossary, flags.showBiography, flags.showDrive, handleSelectVideo, goToLibraryDrive]);
+
+    useEffect(() => setInternalLinkHandler(handleOpenLink), [handleOpenLink]);
 
     const handleAddTag = async (term: string) => {
         if (!videoTags.includes(term)) {
@@ -531,30 +622,34 @@ function App() {
                             <button
                                 onClick={() => setViewMode('search')}
                                 className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'search' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
-                                title="Search"
+                                title={labels.aliasSearch}
                             >
                                 <Search className="w-5 h-5" />
                             </button>
                         )}
-                        <button
-                            onClick={() => setViewMode('library')}
-                            className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'library' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
-                            title={BRAND.libraryLabel}
-                        >
-                            <BookMarked className="w-5 h-5" />
-                        </button>
+                        {flags.viewVisible.library && (
+                            <button
+                                onClick={() => setViewMode('library')}
+                                className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'library' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
+                                title={labels.aliasLibrary}
+                            >
+                                <BookMarked className="w-5 h-5" />
+                            </button>
+                        )}
+                        {flags.viewVisible.glossary && (
                             <button
                                 onClick={() => { setGlossarySearchQuery(""); setViewMode('glossary'); }}
                                 className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'glossary' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
-                                title="Glossary"
+                                title={labels.aliasGlossary}
                             >
                                 <BookA className="w-5 h-5" />
                             </button>
+                        )}
                         {showBiography && (
                             <button
                                 onClick={() => { setBiographySearchQuery(""); setViewMode('biography'); }}
                                 className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'biography' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
-                                title="Biography"
+                                title={labels.aliasBiography}
                             >
                                 <UserSearch className="w-5 h-5" />
                             </button>
@@ -563,20 +658,24 @@ function App() {
 
                     {/* Bottom Icons */}
                     <div className="flex flex-col items-center gap-4">
-                        <button
-                            onClick={toggleVideoListMode}
-                            className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
-                            title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}
-                        >
-                            {videoListMode === 'grid' ? <List className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
-                        </button>
-                        <button
-                            onClick={() => setShowSettings(true)}
-                            className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
-                            title="Settings"
-                        >
-                            <Settings className="w-5 h-5" />
-                        </button>
+                        {flags.showListModeToggle && (
+                            <button
+                                onClick={toggleVideoListMode}
+                                className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
+                                title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}
+                            >
+                                {videoListMode === 'grid' ? <List className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
+                            </button>
+                        )}
+                        {flags.settingsVisible && (
+                            <button
+                                onClick={() => setShowSettings(true)}
+                                className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
+                                title="Settings"
+                            >
+                                <Settings className="w-5 h-5" />
+                            </button>
+                        )}
                     </div>
                 </div>
             )}
@@ -598,16 +697,16 @@ function App() {
                                     <h1 className="text-2xl font-bold tracking-tighter text-white">
                                         <span className="text-[var(--k-accent)]">{BRAND.name.substring(0, 3)}</span>{BRAND.name.substring(3)}
                                     </h1>
-                                    <span className="text-xs text-gray-500 -mt-0.5">{BRAND.tagline}</span>
+                                    <span className="text-xs text-gray-500 -mt-0.5">{labels.workspaceName}</span>
                                 </div>
                             </div>
 
                             <div className="flex gap-3">
                                 {(['search', 'library'] as ViewMode[]).map(mode => {
-                                    if (mode === 'search' && !showSearch) return null;
-                                    // 'library' renders as BRAND.libraryLabel ("Portal" for Kinesis, "Library"
-                                    // for Genesis) — the ViewMode value itself stays 'library' either way.
-                                    const label = mode === 'library' ? BRAND.libraryLabel : 'Search';
+                                    if (!flags.viewVisible[mode]) return null;
+                                    // 'library' renders as the workspace's Library alias (e.g. "Portal") — the
+                                    // ViewMode value itself stays 'library' either way.
+                                    const label = mode === 'library' ? labels.aliasLibrary : labels.aliasSearch;
                                     return (
                                         <button
                                             key={mode}
@@ -618,6 +717,7 @@ function App() {
                                         </button>
                                     );
                                 })}
+                                {(flags.viewVisible.glossary || showBiography) && (
                                 <div className="relative">
                                     <button
                                         onClick={() => setShowGlossaryMenu(!showGlossaryMenu)}
@@ -628,38 +728,45 @@ function App() {
                                         <ChevronDown className="w-5 h-5" />
                                     </button>
                                     {showGlossaryMenu && (
-                                        <div className="absolute top-full right-0 mt-2 w-36 bg-[#272727] border border-[#3f3f3f] rounded-lg shadow-xl z-51 overflow-hidden">
-                                            <button
-                                                onClick={() => { setGlossarySearchQuery(""); setViewMode('glossary'); setShowGlossaryMenu(false); }}
-                                                className={`w-full text-left px-4 py-2 text-sm hover:bg-[#3f3f3f] cursor-pointer ${viewMode === 'glossary' ? 'text-white font-bold' : 'text-gray-300'}`}
-                                            >
-                                                Glossary
-                                            </button>
+                                        <div className="absolute top-full right-0 mt-2 min-w-36 w-max bg-[#272727] border border-[#3f3f3f] rounded-lg shadow-xl z-51 overflow-hidden">
+                                            {flags.viewVisible.glossary && (
+                                                <button
+                                                    onClick={() => { setGlossarySearchQuery(""); setViewMode('glossary'); setShowGlossaryMenu(false); }}
+                                                    className={`w-full text-left px-4 py-2 text-sm hover:bg-[#3f3f3f] cursor-pointer ${viewMode === 'glossary' ? 'text-white font-bold' : 'text-gray-300'}`}
+                                                >
+                                                    {labels.aliasGlossary}
+                                                </button>
+                                            )}
                                             {showBiography && (
                                                 <button
                                                     onClick={() => { setBiographySearchQuery(""); setViewMode('biography'); setShowGlossaryMenu(false); }}
                                                     className={`w-full text-left px-4 py-2 text-sm hover:bg-[#3f3f3f] cursor-pointer ${viewMode === 'biography' ? 'text-white font-bold' : 'text-gray-300'}`}
                                                 >
-                                                    Biography
+                                                    {labels.aliasBiography}
                                                 </button>
                                             )}
                                         </div>
                                     )}
                                 </div>
-                                <button
-                                    onClick={toggleVideoListMode}
-                                    className="p-2 ml-2 text-gray-400 hover:text-white transition-all cursor-pointer bg-[#272727] rounded-lg"
-                                    title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}
-                                >
-                                    {videoListMode === 'grid' ? <List className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
-                                </button>
-                                <button
-                                    onClick={() => setShowSettings(true)}
-                                    className="p-2 ml-1 text-gray-400 hover:text-white transition-all cursor-pointer"
-                                    title="Settings"
-                                >
-                                    <Settings className="w-5 h-5" />
-                                </button>
+                                )}
+                                {flags.showListModeToggle && (
+                                    <button
+                                        onClick={toggleVideoListMode}
+                                        className="p-2 ml-2 text-gray-400 hover:text-white transition-all cursor-pointer bg-[#272727] rounded-lg"
+                                        title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}
+                                    >
+                                        {videoListMode === 'grid' ? <List className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
+                                    </button>
+                                )}
+                                {flags.settingsVisible && (
+                                    <button
+                                        onClick={() => setShowSettings(true)}
+                                        className="p-2 ml-1 text-gray-400 hover:text-white transition-all cursor-pointer"
+                                        title="Settings"
+                                    >
+                                        <Settings className="w-5 h-5" />
+                                    </button>
+                                )}
                             </div>
                         </div>
                     )}
@@ -683,7 +790,7 @@ function App() {
                                     return next;
                                 })}
                                 className={`shrink-0 p-2.5 mb-4 rounded-lg border transition-all cursor-pointer ${showDrivePanel ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
-                                title={`Toggle ${BRAND.driveLabel}`}
+                                title={`Toggle ${labels.aliasDriveName}`}
                             >
                                 <HardDrive className="w-5 h-5" />
                             </button>
@@ -713,7 +820,7 @@ function App() {
                                             ? getLibraryQuery(biographySearchQuery, 'biography')
                                         : (viewMode === 'library' ? getLibraryQuery(library.librarySearch, 'library') : search.activeText)
                                 }
-                                 placeholder={viewMode === 'glossary' ? "Look up Glossary Terms" : (viewMode === 'biography' ? "Look up Person" : (viewMode === 'library' ? "Look up Videos and Transcripts" : "Search YouTube handle, playlist URL, or video URL"))}
+                                 placeholder={viewMode === 'glossary' ? "Look up Term" : (viewMode === 'biography' ? `Look up ${labels.aliasBiographyItem}` : (viewMode === 'library' ? "Look up Videos and Transcripts" : "Search YouTube handle, playlist URL, or video URL"))}
                             />
                         </div>
                     </div>
@@ -734,14 +841,14 @@ function App() {
                              allowModification={allowModificationGlossary}
                          />
                      ) : viewMode === 'biography' ? (
-                          <BiographyView searchQuery={biographySearchQuery} onVideoSelect={handleSelectVideo} onViewMore={(handle) => goToLibrarySearch(`handle:${handle.replace('@', '')}`)} allowEditBio={allowEditBio} />
+                          <BiographyView searchQuery={biographySearchQuery} onVideoSelect={handleSelectVideo} onViewMore={(handle) => goToLibrarySearch(`handle:${handle.replace('@', '')}`)} onDriveSelect={showDrive ? goToLibraryDrive : undefined} allowEditBio={allowEditBio} />
                      ) : viewMode === 'search' ? (
                         <>
                             <VideoList
                                 videos={displayedVideos}
                                 onSelect={handleSelectVideo}
                                 onSelectWithTab={handleSelectVideo}
-                                onSaveAll={displayedVideos.length > 0 ? library.handleSaveAll : undefined}
+                                onSaveAll={flags.saveAllAllowed && displayedVideos.length > 0 ? library.handleSaveAll : undefined}
                                 saveProgress={library.saveProgress}
                                 compact={videoListMode === 'compact'}
                             />
@@ -769,7 +876,7 @@ function App() {
                         </>
                     ) : (
                         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400 flex flex-col lg:flex-row gap-6">
-                            {showDrivePanel && (
+                            {showDrivePanel && showDrive && (
                                 <div className="lg:w-80 shrink-0">
                                     <WdbsTreePanel
                                         selectedPath={library.wdbsFilter ?? undefined}
@@ -788,7 +895,7 @@ function App() {
                                                 return next;
                                             })}
                                             className={`mt-3 w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${bulkAssignMode ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
-                                            title={`Select videos, then right-click to assign them to a ${BRAND.driveLabel} category`}
+                                            title={`Select videos, then right-click to assign them to a ${labels.aliasDriveName} category`}
                                         >
                                             <MousePointerClick className="w-3.5 h-3.5" />
                                             {bulkAssignMode ? `Bulk Assign Mode (${bulkSelectedIds.size} selected)` : "Bulk Assign Mode"}
@@ -816,7 +923,7 @@ function App() {
                                     loadingMore={library.loadingMore}
                                     hasMore={library.hasMore}
                                     loading={library.loading}
-                                    emptyTitle={library.wdbsFilter ? "No videos" : (library.librarySearch.trim() ? "No results" : `Build your ${BRAND.libraryLabel}`)}
+                                    emptyTitle={library.wdbsFilter ? "No videos" : (library.librarySearch.trim() ? "No results" : `Build your ${labels.aliasLibrary}`)}
                                     emptyMessage={libraryEmptyMessage}
                                     bulkAssignMode={bulkAssignMode}
                                     bulkSelectedIds={bulkSelectedIds}
@@ -882,28 +989,20 @@ function App() {
                     library.refreshLibrary();
                 }}
                 onWdbsChanged={() => setDriveVersion(v => v + 1)}
+                onSelectDrive={showDrive ? goToLibraryDrive : undefined}
                 onVideoSelect={handleSelectVideo}
             />
 
             <SettingsModal
-                isOpen={showSettings}
+                isOpen={showSettings && flags.settingsVisible}
                 onClose={() => {
                     setShowSettings(false);
                     // allowEditWDBS has a live toggle in PluginsTab (unlike most other
                     // settings-table-only flags) but no dedicated onChange callback plumbed
-                    // through — re-reading it on close is simpler than adding one just for this.
-                    getSetting('allowEditWDBS').then(v => {
-                        const enabled = v === 'true';
-                        setAllowEditWDBS(enabled);
-                        if (!enabled) {
-                            // Bulk Assign Mode's toggle button disappears when editing is
-                            // disabled — exit the mode too so the grid doesn't stay stuck
-                            // in bulk-select with no visible way out.
-                            setBulkAssignMode(false);
-                            setBulkSelectedIds(new Set());
-                            setBulkAssignMenu(null);
-                        }
-                    });
+                    // through, so the flags are re-read on close. (Leaving Bulk Assign Mode when
+                    // editing is switched off is handled by the effect that watches the flag.)
+                    reloadFlags();
+                    reloadWorkspace();
                 }}
                 onStatusChange={setHasApiKey}
                 onVideoListModeChange={setVideoListMode}
@@ -914,6 +1013,7 @@ function App() {
                     getSetting('plugin_summarize_enabled').then(v => setPluginSummarizeEnabled(v === 'true'));
                     getSetting('plugin_photosynthesis_enabled').then(v => setPluginPhotosynthesisEnabled(v === 'true'));
                 }}
+                onSyncComplete={handleSyncApplied}
                 showSummarizeOllama={showSummarizeOllama}
                 showSummarizeVenice={showSummarizeVenice}
                 showSynthesizeVenice={showSynthesizeVenice}
@@ -938,14 +1038,37 @@ function App() {
                         goToLibrarySearch(`handle:${handle}`);
                         setSelectedBiography(null);
                     }}
+                    onDriveSelect={showDrive ? (path, label) => {
+                        goToLibraryDrive(path, label);
+                        setSelectedBiography(null);
+                    } : undefined}
                     allowEditBio={allowEditBio}
                 />
             )}
 
+            {linkedTerm && (
+                <TermDefinitionModal
+                    term={linkedTerm}
+                    onClose={() => setLinkedTerm(null)}
+                    onSearch={(term, mode) => {
+                        setLinkedTerm(null);
+                        handleSearchInLibrary(term, mode);
+                    }}
+                />
+            )}
+
+            <LinkPicker />
+            <MarkdownContextMenu />
+
             {library.confirmDelete && (
                 <ConfirmDialog
                     message={`Are you sure you want to delete "${library.confirmDelete.video.title}"?`}
-                    onConfirm={() => library.confirmDeleteAction(() => { setSidebarOpen(false); setSelectedVideo(null); })}
+                    onConfirm={async () => {
+                        await library.confirmDeleteAction(() => { setSidebarOpen(false); setSelectedVideo(null); });
+                        // The Drive tree's per-category video counts (and any category that just
+                        // emptied) are computed server-side, so re-fetch instead of leaving them stale.
+                        setDriveVersion(v => v + 1);
+                    }}
                     onCancel={() => library.setConfirmDelete(null)}
                 />
             )}
@@ -958,7 +1081,7 @@ function App() {
                 <ChevronUp className="w-6 h-6" style={{ color: '#ffffff' }} />
             </button>
 
-            {viewMode === 'library' && effectivePluginSummarizeEnabled && showSummarizeButton && !sidebarOpen && (
+            {viewMode === 'library' && effectivePluginSummarizeEnabled && showSummarizeButton && flags.allowSummarizeAll && !sidebarOpen && (
                 <button
                     onClick={library.handleSummarizeAll}
                     disabled={!!library.summarizeProgress}

@@ -1,15 +1,66 @@
-import { FolderOpen, FileDown } from "lucide-react";
+import { FileDown, Package } from "lucide-react";
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { BRAND } from "../../branding";
-import { getSetting, setSetting, selectFolder, exportToObsidian, type ExportSummary } from "../../api";
+import { getSetting, setSetting, selectVaultPath, exportToObsidian, type ExportSummary } from "../../api";
+import { parentDir } from "../../lib/utils";
+import { workspaceFileStem } from "../../lib/workspace";
+import { useFlags } from "../../hooks/useFlags";
+import { useWorkspace } from "../../hooks/useWorkspace";
+import { SyncPackExport } from "./SyncPackExport";
 
 const EXPORT_PATH_SETTING_KEY = "obsidianExportPath";
-// Both the actual invoke() call and the destination preview below must use this same value, so
-// the folder actually created always matches what's shown here.
-const EXPORT_CONTAINER_NAME = `${BRAND.name}_Vault`;
+// The Save As dialog opens with a name built from the workspace's, e.g. Kinesis_Metabolic_Warp_Drive_Vault,
+// which becomes the vault folder. The export always creates a new folder, so a taken name gets a
+// "(2)" suffix instead of being merged into.
+const defaultVaultName = (workspaceName: string) => `${BRAND.name}_${workspaceFileStem(workspaceName)}_Vault`;
+
+type ExportView = 'obsidian' | 'sync';
+
+// Same underline-tab styling as the Sidebar's Video Tags / Similar Videos switcher.
+const EXPORT_VIEWS: { id: ExportView; label: string; Icon: React.ElementType }[] = [
+    { id: 'obsidian', label: 'Export to Obsidian', Icon: FileDown },
+    { id: 'sync', label: 'Export Syncable Data', Icon: Package },
+];
 
 export function ExportTab() {
+    const [chosen, setChosen] = useState<ExportView>('obsidian');
+    const { flags } = useFlags();
+    // Only the exports a DB owner left on. The sync-data export also needs the Sync tab (see lib/flags.ts).
+    const views = EXPORT_VIEWS.filter(v => (v.id === 'obsidian' ? flags.exportObsidianVisible : flags.exportSyncDataVisible));
+    const view: ExportView = views.some(v => v.id === chosen) ? chosen : (views[0]?.id ?? 'obsidian');
+    const setView = setChosen;
+
+    return (
+        <div className="space-y-6 animate-in slide-in-from-right-4 duration-300">
+            <h3 className="text-base font-bold">Export</h3>
+            <div>
+                {/* With a single export left there's nothing to switch between. */}
+                {views.length > 1 && (
+                <div className="flex items-center gap-4 mb-4">
+                    {views.map(({ id, label, Icon }) => (
+                        <button
+                            key={id}
+                            onClick={() => setView(id)}
+                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${view === id ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                        >
+                            <Icon className="w-3.5 h-3.5" />
+                            {label}
+                            {view === id && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
+                        </button>
+                    ))}
+                </div>
+                )}
+                {/* The available ones stay mounted (just hidden) so switching tabs doesn't drop a running export's progress. */}
+                {flags.exportObsidianVisible && <div className={view === 'obsidian' ? '' : 'hidden'}><ObsidianExport /></div>}
+                {flags.exportSyncDataVisible && <div className={view === 'sync' ? '' : 'hidden'}><SyncPackExport /></div>}
+            </div>
+        </div>
+    );
+}
+
+function ObsidianExport() {
+    const { labels } = useWorkspace();
     const [folderPath, setFolderPath] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [status, setStatus] = useState<string | null>(null);
@@ -25,22 +76,22 @@ export function ExportTab() {
         return () => { unlisten.then(fn => fn()); };
     }, []);
 
-    const handleChooseFolder = async () => {
-        const folder = await selectFolder();
-        if (folder) {
-            setFolderPath(folder);
-            await setSetting(EXPORT_PATH_SETTING_KEY, folder);
-        }
-    };
-
+    // A Save As dialog: the user picks the location and names the vault folder in one step, and the
+    // export starts on confirm. It never writes into an existing folder (a taken name gets " (2)").
+    // Cancelling does nothing.
     const handleExport = async () => {
-        if (!folderPath) return;
+        setError(null);
+        const vaultPath = await selectVaultPath(defaultVaultName(labels.workspaceName), folderPath);
+        if (!vaultPath) return;
+        const parent = parentDir(vaultPath);
+        setFolderPath(parent);
+        setSetting(EXPORT_PATH_SETTING_KEY, parent).catch(() => {});
         setLoading(true);
         setError(null);
         setSummary(null);
         setStatus("Starting export...");
         try {
-            const result = await exportToObsidian(folderPath, EXPORT_CONTAINER_NAME, BRAND.libraryLabel);
+            const result = await exportToObsidian(vaultPath);
             setSummary(result);
             setStatus(null);
         } catch (err) {
@@ -52,39 +103,20 @@ export function ExportTab() {
     };
 
     return (
-        <div className="space-y-6 animate-in slide-in-from-right-4 duration-300">
+        <div>
             <div>
-                <h3 className="text-base font-bold mb-2">Export to Obsidian</h3>
                 <p className="text-[11px] text-[#aaaaaa] leading-relaxed mb-4">
                     Transforms your entire library into a cross-linked Obsidian vault.
                 </p>
 
-                <div className="space-y-3">
-                    <div>
-                        <span className="text-[10px] uppercase font-bold text-[#aaaaaa] tracking-widest block mb-2">Destination</span>
-                        <code className="block w-full bg-black/40 border border-[#303030] p-3 rounded-lg text-[11px] text-[#888888] break-all select-all font-mono">
-                            {folderPath ? `${folderPath}\\${EXPORT_CONTAINER_NAME}` : "No folder selected"}
-                        </code>
-                    </div>
-                    <div className="flex gap-2">
-                        <button
-                            onClick={handleChooseFolder}
-                            disabled={loading}
-                            className="flex-1 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                        >
-                            <FolderOpen className="w-4 h-4" />
-                            Choose Folder
-                        </button>
-                        <button
-                            onClick={handleExport}
-                            disabled={loading || !folderPath}
-                            className="flex-1 bg-red-600 text-white hover:bg-red-500 px-4 py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                        >
-                            <FileDown className="w-4 h-4" />
-                            Export to Obsidian
-                        </button>
-                    </div>
-                </div>
+                <button
+                    onClick={handleExport}
+                    disabled={loading}
+                    className="w-full bg-red-600 text-white hover:bg-red-500 px-4 py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                    <FileDown className="w-4 h-4" />
+                    Export to Obsidian
+                </button>
 
                 {status && (
                     <div className="mt-4 p-2.5 bg-red-600/10 border border-red-600/20 rounded-lg flex items-center gap-2">

@@ -43,19 +43,16 @@ fn base64_encode(bytes: &[u8]) -> String {
 pub async fn search_pixabay(app: tauri::AppHandle, query: String) -> Result<Vec<PixabayImage>, String> {
     let db_path = get_db_path(&app);
 
-    let api_key = match db::get_setting(&db_path, "pixabay_api_key") {
-        Ok(Some(key)) => key,
-        _ => return Err("Pixabay API key not set. Please add your API key in Settings.".to_string()),
-    };
+    let route = crate::sync::license::route(&db_path, "pixabay")
+        .ok_or_else(|| "Pixabay API key not set. Please add your API key in Settings.".to_string())?;
 
-    let url = format!(
-        "https://pixabay.com/api/?key={}&q={}&image_type=photo&per_page=20&safesearch=true",
-        api_key,
+    let url = route.url(&format!(
+        "api/?q={}&image_type=photo&per_page=20&safesearch=true",
         urlencoding::encode(&query)
-    );
+    ));
 
     let client = reqwest::Client::new();
-    let response = client.get(&url)
+    let response = route.apply(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("Request failed: {}", e))?;

@@ -7,8 +7,11 @@ import {
     checkOllama, checkModelPulled, pullModel, deleteModel, installOllama,
     getOllamaPrompt, setOllamaPrompt as saveOllamaPrompt,
     getVeniceApiKey, getVenicePrompt, setVenicePrompt as saveVenicePromptCmd,
+    getKeyStatus, type KeyStatus,
 } from "../../api";
-import { BRAND } from "../../branding";
+import { useWorkspace } from "../../hooks/useWorkspace";
+import { useLockedSettings, LOCKED_TITLE } from "../../hooks/useLockedSettings";
+import { useFlags } from "../../hooks/useFlags";
 
 // Kept in sync with the backend default (venice.rs's DEFAULT_VENICE_MODEL / schema.rs's
 // "venice_model" seed value). Venice renames/deprecates models over time (e.g. "GLM 5.1" vs
@@ -32,17 +35,21 @@ function PromptEditor({
     onSave: () => void;
     dirty: boolean;
 }) {
+    // A DB owner can make the prompt templates read-only (allowEditPrompts = false).
+    const { flags } = useFlags();
+    const canEdit = flags.allowEditPrompts;
     return (
         <div>
             <label className="text-[10px] uppercase font-bold text-[#aaaaaa] tracking-widest block mb-2">{label}</label>
             <textarea
                 value={value}
+                readOnly={!canEdit}
                 onChange={(e) => onChange(e.target.value)}
                 placeholder="Create a synopsis of this video transcript with pretty format."
                 className="w-full h-80 bg-[#1a1a1a] border border-[#303030] text-sm text-white rounded-lg px-3 py-2.5 outline-none hover:bg-[#202020] transition-colors resize-y font-mono text-[11px]"
             />
             <div className="flex items-center justify-between mt-2">
-                {dirty && (
+                {canEdit && dirty && (
                     <button
                         onClick={onSave}
                         className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-[10px] font-bold transition-colors cursor-pointer"
@@ -140,6 +147,8 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
     const [isPulled, setIsPulled] = useState(false);
     const [prompt, setPrompt] = useState('');
     const [dirty, setDirty] = useState(false);
+    // A DB owner can take away installing Ollama and pulling or removing its model.
+    const { flags } = useFlags();
 
     useEffect(() => {
         getOllamaPrompt().then(setPrompt);
@@ -211,7 +220,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
                         {!isInstalled ? 'Not Installed' : isPulled ? 'Installed & Ready' : 'Model not downloaded'}
                     </span>
                     <div className="flex items-center gap-2">
-                        {!isPulled ? (
+                        {flags.allowOllamaSetup && (!isPulled ? (
                             <button
                                 onClick={handleInstallOrPull}
                                 disabled={loading}
@@ -227,7 +236,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
                             >
                                 Remove Model
                             </button>
-                        )}
+                        ))}
                         {summarizeProvider === 'local'
                             ? <DefaultBadge />
                             : (
@@ -279,8 +288,12 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
     const [model, setModel] = useState(DEFAULT_VENICE_MODEL);
     const [modelInput, setModelInput] = useState('');
     const [modelSaved, setModelSaved] = useState(false);
+    const isLocked = useLockedSettings();
+    const modelLocked = isLocked('venice_model');
+    const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
 
     useEffect(() => {
+        getKeyStatus().then(setKeyStatus).catch(() => {});
         getVeniceApiKey().then(k => setHasKey(!!k));
         getVenicePrompt().then(setPrompt);
         getSetting('venice_model').then(m => {
@@ -347,6 +360,12 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
             {/* API Key */}
             <div className="bg-black/20 p-4 rounded-lg border border-[#303030]">
                 <span className="text-xs font-bold text-white block mb-3">Venice API Key</span>
+                {keyStatus?.venice.licensed && (
+                    <p className="text-[10px] text-blue-300 mb-3 leading-relaxed">
+                        Covered by {keyStatus.server_name || 'your sync server'}'s license, so you don't need your own key.
+                        {keyStatus.venice.own_key && !keyStatus.venice.via_license ? " Your own key is used instead." : ""}
+                    </p>
+                )}
                 <div className="flex items-center justify-between">
                     <div className="flex-1 mr-4">
                         {hasKey
@@ -411,12 +430,14 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
                         placeholder={DEFAULT_VENICE_MODEL}
                         value={modelInput}
                         onChange={(e) => setModelInput(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') handleSaveModel(); }}
-                        className="flex-1 bg-[#1a1a1a] border border-[#303030] hover:border-[#505050] outline-none rounded-lg px-3 py-2 text-[11px] text-white placeholder-[#444] transition-colors font-mono"
+                        onKeyDown={(e) => { if (e.key === 'Enter' && !modelLocked) handleSaveModel(); }}
+                        disabled={modelLocked}
+                        title={modelLocked ? LOCKED_TITLE : undefined}
+                        className="flex-1 bg-[#1a1a1a] border border-[#303030] hover:border-[#505050] outline-none rounded-lg px-3 py-2 text-[11px] text-white placeholder-[#444] transition-colors font-mono disabled:opacity-50"
                     />
                     <button
                         onClick={handleSaveModel}
-                        disabled={loading || !modelInput.trim() || modelInput.trim() === model}
+                        disabled={modelLocked || loading || !modelInput.trim() || modelInput.trim() === model}
                         className="bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-3 py-1.5 rounded-md font-semibold text-[10px] transition-colors cursor-pointer disabled:opacity-50 shrink-0"
                     >
                         {modelSaved ? <Check className="w-3.5 h-3.5" /> : "Save"}
@@ -445,13 +466,17 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
 // to be restricted to IKLAO Admin Users once the IKLAO Cloud is stood up, but there's no such
 // auth yet, so this is how to turn editing on in the meantime.
 function WarpDriveSection() {
+    const { labels } = useWorkspace();
     const [allowEdit, setAllowEdit] = useState(false);
+    const isLocked = useLockedSettings();
+    const locked = isLocked('allowEditWDBS');
 
     useEffect(() => {
         getSetting('allowEditWDBS').then(v => setAllowEdit(v === 'true'));
     }, []);
 
     const toggle = async () => {
+        if (locked) return;
         const next = !allowEdit;
         setAllowEdit(next);
         await setSetting('allowEditWDBS', next.toString());
@@ -463,16 +488,18 @@ function WarpDriveSection() {
                 <div className="flex-1">
                     <div className="flex items-center gap-2 mb-1">
                         <div className="p-2 text-gray-400"><FolderTree className="w-4 h-4" /></div>
-                        <h4 className="text-sm font-bold text-white">{BRAND.driveLabel} Editing</h4>
+                        <h4 className="text-sm font-bold text-white">{labels.aliasDriveName} Editing</h4>
                     </div>
                     <p className="text-[11px] text-[#aaaaaa] leading-relaxed max-w-sm">
-                        Lets you assign, change, and symlink a saved video's {BRAND.driveLabel} designator from its detail panel. Off by default.
+                        Lets you assign, change, and symlink a saved video's {labels.aliasDriveName} designator from its detail panel. Off by default.
                     </p>
                 </div>
                 <div className="ml-6 shrink-0">
                     <button
                         onClick={toggle}
-                        className={`px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer ${allowEdit ? 'bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white font-semibold' : 'bg-red-600 text-white hover:bg-red-500'}`}
+                        disabled={locked}
+                        title={locked ? LOCKED_TITLE : undefined}
+                        className={`px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default ${allowEdit ? 'bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white font-semibold' : 'bg-red-600 text-white hover:bg-red-500'}`}
                     >
                         {allowEdit ? 'Disable' : 'Enable'}
                     </button>
@@ -504,6 +531,7 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
     const [summarizeProvider, setSummarizeProvider] = useState<string>('local');
     const [showCustomPrompt, setShowCustomPrompt] = useState(true);
     const [clearTranscriptOnSummarize, setClearTranscriptOnSummarize] = useState(false);
+    const isLocked = useLockedSettings();
 
     useEffect(() => {
         if (summarizeTab === 'local' && !showSummarizeOllama) {
@@ -522,6 +550,7 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
     }, []);
 
     const setDefault = async (provider: string) => {
+        if (isLocked('summarize_provider')) return;
         setSummarizeProvider(provider);
         await setSetting('summarize_provider', provider);
     };
@@ -548,7 +577,8 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
                                 <div className="ml-6 shrink-0">
                                     <button
                                         onClick={() => onTogglePlugin(plugin.id, !plugin.enabled)}
-                                        disabled={loading}
+                                        disabled={loading || isLocked(`plugin_${plugin.id}_enabled`)}
+                                        title={isLocked(`plugin_${plugin.id}_enabled`) ? LOCKED_TITLE : undefined}
                                         className={`px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer disabled:opacity-50 ${plugin.enabled ? 'bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white font-semibold' : 'bg-red-600 text-white hover:bg-red-500'}`}
                                     >
                                         {plugin.enabled ? 'Disable' : 'Enable'}
@@ -571,7 +601,9 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
                                                 setShowCustomPrompt(newValue);
                                                 await setSetting('showCustomPrompt', newValue.toString());
                                             }}
-                                            className={`w-10 h-5 rounded-full transition-colors cursor-pointer ${showCustomPrompt ? 'bg-blue-600' : 'bg-[#333333]'}`}
+                                            disabled={isLocked('showCustomPrompt')}
+                                            title={isLocked('showCustomPrompt') ? LOCKED_TITLE : undefined}
+                                            className={`w-10 h-5 rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default ${showCustomPrompt ? 'bg-blue-600' : 'bg-[#333333]'}`}
                                         >
                                             <div className={`w-4 h-4 bg-white rounded-full transition-transform ${showCustomPrompt ? 'translate-x-5' : 'translate-x-0.5'}`} />
                                         </button>
@@ -593,7 +625,9 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
                                                 setClearTranscriptOnSummarize(newValue);
                                                 await setSetting('setTranscriptAfterSummarizeToNA', newValue.toString());
                                             }}
-                                            className={`w-10 h-5 rounded-full transition-colors cursor-pointer ${clearTranscriptOnSummarize ? 'bg-blue-600' : 'bg-[#333333]'}`}
+                                            disabled={isLocked('setTranscriptAfterSummarizeToNA')}
+                                            title={isLocked('setTranscriptAfterSummarizeToNA') ? LOCKED_TITLE : undefined}
+                                            className={`w-10 h-5 rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default ${clearTranscriptOnSummarize ? 'bg-blue-600' : 'bg-[#333333]'}`}
                                         >
                                             <div className={`w-4 h-4 bg-white rounded-full transition-transform ${clearTranscriptOnSummarize ? 'translate-x-5' : 'translate-x-0.5'}`} />
                                         </button>

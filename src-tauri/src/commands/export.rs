@@ -1,8 +1,8 @@
 use crate::{db, get_db_path};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{command, AppHandle, Emitter, Manager};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,11 +104,60 @@ fn folder_segments_for_wdbs(wdbs: &str, node_map: &HashMap<String, &db::WdbsNode
     names
 }
 
+// A Drive root (":CRYPTO") -> the name the vault shows for it: its curated alias when it has one
+// (the same preference the video folders use), otherwise the bare segment.
+fn drive_root_label(root: &str, node_map: &HashMap<String, &db::WdbsNode>) -> String {
+    let segment = root.trim_start_matches(':');
+    node_map
+        .get(&format!("θψ{}", segment))
+        .and_then(|n| n.alias.clone())
+        .unwrap_or_else(|| segment.to_string())
+}
+
 fn parse_tags(raw: Option<&str>) -> Vec<String> {
     raw.unwrap_or("").split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
 }
 
-fn build_video_note(video: &crate::Video) -> String {
+/// Where links inside exported text can point: the notes this export writes. In-app links
+/// (`[text](kinesis://...)`, see db/links.rs) become Obsidian wiki links to those notes. A link to
+/// something that isn't in the export keeps just its text, and so does one to a Drive, since the
+/// vault shows Drives as folders and a folder can't be linked to.
+struct LinkResolver {
+    glossary: HashMap<String, String>,
+    /// Keyed by the handle without "@", lowercased.
+    biographies: HashMap<String, String>,
+    videos: HashMap<String, String>,
+}
+
+impl LinkResolver {
+    fn note_for(&self, kind: db::links::LinkKind, key: &str) -> Option<String> {
+        use db::links::LinkKind;
+        match kind {
+            LinkKind::Glossary => self.glossary.get(key).cloned(),
+            LinkKind::Bio => self.biographies.get(&key.trim_start_matches('@').to_lowercase()).cloned(),
+            LinkKind::Video => self.videos.get(key).cloned(),
+            LinkKind::Drive => None,
+        }
+    }
+
+    fn wikilinks(&self, text: &str) -> String {
+        db::links::to_wikilinks(text, |kind, key| self.note_for(kind, key))
+    }
+}
+
+/// The video player, embedded the way YouTube's own "Embed" snippet does it. Obsidian shows it in
+/// reading view and live preview. `None` for an id that doesn't look like a YouTube id, so nothing
+/// odd ever lands in the note's HTML.
+fn youtube_embed(video_id: &str) -> Option<String> {
+    let ok = (6..=20).contains(&video_id.len()) && video_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    ok.then(|| {
+        format!(
+            "<iframe width=\"560\" height=\"315\" src=\"https://www.youtube.com/embed/{video_id}\" title=\"YouTube video player\" frameborder=\"0\" allow=\"accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share\" referrerpolicy=\"strict-origin-when-cross-origin\" allowfullscreen></iframe>"
+        )
+    })
+}
+
+fn build_video_note(video: &crate::Video, links: &LinkResolver) -> String {
     let tag_list = parse_tags(video.tags.as_deref());
 
     let mut fm = String::from("---\n");
@@ -141,7 +190,10 @@ fn build_video_note(video: &crate::Video) -> String {
     fm.push_str("---\n");
 
     let mut body = String::new();
-    body.push_str(&format!("![Thumbnail]({})\n\n", video.thumbnail));
+    if let Some(embed) = youtube_embed(&video.id) {
+        body.push_str(&embed);
+        body.push_str("\n\n");
+    }
     body.push_str(&format!("[Watch on YouTube](https://www.youtube.com/watch?v={})\n\n", video.id));
     if let Some(handle) = video.handle.as_deref().filter(|h| !h.is_empty()) {
         body.push_str(&format!("Channel: [[{}]]\n\n", biography_note_basename(handle)));
@@ -157,12 +209,12 @@ fn build_video_note(video: &crate::Video) -> String {
     let has_transcript = video.has_transcript.unwrap_or(false);
     if has_summary {
         body.push_str("## Summary\n\n");
-        body.push_str(video.summary.as_deref().unwrap_or(""));
+        body.push_str(&links.wikilinks(video.summary.as_deref().unwrap_or("")));
         body.push_str("\n\n");
     }
     if has_transcript {
         body.push_str("## Transcript\n\n");
-        body.push_str(video.transcript.as_deref().unwrap_or(""));
+        body.push_str(&links.wikilinks(video.transcript.as_deref().unwrap_or("")));
         body.push('\n');
     }
     if !has_summary && !has_transcript {
@@ -172,7 +224,7 @@ fn build_video_note(video: &crate::Video) -> String {
     format!("{fm}{body}")
 }
 
-fn build_biography_note(bio: &db::BiographyExportRow) -> String {
+fn build_biography_note(bio: &db::BiographyExportRow, links_to: &LinkResolver) -> String {
     let handle = display_handle(&bio.handle);
     let title = if bio.display_name.trim().is_empty() { handle.clone() } else { bio.display_name.trim().to_string() };
 
@@ -188,7 +240,7 @@ fn build_biography_note(bio: &db::BiographyExportRow) -> String {
 
     let mut body = format!("# {}\n\n", title);
     if !bio.bio.trim().is_empty() {
-        body.push_str(bio.bio.trim());
+        body.push_str(&links_to.wikilinks(bio.bio.trim()));
         body.push_str("\n\n");
     }
 
@@ -222,13 +274,40 @@ fn build_biography_note(bio: &db::BiographyExportRow) -> String {
 /// Does the actual export work — pulled out of the `#[command]` wrapper below so it can be unit
 /// tested directly against a throwaway SQLite file, without needing a running Tauri `AppHandle`.
 /// See `export_to_obsidian` for the full behavior description.
+/// Where the vault will actually be written for the name the user gave in the Save As dialog.
+/// Never an existing folder (or file): if `chosen` is taken, the first free "name (2)", "name (3)",
+/// ... beside it is used, so an export can't merge into or overwrite anything already there.
+pub(crate) fn unique_vault_path(chosen: &Path) -> PathBuf {
+    if !chosen.exists() {
+        return chosen.to_path_buf();
+    }
+    let parent = chosen.parent().map(Path::to_path_buf).unwrap_or_default();
+    let name = chosen.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Vault".into());
+    for n in 2..10_000 {
+        let candidate = parent.join(format!("{name} ({n})"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    chosen.to_path_buf()
+}
+
+/// Writes the vault into `root` (the folder is created; callers pass a path that doesn't exist yet,
+/// see `unique_vault_path`).
 fn run_export(
     db_path: &str,
-    folder_path: &str,
-    container_name: &str,
-    videos_label: &str,
+    root: &Path,
     mut on_progress: impl FnMut(&str),
 ) -> Result<ExportSummary, String> {
+    // The folder names follow the workspace's aliases (e.g. "Portal", "Thesaurus", "Creators"); they're
+    // letters, digits and spaces only, so they're safe as folder names.
+    let names = db::get_workspace_labels(db_path).map_err(|e| e.to_string())?;
+    let (library_name, glossary_name, biography_name, drive_name) = (
+        names["aliasLibrary"].clone(),
+        names["aliasGlossary"].clone(),
+        names["aliasBiography"].clone(),
+        names["aliasDriveName"].clone(),
+    );
     on_progress("Reading library...");
     let (videos, _total) = db::list_videos(db_path, None, None, None, i64::MAX, 0, true).map_err(|e| e.to_string())?;
     let wdbs_tree = db::get_wdbs_tree(db_path).map_err(|e| e.to_string())?;
@@ -239,22 +318,33 @@ fn run_export(
     let mut node_map: HashMap<String, &db::WdbsNode> = HashMap::new();
     flatten_wdbs_tree(&wdbs_tree, &mut node_map);
 
-    let root = PathBuf::from(folder_path).join(sanitize_path_component(container_name, 60));
-    let videos_root = root.join(sanitize_path_component(videos_label, 60));
+    let root = root.to_path_buf();
+    let videos_root = root.join(sanitize_path_component(&library_name, 60));
     let unsorted_root = videos_root.join("_Unsorted");
-    let glossary_root = root.join("Glossary");
-    let biography_root = root.join("Biography");
+    let glossary_root = root.join(sanitize_path_component(&glossary_name, 60));
+    let biography_root = root.join(sanitize_path_component(&biography_name, 60));
 
     for dir in [&videos_root, &unsorted_root, &glossary_root, &biography_root] {
         fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
     }
 
+    // Every note name is known before any note is written, so a link can point at one written later.
+    let basename_by_id: HashMap<String, String> =
+        videos.iter().map(|v| (v.id.clone(), video_note_basename(&v.title, &v.id))).collect();
+    let resolver = LinkResolver {
+        glossary: glossary_terms.iter().map(|(t, _)| (t.clone(), glossary_note_basename(t))).collect(),
+        biographies: biographies
+            .iter()
+            .filter(|b| !b.handle.trim().is_empty())
+            .map(|b| (b.handle.trim().trim_start_matches('@').to_lowercase(), biography_note_basename(&b.handle)))
+            .collect(),
+        videos: basename_by_id.clone(),
+    };
+
     let total = videos.len();
     on_progress(&format!("Exporting {} videos...", total));
-    let mut basename_by_id: HashMap<String, String> = HashMap::new();
     for (i, video) in videos.iter().enumerate() {
-        let basename = video_note_basename(&video.title, &video.id);
-        basename_by_id.insert(video.id.clone(), basename.clone());
+        let basename = basename_by_id[&video.id].clone();
 
         let dir = match video.wdbs.as_deref().filter(|w| !is_unassigned_wdbs(w)) {
             Some(w) => {
@@ -268,7 +358,7 @@ fn run_export(
         };
         fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
         let file_path = dir.join(format!("{}.md", basename));
-        fs::write(&file_path, build_video_note(video)).map_err(|e| format!("Failed to write {}: {}", file_path.display(), e))?;
+        fs::write(&file_path, build_video_note(video, &resolver)).map_err(|e| format!("Failed to write {}: {}", file_path.display(), e))?;
 
         if i % 10 == 0 || i + 1 == total {
             on_progress(&format!("Exporting videos ({}/{})...", i + 1, total));
@@ -293,20 +383,53 @@ fn run_export(
         }
     }
 
-    on_progress("Writing Glossary...");
+    on_progress(&format!("Writing {glossary_name}..."));
+    // Standard Glossary Tags can be filed under top-level Drives. Each term keeps a single note at
+    // <Glossary>/<term>.md (so every [[Term]] link still resolves to exactly one file) and lists its
+    // drives in frontmatter; "By <Drive>" index notes then group the same terms per drive.
+    let mut drives_by_term: HashMap<String, Vec<String>> = HashMap::new();
+    let mut terms_by_drive: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (term, root) in db::get_glossary_drive_links(db_path).map_err(|e| e.to_string())? {
+        let label = drive_root_label(&root, &node_map);
+        drives_by_term.entry(term.clone()).or_default().push(label.clone());
+        terms_by_drive.entry(label).or_default().push(term);
+    }
+
     for (term, definition) in &glossary_terms {
         let file_path = glossary_root.join(format!("{}.md", glossary_note_basename(term)));
-        let content = format!("---\ntype: glossary-term\nterm: {}\n---\n{}\n", yaml_str(term), definition);
+        let mut fm = format!("---\ntype: glossary-term\nterm: {}\n", yaml_str(term));
+        if let Some(labels) = drives_by_term.get(term).filter(|l| !l.is_empty()) {
+            let quoted: Vec<String> = labels.iter().map(|l| yaml_str(l)).collect();
+            fm.push_str(&format!("drives: [{}]\n", quoted.join(", ")));
+        }
+        fm.push_str("---\n");
+        let content = format!("{}{}\n", fm, resolver.wikilinks(definition));
         fs::write(&file_path, content).map_err(|e| format!("Failed to write {}: {}", file_path.display(), e))?;
     }
 
-    on_progress("Writing Biography...");
+    if !terms_by_drive.is_empty() {
+        let index_root = glossary_root.join(sanitize_path_component(&format!("By {drive_name}"), 60));
+        fs::create_dir_all(&index_root).map_err(|e| format!("Failed to create {}: {}", index_root.display(), e))?;
+        for (label, terms) in &terms_by_drive {
+            let links: Vec<String> = terms.iter().map(|t| format!("- [[{}]]", glossary_note_basename(t))).collect();
+            let content = format!(
+                "---\ntype: glossary-drive\ndrive: {}\n---\n# {}\n\n{}\n",
+                yaml_str(label),
+                label,
+                links.join("\n")
+            );
+            let file_path = index_root.join(format!("{}.md", sanitize_path_component(label, 60)));
+            fs::write(&file_path, content).map_err(|e| format!("Failed to write {}: {}", file_path.display(), e))?;
+        }
+    }
+
+    on_progress(&format!("Writing {biography_name}..."));
     for bio in &biographies {
         if bio.handle.trim().is_empty() {
             continue;
         }
         let file_path = biography_root.join(format!("{}.md", biography_note_basename(&bio.handle)));
-        fs::write(&file_path, build_biography_note(bio)).map_err(|e| format!("Failed to write {}: {}", file_path.display(), e))?;
+        fs::write(&file_path, build_biography_note(bio, &resolver)).map_err(|e| format!("Failed to write {}: {}", file_path.display(), e))?;
     }
 
     on_progress("Done.");
@@ -320,21 +443,19 @@ fn run_export(
 
 /// Exports the entire library — videos (with transcript/AI summary), the Warp Drive/Drive
 /// taxonomy as nested folders, the Glossary, and Biography entries — as a folder of Markdown notes
-/// usable directly as an Obsidian vault. Everything is written under
-/// `<folder_path>/<container_name>/`, never at `folder_path`'s own root and never deleting
-/// anything, so pointing this at an existing Obsidian vault only ever adds/overwrites files inside
-/// that one named subfolder. `container_name`/`videos_label` come from the frontend's BRAND config
-/// (see src/branding.ts) so folder naming stays on-brand without this module needing to know about
-/// Kinesis vs. Genesis itself.
+/// usable directly as an Obsidian vault. `vault_path` is the folder the user named in the Save As
+/// dialog; it is always a NEW folder (see `unique_vault_path`), so nothing already on disk is ever
+/// merged into, overwritten or deleted. Folder names inside the vault follow the workspace's aliases
+/// (db/workspace.rs): the Library, Glossary and Biography folders and the glossary's "By <Drive>"
+/// index. The returned summary carries the folder actually written.
 #[command]
 pub async fn export_to_obsidian(
     app: AppHandle,
-    folder_path: String,
-    container_name: String,
-    videos_label: String,
+    vault_path: String,
 ) -> Result<ExportSummary, String> {
     let db_path = get_db_path(&app);
-    run_export(&db_path, &folder_path, &container_name, &videos_label, |msg| emit_progress(&app, msg))
+    let root = unique_vault_path(Path::new(&vault_path));
+    run_export(&db_path, &root, |msg| emit_progress(&app, msg))
 }
 
 #[cfg(test)]
@@ -347,8 +468,188 @@ mod tests {
     fn temp_dir(label: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("kinesis_export_test_{}_{}", label, n));
+        // Start clean: a previous failed run leaves its output behind (the counter restarts at 0).
+        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn in_app_links_become_wiki_links_and_the_thumbnail_becomes_an_embedded_player() {
+        use db::links::{build_link, LinkKind};
+        let work_dir = temp_dir("wl");
+        let db_path = work_dir.join("test.db").to_string_lossy().to_string();
+        db::init_db(&db_path).unwrap();
+        db::save_video(&db_path, "vid1abcdefg", "First Talk", "Ann", 60, "words", 1, "2026-01-02T00:00:00Z", "@ann", None).unwrap();
+        db::save_video(&db_path, "vid2abcdefg", "Second Talk", "Bob", 60, "words", 1, "2026-01-03T00:00:00Z", "@bob", None).unwrap();
+        db::save_glossary_term(&db_path, None, "Halving", "Cuts rewards. See also [the talk](kinesis://video/vid1abcdefg).", &[]).unwrap();
+
+        let summary = format!(
+            "{} and {} and {} and {} and {} and {}",
+            build_link("Halving", LinkKind::Glossary, "Halving"),
+            build_link("what it means", LinkKind::Glossary, "Halving"),
+            build_link("the second talk", LinkKind::Video, "vid2abcdefg"),
+            build_link("Ann", LinkKind::Bio, "ann"),
+            build_link("UAP", LinkKind::Drive, "θψUAP"),
+            build_link("gone", LinkKind::Glossary, "Missing"),
+        );
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("UPDATE videos SET summary = ?1 WHERE video_id = 'vid1abcdefg'", [&summary]).unwrap();
+        conn.execute("INSERT INTO biographies (handle, display_name, bio) VALUES ('@ann', 'Ann', 'Friend of [First Talk](kinesis://video/vid1abcdefg).')", []).unwrap();
+        drop(conn);
+
+        let out_dir = temp_dir("wlout");
+        run_export(&db_path, &out_dir.join("TestApp"), |_| {}).unwrap();
+        let root = out_dir.join("TestApp");
+
+        let note = fs::read_to_string(root.join("Library/_Unsorted/First Talk (vid1abcdefg).md")).unwrap();
+        assert!(
+            note.contains("[[Halving]] and [[Halving|what it means]] and [[Second Talk (vid2abcdefg)|the second talk]] and [[@ann|Ann]] and UAP and gone"),
+            "{note}"
+        );
+        assert!(!note.contains("kinesis://"), "{note}");
+
+        // The player is embedded instead of the thumbnail image.
+        assert!(note.contains("<iframe ") && note.contains("src=\"https://www.youtube.com/embed/vid1abcdefg\""), "{note}");
+        assert!(!note.contains("![Thumbnail]"), "{note}");
+        assert!(note.contains("[Watch on YouTube](https://www.youtube.com/watch?v=vid1abcdefg)"));
+
+        // Glossary definitions and biographies get the same treatment.
+        let term = fs::read_to_string(root.join("Glossary/Halving.md")).unwrap();
+        assert!(term.contains("See also [[First Talk (vid1abcdefg)|the talk]]."), "{term}");
+        let bio = fs::read_to_string(root.join("Biography/@ann.md")).unwrap();
+        assert!(bio.contains("Friend of [[First Talk (vid1abcdefg)|First Talk]]."), "{bio}");
+
+        fs::remove_dir_all(&work_dir).ok();
+        fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[test]
+    fn only_youtube_looking_ids_get_an_embedded_player() {
+        assert!(youtube_embed("dQw4w9WgXcQ").is_some());
+        assert!(youtube_embed("").is_none());
+        assert!(youtube_embed("abc").is_none());
+        assert!(youtube_embed("x\"><script>alert(1)</script>").is_none());
+    }
+
+    #[test]
+    fn glossary_drives_are_exported_as_frontmatter_and_per_drive_index_notes() {
+        let work_dir = temp_dir("gdb");
+        let db_path = work_dir.join("test.db").to_string_lossy().to_string();
+        db::init_db(&db_path).unwrap();
+        db::save_video(&db_path, "vid1", "A Video", "Author", 60, "words", 1, "2026-01-02T00:00:00Z", "@a", None).unwrap();
+        db::update_video_wdbs(&db_path, "vid1", "θψUAP_GERB").unwrap();
+        // The command layer registers a category's taxonomy rows (an alias needs its row to exist).
+        db::ensure_wdbs_path_exists(&db_path, ":UAP-GERB").unwrap();
+        db::set_wdbs_alias(&db_path, "θψUAP", "Unidentified").unwrap();
+
+        // A term in two drives (one aliased), one in a single drive, an uncategorized one, a Quick Tag.
+        let both = [":UAP".to_string(), ":FIN".to_string()];
+        db::save_glossary_term(&db_path, None, "Halving", "Supply cut", &both).unwrap();
+        db::save_glossary_term(&db_path, None, "Orb", "A sphere", &[":UAP".to_string()]).unwrap();
+        db::save_glossary_term(&db_path, None, "Loose", "No drive", &[]).unwrap();
+        db::save_glossary_term(&db_path, None, "qt", "", &[]).unwrap();
+
+        let out_dir = temp_dir("gout");
+        let summary = run_export(&db_path, &out_dir.join("TestApp"), |_| {}).unwrap();
+        assert_eq!(summary.glossary_terms, 4);
+        let glossary = out_dir.join("TestApp/Glossary");
+
+        // One note per term, so [[Term]] links stay unambiguous; drives listed by their display names.
+        let halving = fs::read_to_string(glossary.join("Halving.md")).unwrap();
+        assert!(halving.contains("drives: [\"FIN\", \"Unidentified\"]\n"), "{halving}");
+        assert!(halving.ends_with("---\nSupply cut\n"), "the body still starts right after the frontmatter: {halving}");
+        assert!(!fs::read_to_string(glossary.join("Loose.md")).unwrap().contains("drives:"));
+        assert!(!fs::read_to_string(glossary.join("qt.md")).unwrap().contains("drives:"));
+        assert_eq!(fs::read_dir(&glossary).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy() == "Halving.md").count(), 1);
+
+        // One index note per drive listing its terms.
+        let unidentified = fs::read_to_string(glossary.join("By Drive/Unidentified.md")).unwrap();
+        assert!(unidentified.contains("type: glossary-drive") && unidentified.contains("drive: \"Unidentified\""), "{unidentified}");
+        assert!(unidentified.contains("- [[Halving]]") && unidentified.contains("- [[Orb]]"), "{unidentified}");
+        let fin = fs::read_to_string(glossary.join("By Drive/FIN.md")).unwrap();
+        assert!(fin.contains("- [[Halving]]") && !fin.contains("Orb"), "{fin}");
+        assert!(!glossary.join("By Drive/UAP.md").exists(), "the aliased drive is named by its alias");
+
+        fs::remove_dir_all(&work_dir).ok();
+        fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[test]
+    fn a_chosen_vault_name_never_collides_with_an_existing_folder_or_file() {
+        let base = temp_dir("uniq");
+        let vault = base.join("Kinesis_Vault");
+
+        // Free name: used as given.
+        assert_eq!(unique_vault_path(&vault), vault);
+
+        // Taken by a folder (say, a previous export): the next free numbered name, then the next.
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("keep.md"), "existing note").unwrap();
+        assert_eq!(unique_vault_path(&vault), base.join("Kinesis_Vault (2)"));
+        fs::create_dir_all(base.join("Kinesis_Vault (2)")).unwrap();
+        assert_eq!(unique_vault_path(&vault), base.join("Kinesis_Vault (3)"));
+
+        // Taken by a plain file counts too.
+        fs::write(base.join("Notes"), "a file").unwrap();
+        assert_eq!(unique_vault_path(&base.join("Notes")), base.join("Notes (2)"));
+
+        // Exporting to the taken name leaves the existing folder untouched and writes beside it.
+        let db_dir = temp_dir("uniqdb");
+        let db_path = db_dir.join("t.db").to_string_lossy().to_string();
+        db::init_db(&db_path).unwrap();
+        db::add_glossary_term(&db_path, "T", "d").unwrap();
+        let target = unique_vault_path(&vault);
+        let summary = run_export(&db_path, &target, |_| {}).unwrap();
+        assert_eq!(summary.folder_path, target.to_string_lossy());
+        assert!(target.join("Glossary/T.md").exists());
+        assert_eq!(fs::read_to_string(vault.join("keep.md")).unwrap(), "existing note");
+        assert!(!vault.join("Glossary").exists(), "nothing was written into the existing folder");
+
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&db_dir).ok();
+    }
+
+    #[test]
+    fn a_vault_without_any_drive_assignments_has_no_by_drive_folder() {
+        let work_dir = temp_dir("nodrv");
+        let db_path = work_dir.join("test.db").to_string_lossy().to_string();
+        db::init_db(&db_path).unwrap();
+        db::add_glossary_term(&db_path, "Plain", "Just a term").unwrap();
+        let out_dir = temp_dir("nodrvout");
+        run_export(&db_path, &out_dir.join("TestApp"), |_| {}).unwrap();
+        assert!(out_dir.join("TestApp/Glossary/Plain.md").exists());
+        assert!(!out_dir.join("TestApp/Glossary/By Drive").exists());
+        fs::remove_dir_all(&work_dir).ok();
+        fs::remove_dir_all(&out_dir).ok();
+    }
+
+    #[test]
+    fn folders_and_notes_follow_the_workspace_aliases() {
+        let work_dir = temp_dir("alias");
+        let db_path = work_dir.join("test.db").to_string_lossy().to_string();
+        db::init_db(&db_path).unwrap();
+        db::save_video(&db_path, "vid1", "A Talk", "Author", 60, "text", 1, "2026-01-02T00:00:00Z", "@ann", None).unwrap();
+        db::add_glossary_term(&db_path, "Halving", "Cuts the reward").unwrap();
+        for (key, value) in [
+            ("aliasLibrary", "Portal"),
+            ("aliasGlossary", "Thesaurus"),
+            ("aliasBiography", "Creators"),
+            ("aliasDriveName", "Warp Drive"),
+        ] {
+            db::set_workspace_label(&db_path, key, value).unwrap();
+        }
+        let out_dir = temp_dir("aliasout");
+        let root = out_dir.join("TestApp");
+        run_export(&db_path, &root, |_| {}).unwrap();
+        assert!(root.join("Portal/_Unsorted/A Talk (vid1).md").exists());
+        assert!(root.join("Thesaurus/Halving.md").exists());
+        assert!(root.join("Creators").is_dir());
+        for default_name in ["Library", "Glossary", "Biography"] {
+            assert!(!root.join(default_name).exists(), "{default_name} should not be used once aliased");
+        }
+        fs::remove_dir_all(&work_dir).ok();
+        fs::remove_dir_all(&out_dir).ok();
     }
 
     #[test]
@@ -372,7 +673,7 @@ mod tests {
         db::upsert_biography_from_video(&db_path, "@testcreator", "Test Creator", None, -1).unwrap();
 
         let out_dir = temp_dir("out");
-        let summary = run_export(&db_path, &out_dir.to_string_lossy(), "TestApp", "Library", |_| {}).unwrap();
+        let summary = run_export(&db_path, &out_dir.join("TestApp"), |_| {}).unwrap();
 
         assert_eq!(summary.videos_exported, 2);
         assert_eq!(summary.glossary_terms, 1);

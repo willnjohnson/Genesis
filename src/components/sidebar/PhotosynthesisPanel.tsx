@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Image as ImageIcon, Search, Loader2, Upload } from 'lucide-react';
-import { uploadToImgur, generateImage as generateVeniceImage, searchPixabay, getPixabayApiKey, setPixabayApiKey as savePixabayApiKey, getVeniceApiKey, setVeniceApiKey as saveVeniceApiKey } from '../../api';
+import { uploadToImgur, generateImage as generateVeniceImage, searchPixabay, getPixabayApiKey, setPixabayApiKey as savePixabayApiKey, getVeniceApiKey, setVeniceApiKey as saveVeniceApiKey, getKeyStatus } from '../../api';
 import { saveImageAs } from '../../lib/save-image-as';
 import photosynthesisLogo from '../../assets/photosynthesis.png';
 
@@ -61,6 +61,12 @@ export function PhotosynthesisPanel({
                 setVeniceApiKeySaved(true);
             }
         });
+
+        // A sync-server license stands in for an own key: skip the key prompt when one applies.
+        getKeyStatus().then(s => {
+            if (s.pixabay.available) setPixabayApiKeySaved(true);
+            if (s.venice.available) setVeniceApiKeySaved(true);
+        }).catch(() => {});
     }, []);
 
     const handlePixabaySearch = async () => {
@@ -150,41 +156,38 @@ export function PhotosynthesisPanel({
                     </div>
                 </div>
                 <div className="flex justify-between items-center">
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-4">
                     {showSynthesizeVenice && (
                         <button
                             id="venice-tab-btn"
                             onClick={() => setImageTab('venice')}
-                            className={`flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer px-4 py-2 rounded-lg ${imageTab === 'venice'
-                                ? 'bg-red-600 text-white'
-                                : 'bg-[#222222] text-[#888888] hover:text-white border border-[#383838]'}`}
+                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${imageTab === 'venice' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                         >
-                            <ImageIcon className="w-3 h-3" />
+                            <ImageIcon className="w-3.5 h-3.5" />
                             Venice
+                            {imageTab === 'venice' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                         </button>
                     )}
                     {showSynthesizePixabay && (
                         <button
                             id="pixabay-tab-btn"
                             onClick={() => setImageTab('pixabay')}
-                            className={`flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer px-4 py-2 rounded-lg ${imageTab === 'pixabay'
-                                ? 'bg-blue-600 text-white'
-                                : 'bg-[#222222] text-[#888888] hover:text-white border border-[#383838]'}`}
+                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${imageTab === 'pixabay' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                         >
-                            <Search className="w-3 h-3" />
+                            <Search className="w-3.5 h-3.5" />
                             Pixabay
+                            {imageTab === 'pixabay' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                         </button>
                     )}
                     {showSynthesizeUpload && (
                         <button
                             id="upload-tab-btn"
                             onClick={() => setImageTab('upload')}
-                            className={`flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer px-4 py-2 rounded-lg ${imageTab === 'upload'
-                                ? 'bg-green-600 text-white'
-                                : 'bg-[#222222] text-[#888888] hover:text-white border border-[#383838]'}`}
+                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${imageTab === 'upload' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                         >
-                            <Upload className="w-3 h-3" />
+                            <Upload className="w-3.5 h-3.5" />
                             Upload
+                            {imageTab === 'upload' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                         </button>
                     )}
                 </div>

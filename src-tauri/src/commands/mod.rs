@@ -8,6 +8,9 @@ pub mod io;
 pub mod wdbs;
 pub mod export;
 pub mod similar;
+pub mod sync;
+pub mod attachments;
+pub mod workspace;
 
 pub use settings::*;
 pub use youtube::*;
@@ -19,3 +22,6 @@ pub use io::*;
 pub use wdbs::*;
 pub use export::*;
 pub use similar::*;
+pub use sync::*;
+pub use attachments::*;
+pub use workspace::*;

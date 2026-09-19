@@ -44,8 +44,8 @@ pub async fn fetch_transcript(app: tauri::AppHandle, video_id: String) -> Result
         if !t.trim().is_empty() { return Ok(t); }
     }
 
-    let api_key = db::get_setting(&db_path, "api_key").unwrap_or(None);
-    if api_key.is_none() || api_key.unwrap().trim().is_empty() {
+    // Own key or a sync-server license; the transcript fetch itself doesn't use the Data API.
+    if crate::sync::license::route(&db_path, "youtube").is_none() {
         return Err("API_KEY_MISSING".to_string());
     }
 

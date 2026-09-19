@@ -1,19 +1,22 @@
-import { X, Settings, Key, HardDrive, Monitor, History, Cpu, Palette, FileDown } from "lucide-react";
+import { X, Settings, Key, HardDrive, Layers, Monitor, History, Cpu, Palette, FileDown, RefreshCw } from "lucide-react";
 import { useState, useEffect } from "react";
 import { BRAND } from '../branding';
 import {
-    getApiKey, getDbDetails, getDisplaySettings, setDisplaySettings,
+    getApiKey, getKeyStatus, getDbDetails, getDisplaySettings, setDisplaySettings,
     getSearchHistory, clearHistoryBeforeDate, deleteHistoryEntry, clearAllHistory,
     getSetting, setSetting, openDbLocation, selectFolder, setDbPath,
-    type DbDetails, type DisplaySettings, type HistoryEntry
+    type DbDetails, type DisplaySettings, type HistoryEntry, type KeyStatus
 } from "../api";
 import { ApiKeyTab } from "./settings/ApiKeyTab";
 import { DatabaseTab } from "./settings/DatabaseTab";
+import { WorkspaceTab } from "./settings/WorkspaceTab";
 import { DisplayTab } from "./settings/DisplayTab";
 import { ThemeTab } from "./settings/ThemeTab";
 import { HistoryTab } from "./settings/HistoryTab";
 import { PluginsTab } from "./settings/PluginsTab";
 import { ExportTab } from "./settings/ExportTab";
+import { SyncTab } from "./settings/SyncTab";
+import { useFlags } from "../hooks/useFlags";
 
 interface Props {
     isOpen: boolean;
@@ -25,6 +28,8 @@ interface Props {
     onNavigationOrientationChange: (orientation: 'horizontal' | 'vertical') => void;
     currentNavigationOrientation: 'horizontal' | 'vertical';
     onPluginsChange?: () => void;
+    /** A sync (or pack import) finished: content, enforced settings or the license may have changed. */
+    onSyncComplete?: () => void;
     showSummarizeOllama?: boolean;
     showSummarizeVenice?: boolean;
     showSynthesizeVenice?: boolean;
@@ -32,27 +37,38 @@ interface Props {
     showSynthesizeUpload?: boolean;
 }
 
-type Tab = 'api' | 'db' | 'display' | 'theme' | 'history' | 'plugins' | 'export';
+type Tab = 'api' | 'db' | 'workspace' | 'display' | 'theme' | 'history' | 'plugins' | 'sync' | 'export';
 
-const TAB_CONFIG: { id: Tab; label: string; Icon: React.ElementType }[] = [
+const TAB_CONFIG: { id: Tab; label: string; Icon: React.ElementType; badge?: string }[] = [
     { id: 'api',     label: 'API Key',  Icon: Key },
     { id: 'db',      label: 'Database', Icon: HardDrive },
+    { id: 'workspace', label: 'Workspace', Icon: Layers },
     { id: 'display', label: 'Display',  Icon: Monitor },
     { id: 'theme',   label: 'Theme',    Icon: Palette },
     { id: 'history', label: 'History',  Icon: History },
     { id: 'plugins', label: 'Plugins',  Icon: Cpu },
+    { id: 'sync',    label: 'Sync',     Icon: RefreshCw, badge: 'BETA' },
     { id: 'export',  label: 'Export',   Icon: FileDown },
 ];
 
 export function SettingsModal({
     isOpen, onClose, onStatusChange, onThemeChange,
     onVideoListModeChange, currentVideoListMode,
-    onNavigationOrientationChange, currentNavigationOrientation, onPluginsChange,
+    onNavigationOrientationChange, currentNavigationOrientation, onPluginsChange, onSyncComplete,
     showSummarizeOllama = true, showSummarizeVenice = true,
     showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true
 }: Props) {
+    const { flags } = useFlags();
+    // Tabs a DB owner has hidden are left out (see lib/flags.ts for how they depend on each other).
+    const visibleTabs = TAB_CONFIG.filter(t => flags.tabVisible[t.id]);
     const [activeTab, setActiveTab] = useState<Tab>('api');
+    // If the tab on screen is hidden (a flag changed, or the first tab was never available), move
+    // to the first one that is.
+    useEffect(() => {
+        if (!flags.tabVisible[activeTab] && visibleTabs.length > 0) setActiveTab(visibleTabs[0].id);
+    }, [flags.tabVisible, activeTab, visibleTabs]);
     const [hasApiKey, setHasApiKey] = useState(false);
+    const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
     const [dbDetails, setDbDetails] = useState<DbDetails | null>(null);
     const [displaySettings, setDisplaySettingsState] = useState<DisplaySettings>({
         resolution: '1440x900', fullscreen: false, theme: 'dark', videoListMode: 'grid', navigationOrientation: 'horizontal'
@@ -63,6 +79,9 @@ export function SettingsModal({
         { id: 'photosynthesis', name: 'Photosynthesis', enabled: false, description: 'Enables markdown editing and photo tools (AI generation and local upload).' }
     ]);
     const [loading, setLoading] = useState(false);
+    // Bumped after a sync so the values below (key status, plugin flags, display settings, which a
+    // server may have changed) are re-read from the database.
+    const [reloadTick, setReloadTick] = useState(0);
 
     useEffect(() => {
         if (!isOpen) return;
@@ -74,8 +93,10 @@ export function SettingsModal({
             getSearchHistory(100),
             getSetting('plugin_summarize_enabled'),
             getSetting('plugin_photosynthesis_enabled'),
-        ]).then(([key, db, display, hist, summarizeEnabled, photoEnabled]) => {
+            getKeyStatus().catch(() => null),
+        ]).then(([key, db, display, hist, summarizeEnabled, photoEnabled, keys]) => {
             setHasApiKey(!!key);
+            setKeyStatus(keys);
             setDbDetails(db);
             setDisplaySettingsState(display);
             setHistory(hist);
@@ -85,7 +106,7 @@ export function SettingsModal({
                 return p;
             }));
         }).catch(console.error).finally(() => setLoading(false));
-    }, [isOpen]);
+    }, [isOpen, reloadTick]);
 
     if (!isOpen) return null;
 
@@ -152,7 +173,7 @@ export function SettingsModal({
                 <div className="flex flex-1 overflow-hidden">
                     {/* Sidebar */}
                     <div className="w-48 border-r border-[#303030] bg-white/5 py-4">
-                        {TAB_CONFIG.map(({ id, label, Icon }) => (
+                        {visibleTabs.map(({ id, label, Icon, badge }) => (
                             <button
                                 key={id}
                                 onClick={() => setActiveTab(id)}
@@ -161,21 +182,34 @@ export function SettingsModal({
                                     : 'text-[#aaaaaa] hover:bg-[#202020] border-l-4 border-transparent'}`}
                             >
                                 <Icon className="w-4 h-4" />
-                                {label}
+                                <span className="flex-1">{label}</span>
+                                {badge && (
+                                    // Right-aligned in the row, in the theme's accent color with light text. Set
+                                    // through the theme variables directly (not the bg-red-600 class, which
+                                    // changes color on hover) so it never changes color when hovered.
+                                    <span
+                                        className="shrink-0 px-2 py-1 rounded-[4px] text-[11px] font-bold tracking-wider leading-none"
+                                        style={{ backgroundColor: 'var(--k-accent)', color: 'var(--k-text-on-accent)' }}
+                                    >
+                                        {badge}
+                                    </span>
+                                )}
                             </button>
                         ))}
                     </div>
 
                     {/* Content */}
                     <div className="flex-1 p-8 overflow-y-auto bg-[#0f0f0f]">
-                        {loading && activeTab !== 'plugins' && (
+                        {loading && activeTab !== 'plugins' && activeTab !== 'sync' && (
                             <div className="text-center text-[#555] text-xs py-8">Loading...</div>
                         )}
 
                         {!loading && activeTab === 'api' && (
                             <ApiKeyTab
                                 hasKey={hasApiKey}
-                                onKeyChange={(val) => { setHasApiKey(val); onStatusChange(val); }}
+                                licensedBy={keyStatus?.youtube.licensed ? keyStatus.server_name || 'your sync server' : null}
+                                // The app-wide "has API access" flag stays true when a license covers a removed own key.
+                                onKeyChange={(val) => { setHasApiKey(val); onStatusChange(val || !!keyStatus?.youtube.licensed); }}
                             />
                         )}
                         {!loading && activeTab === 'db' && dbDetails && (
@@ -186,6 +220,7 @@ export function SettingsModal({
                                 loading={loading}
                             />
                         )}
+                        {!loading && activeTab === 'workspace' && <WorkspaceTab />}
                         {!loading && activeTab === 'display' && (
                             <DisplayTab
                                 settings={displaySettings}
@@ -214,6 +249,19 @@ export function SettingsModal({
                                 onClearAll={async () => {
                                     await clearAllHistory();
                                     setHistory([]);
+                                }}
+                                onRetentionChange={async () => {
+                                    // The list is trimmed as it's read, so this reflects the new period.
+                                    setHistory(await getSearchHistory(100));
+                                }}
+                            />
+                        )}
+                        {/* Like Plugins, keeps its own state across reloads, so it isn't behind the loading guard. */}
+                        {activeTab === 'sync' && (
+                            <SyncTab
+                                onSyncComplete={() => {
+                                    setReloadTick(t => t + 1);
+                                    onSyncComplete?.();
                                 }}
                             />
                         )}

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::AppHandle;
+use crate::sync::license::{self, Route};
 use crate::{db, get_db_path};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,7 +20,7 @@ pub struct VeniceRequest {
 // default seed value for that key.
 const DEFAULT_VENICE_MODEL: &str = "zai-org-glm-5";
 
-async fn call_venice_api(client: &reqwest::Client, api_key: &str, model: &str, prompt: &str) -> Result<String, String> {
+async fn call_venice_api(client: &reqwest::Client, route: &Route, model: &str, prompt: &str) -> Result<String, String> {
     let request_body = VeniceRequest {
         model: model.to_string(),
         messages: vec![VeniceMessage {
@@ -28,9 +29,9 @@ async fn call_venice_api(client: &reqwest::Client, api_key: &str, model: &str, p
         }],
     };
 
-    let response = client
-        .post("https://api.venice.ai/api/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
+    // Direct with the user's own key, or through the sync server's license proxy (license.rs).
+    let response = route
+        .apply(client.post(route.url("chat/completions")))
         .header("Content-Type", "application/json")
         .json(&request_body)
         .send()
@@ -64,10 +65,9 @@ async fn call_venice_api(client: &reqwest::Client, api_key: &str, model: &str, p
 pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Option<String>, video_id: Option<String>) -> Result<String, String> {
     let db_path = get_db_path(&app);
     
-    let api_key = db::get_setting(&db_path, "venice_api_key")
-        .map_err(|e| e.to_string())?
+    let route = license::route(&db_path, "venice")
         .ok_or("Venice API key not found. Please set it in Settings.")?;
-        
+
     let mut prompt_template = None;
     if let Some(ref h) = handle {
         if let Ok(Some((_, Some(cloud_prompt)))) = db::get_custom_prompt(&db_path, h) {
@@ -111,7 +111,7 @@ pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Op
         .unwrap_or_else(|| DEFAULT_VENICE_MODEL.to_string());
 
     let client = reqwest::Client::new();
-    call_venice_api(&client, &api_key, &model, &prompt).await
+    call_venice_api(&client, &route, &model, &prompt).await
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -148,8 +148,7 @@ pub struct VeniceImageData {
 pub async fn generate_image(app: AppHandle, prompt: String) -> Result<String, String> {
     let db_path = get_db_path(&app);
     
-    let api_key = db::get_setting(&db_path, "venice_api_key")
-        .map_err(|e| e.to_string())?
+    let route = license::route(&db_path, "venice")
         .ok_or("Venice API key not found. Please set it in Settings.")?;
 
     let request_body = VeniceImageRequest {
@@ -167,9 +166,8 @@ pub async fn generate_image(app: AppHandle, prompt: String) -> Result<String, St
     };
 
     let client = reqwest::Client::new();
-    let response = client
-        .post("https://api.venice.ai/api/v1/image/generate")
-        .header("Authorization", format!("Bearer {}", api_key))
+    let response = route
+        .apply(client.post(route.url("image/generate")))
         .header("Content-Type", "application/json")
         .json(&request_body)
         .send()

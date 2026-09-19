@@ -49,6 +49,16 @@ export interface DbDetails {
     size_bytes: number;
     video_count: number;
     history_count: number;
+    channel_count: number;
+    /** Every Drive entry at any depth. */
+    drive_count: number;
+    /** Standard Glossary Tags (with a definition). */
+    glossary_count: number;
+    quick_tag_count: number;
+    biography_count: number;
+    attachment_count: number;
+    /** What attachments take up in the database, after compression. */
+    attachment_bytes: number;
 }
 
 export interface DisplaySettings {
@@ -195,6 +205,11 @@ export async function clearAllHistory(): Promise<void> {
     await invoke("clear_all_history");
 }
 
+/** One saved video (with its summary and transcript), or null when it isn't in this library. */
+export async function getVideoById(videoId: string): Promise<Video | null> {
+    return await invoke("get_video_by_id", { videoId });
+}
+
 export async function checkVideoExists(id: string): Promise<boolean> {
     return await invoke("check_video_exists", { videoId: id });
 }
@@ -215,8 +230,23 @@ export async function getSetting(key: string): Promise<string | null> {
     return await invoke("get_setting", { key });
 }
 
+/** Several settings in one call (the sync server's enforced values applied); missing keys are null. */
+export async function getSettings(keys: string[]): Promise<Record<string, string | null>> {
+    return await invoke("get_settings", { keys });
+}
+
 export async function setSetting(key: string, value: string): Promise<void> {
     await invoke("set_setting", { key, value });
+}
+
+/** Every customizable name (workspace name and aliases) with defaults filled in. */
+export async function getWorkspaceLabels(): Promise<Record<string, string>> {
+    return await invoke("get_workspace_labels");
+}
+
+/** Sets one name; an empty value resets it. Resolves to the value now in effect, rejects with a readable message. */
+export async function setWorkspaceLabel(key: string, value: string): Promise<string> {
+    return await invoke("set_workspace_label", { key, value });
 }
 
 export async function getOllamaModel(): Promise<string> {
@@ -303,8 +333,9 @@ export async function setVenicePrompt(prompt: string): Promise<void> {
     await invoke("set_venice_prompt", { prompt });
 }
 
-export async function selectFolder(): Promise<string | null> {
-    return await invoke("select_folder");
+/** Opens a folder picker (at `startDir` when given and it still exists). */
+export async function selectFolder(startDir?: string | null): Promise<string | null> {
+    return await invoke("select_folder", { startDir: startDir ?? null });
 }
 
 export async function setDbPath(path: string): Promise<string> {
@@ -318,8 +349,15 @@ export interface ExportSummary {
     folder_path: string;
 }
 
-export async function exportToObsidian(folderPath: string, containerName: string, videosLabel: string): Promise<ExportSummary> {
-    return await invoke("export_to_obsidian", { folderPath, containerName, videosLabel });
+/** Exports the library as an Obsidian vault into `vaultPath`, a NEW folder: if that name is already
+ *  taken the export writes to "name (2)" etc. instead. The summary's `folder_path` is where it went. */
+export async function exportToObsidian(vaultPath: string): Promise<ExportSummary> {
+    return await invoke("export_to_obsidian", { vaultPath });
+}
+
+/** Save As dialog whose chosen name is the vault folder itself; null if cancelled. */
+export async function selectVaultPath(defaultName: string, startDir?: string | null): Promise<string | null> {
+    return await invoke("select_vault_path", { defaultName, startDir: startDir ?? null });
 }
 
 export interface AppInfo {
@@ -366,6 +404,110 @@ export async function getGlossaryTerms(): Promise<[string, string][]> {
 
 export async function deleteGlossaryTerm(term: string): Promise<void> {
     await invoke("delete_glossary_term", { term });
+}
+
+/** A top-level Drive (level 1) a Standard Glossary Tag can be filed under. */
+export interface WdbsRoot {
+    /** Display path, e.g. ":CRYPTO" (what assignments are stored as). */
+    path: string;
+    /** The bare name shown in the UI, e.g. "CRYPTO". */
+    segment: string;
+    /** The curated alias, when it differs from `segment`. */
+    alias: string | null;
+}
+
+/** Adds or edits a term and the top-level Drives it's filed under, in one step. `originalTerm` is
+ *  the term's current name when editing (a different `term` renames it). Quick Tags (empty
+ *  definition) never keep drives. */
+export async function saveGlossaryTerm(originalTerm: string | null, term: string, definition: string, drives: string[]): Promise<void> {
+    await invoke("save_glossary_term", { originalTerm, term, definition, drives });
+}
+
+/** Every (term, drive root) assignment, e.g. ["Halving", ":CRYPTO"]. */
+export async function getGlossaryDriveLinks(): Promise<[string, string][]> {
+    return await invoke("get_glossary_drive_links");
+}
+
+export async function getWdbsRoots(): Promise<WdbsRoot[]> {
+    return await invoke("get_wdbs_roots");
+}
+
+/** A Drive that some of a channel's saved videos are filed under. */
+export interface HandleDrive {
+    /** Storage form, e.g. "θψCRYPTO_DOAC". */
+    path: string;
+    /** Display form, e.g. ":CRYPTO-DOAC". */
+    display: string;
+    /** The Drive's curated alias, when it has one that differs from its name. */
+    alias: string | null;
+    /** How many of the channel's videos are in it. */
+    count: number;
+}
+
+/** One file attached to a video. Sizes are in bytes. */
+export interface AttachmentInfo {
+    id: number;
+    name: string;
+    ext: string;
+    /** The original file's size. */
+    size: number;
+    /** What the database actually holds (smaller when the file was compressed). */
+    storedSize: number;
+    addedAt: string;
+}
+
+export interface VideoAttachments {
+    note: string;
+    attachments: AttachmentInfo[];
+}
+
+/** What happened to one file in `addAttachments`: it was added, or `error` says why not. */
+export interface AddAttachmentOutcome {
+    name: string;
+    attachment: AttachmentInfo | null;
+    error: string | null;
+}
+
+export async function getVideoAttachments(videoId: string): Promise<VideoAttachments> {
+    return await invoke("get_video_attachments", { videoId });
+}
+
+export async function saveVideoNote(videoId: string, note: string): Promise<void> {
+    await invoke("save_video_note", { videoId, note });
+}
+
+/** Native multi-file picker limited to the supported types. Empty when cancelled. */
+export async function pickAttachmentFiles(): Promise<string[]> {
+    return await invoke("pick_attachment_files");
+}
+
+/** Stores the files at `paths` (read by the backend) on the video, reporting each one's result. */
+export async function addAttachments(videoId: string, paths: string[]): Promise<AddAttachmentOutcome[]> {
+    return await invoke("add_attachments", { videoId, paths });
+}
+
+export async function removeAttachment(id: number): Promise<void> {
+    await invoke("remove_attachment", { id });
+}
+
+/** Opens the attachment in the system's default app. */
+export async function openAttachment(id: number): Promise<void> {
+    await invoke("open_attachment", { id });
+}
+
+/** Save As dialog; false when the user cancels. */
+export async function saveAttachmentAs(id: number): Promise<boolean> {
+    return await invoke("save_attachment_as", { id });
+}
+
+/** Curated aliases for the given Drive paths (storage form), keyed by path. Drives without an alias are left out. */
+export async function getWdbsAliases(paths: string[]): Promise<Record<string, string>> {
+    return await invoke("get_wdbs_aliases", { paths });
+}
+
+/** Every Drive a channel's saved videos appear in (its category or an "Also in" link). */
+export async function getHandleDrives(handle: string): Promise<HandleDrive[]> {
+    return await invoke("get_handle_drives", { handle });
 }
 
 type RawBiographyEntry = {
@@ -643,4 +785,176 @@ export async function fetchImageAsDataUri(url: string): Promise<string> {
 
 export async function saveImage(path: string, contentsBase64: string): Promise<void> {
     await invoke("save_image", { path, contentsBase64 });
+}
+
+// ─── Sync ────────────────────────────────────────────────────────────────────
+
+export interface SyncManifest {
+    server_name: string;
+    protocol_version: number;
+    min_client_version: string;
+    pack_version: number;
+    revision: number;
+    retention_revision: number;
+    capabilities: { content: boolean; policy: boolean; license: string[] };
+    license_mode: string;
+}
+
+export interface LicenseInfo {
+    /** Providers reachable through the server's proxy: "venice", "youtube", "pixabay". */
+    providers: string[];
+    /** "fallback" (the user's own key wins) or "enforce" (always use the proxy). */
+    mode: string;
+}
+
+export interface SyncStatus {
+    connected: boolean;
+    running: boolean;
+    server_url: string;
+    server_name: string;
+    has_token: boolean;
+    last_sync_at: string;
+    last_error: string;
+    cursor: number;
+    auto_sync: boolean;
+    interval_minutes: number;
+    owned_counts: Record<string, number>;
+    locked_settings: string[];
+    license: LicenseInfo;
+}
+
+export interface SyncReport {
+    full: boolean;
+    cancelled: boolean;
+    revision: number;
+    pages: number;
+    upserted: number;
+    unchanged: number;
+    deleted: number;
+    disowned: number;
+    skipped: number;
+    error_count: number;
+    errors: string[];
+    policy_applied: number;
+    policy_dropped: number;
+}
+
+export interface SyncProgress {
+    phase: "connecting" | "applying" | "policy" | "done";
+    message: string;
+    page: number;
+    upserted: number;
+    deleted: number;
+}
+
+export interface SyncDisconnectResult {
+    upserted: number;
+    unchanged: number;
+    deleted: number;
+    disowned: number;
+    skipped: number;
+    errors: string[];
+}
+
+export interface SyncPackOptions {
+    taxonomy: boolean;
+    videos: boolean;
+    transcripts: boolean;
+    glossary: boolean;
+    biographies: boolean;
+    prompts: boolean;
+    settings: boolean;
+}
+
+export interface SyncPackExportSummary {
+    path: string;
+    counts: Record<string, number>;
+    settings: number;
+    bytes: number;
+}
+
+export interface SyncPackImportSummary {
+    pack_app: string;
+    pack_generated_at: string;
+    imported: number;
+    skipped: number;
+    error_count: number;
+    errors: string[];
+    settings_applied: number;
+    settings_skipped: number;
+    counts: Record<string, number>;
+}
+
+export async function syncTest(url: string, token: string): Promise<SyncManifest> {
+    return await invoke("sync_test", { url, token });
+}
+
+export async function syncConnect(url: string, token: string): Promise<SyncManifest> {
+    return await invoke("sync_connect", { url, token });
+}
+
+export async function syncRun(forceFull: boolean): Promise<SyncReport> {
+    return await invoke("sync_run", { forceFull });
+}
+
+export async function syncCancel(): Promise<void> {
+    await invoke("sync_cancel");
+}
+
+export async function getSyncStatus(): Promise<SyncStatus> {
+    return await invoke("sync_status");
+}
+
+export async function syncSetOptions(autoSync: boolean, intervalMinutes: number): Promise<void> {
+    await invoke("sync_set_options", { autoSync, intervalMinutes });
+}
+
+export async function syncDisconnect(keepData: boolean): Promise<SyncDisconnectResult> {
+    return await invoke("sync_disconnect", { keepData });
+}
+
+/** Setting keys the connected sync server locks against local edits. */
+export async function getLockedSettings(): Promise<string[]> {
+    return await invoke("get_locked_settings");
+}
+
+export interface ProviderStatus {
+    /** The user has their own key stored. */
+    own_key: boolean;
+    /** The connected sync server offers a license for this provider. */
+    licensed: boolean;
+    /** A call would work right now (own key or license). */
+    available: boolean;
+    /** The license, not the user's own key, is what a call would use. */
+    via_license: boolean;
+}
+
+export interface KeyStatus {
+    server_name: string;
+    youtube: ProviderStatus;
+    venice: ProviderStatus;
+    pixabay: ProviderStatus;
+}
+
+/** Whether each provider is reachable, by the user's own key or by a sync-server license. */
+export async function getKeyStatus(): Promise<KeyStatus> {
+    return await invoke("get_key_status");
+}
+
+/** Writes the pack to `filePath` (from the Save As dialog). A `.gz` name is compressed. */
+export async function exportSyncPack(filePath: string, options: SyncPackOptions): Promise<SyncPackExportSummary> {
+    return await invoke("export_sync_pack", { filePath, options });
+}
+
+/** The Save As dialog for a sync pack; null if cancelled. */
+export async function selectPackSavePath(defaultName: string, startDir?: string | null): Promise<string | null> {
+    return await invoke("select_pack_save_path", { defaultName, startDir: startDir ?? null });
+}
+
+export async function importSyncPack(filePath: string, applySettings: boolean): Promise<SyncPackImportSummary> {
+    return await invoke("import_sync_pack", { filePath, applySettings });
+}
+
+export async function selectPackFile(): Promise<string | null> {
+    return await invoke("select_pack_file");
 }

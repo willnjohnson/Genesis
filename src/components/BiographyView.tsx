@@ -5,9 +5,14 @@ import { BsTwitterX, BsInstagram, BsFacebook, BsYoutube, BsTiktok, BsThreads, Bs
 import { SiWikipedia } from 'react-icons/si';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { getBiographies, updateBiography, type BiographyEntry, fetchChannelVideosV3, openExternalUrl } from '../api';
-import { normalizeText } from '../lib/utils';
-import { handleMarkdownKeyDown } from '../lib/markdown-editor';
+import { remarkHighlight } from '../lib/remark-highlight';
+import { markdownUrlTransform } from '../lib/internal-links';
+import { MarkdownLink } from './MarkdownLink';
+import { getBiographies, updateBiography, type BiographyEntry, fetchChannelVideosV3, openExternalUrl, getHandleDrives, type HandleDrive } from '../api';
+import { useFlags } from '../hooks/useFlags';
+import { useWorkspace } from '../hooks/useWorkspace';
+import { normalizeText, driveSegmentLabel } from '../lib/utils';
+import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
 
 type EditableBiography = BiographyEntry | null;
 type SocialTab = 'wikipedia' | 'website' | 'twitter' | 'instagram' | 'facebook' | 'threads' | 'youtube' | 'tiktok' | 'twitch' | 'reddit' | 'discord';
@@ -49,7 +54,8 @@ const socialTabConfig: Record<SocialTab, { icon: ElementType; label: string; pla
 
 const socialTabs: SocialTab[] = ['website', 'wikipedia', 'twitter', 'instagram', 'facebook', 'threads', 'youtube', 'tiktok', 'twitch', 'reddit', 'discord'];
 
-export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore, allowEditBio }: { searchQuery: string; onChange?: () => void; onVideoSelect?: (video: Video) => void; onViewMore?: (handle: string) => void; allowEditBio?: boolean }) {
+export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore, onDriveSelect, allowEditBio }: { searchQuery: string; onChange?: () => void; onVideoSelect?: (video: Video) => void; onViewMore?: (handle: string) => void; onDriveSelect?: (path: string, label: string) => void; allowEditBio?: boolean }) {
+    const { labels } = useWorkspace();
     const [entries, setEntries] = useState<BiographyEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [selected, setSelected] = useState<BiographyEntry | null>(null);
@@ -181,7 +187,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
     if (loading) return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
             <div className="flex justify-between items-center mb-6 px-4">
-                <h2 className="text-xl font-bold text-white">Biography</h2>
+                <h2 className="text-xl font-bold text-white">{labels.aliasBiography}</h2>
             </div>
             <div className="px-4">
                 <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
@@ -195,7 +201,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
             <div className="flex justify-between items-center mb-4 px-4">
-                <h2 className="text-xl font-bold text-white">Biography</h2>
+                <h2 className="text-xl font-bold text-white">{labels.aliasBiography}</h2>
             </div>
 
             <div className="px-4">
@@ -263,6 +269,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                         setSelected(null);
                     }}
                     onViewMore={onViewMore}
+                    onDriveSelect={onDriveSelect}
                     allowEditBio={allowEditBio}
                 />
             )}
@@ -272,7 +279,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                     <form onSubmit={saveEdit} onClick={(e) => e.stopPropagation()} className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-4xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
                 <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
                             <div className="text-gray-200">
-                                <h2 className="text-lg font-bold">Edit Bio</h2>
+                                <h2 className="text-lg font-bold">Edit {labels.aliasBiographyItem}</h2>
                                 <p className="text-xs text-gray-400">{editing.displayName || editing.handle} ({editing.handle})</p>
                             </div>
                             <button type="button" onClick={() => setEditing(null)} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
@@ -283,10 +290,11 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                         <div className="p-6 max-h-[75vh] overflow-y-auto">
                             {/* Bio - largest section */}
                             <div className="mb-6">
-                                <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Bio</label>
+                                <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Description</label>
                                 <textarea
                                     value={editing?.bio || ''}
                                     onChange={(e) => setEditing(prev => ({ ...prev, bio: e.target.value }))}
+                                    onContextMenu={handleMarkdownContextMenu}
                                     onKeyDown={(e) => handleMarkdownKeyDown(e, editing?.bio || '', (val) => setEditing(prev => ({ ...prev, bio: val })))}
                                     rows={16}
                                     className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all resize-none placeholder-gray-600"
@@ -338,7 +346,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
 
                         <div className="px-6 py-4 border-t border-[#303030] flex justify-end gap-3 bg-[#141414]">
                             <button type="button" onClick={() => setEditing(null)} className="px-4 py-2 rounded-lg bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] cursor-pointer text-white text-sm font-semibold transition-colors">Cancel</button>
-                            <button type="submit" className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 transition-all text-sm font-bold cursor-pointer">Save Bio</button>
+                            <button type="submit" className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 transition-all text-sm font-bold cursor-pointer">Save {labels.aliasBiographyItem}</button>
                         </div>
                     </form>
                 </div>
@@ -347,10 +355,13 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
     );
 }
 
-export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onViewMore, allowEditBio }: { biography: BiographyEntry; onClose: () => void; onVideoSelect?: (video: Video) => void; onEdit?: () => void; onViewMore?: (handle: string) => void; allowEditBio?: boolean }) {
+export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onViewMore, onDriveSelect, allowEditBio }: { biography: BiographyEntry; onClose: () => void; onVideoSelect?: (video: Video) => void; onEdit?: () => void; onViewMore?: (handle: string) => void; onDriveSelect?: (path: string, label: string) => void; allowEditBio?: boolean }) {
     const title = biography.displayName.trim() || biography.handle;
     const [videos, setVideos] = useState<Video[]>([]);
     const [loadingVideos, setLoadingVideos] = useState(true);
+    const [drives, setDrives] = useState<HandleDrive[]>([]);
+    const { flags } = useFlags();
+    const { labels } = useWorkspace();
 
     const activeSocials = socialOrder.filter(key => getSocialValue(biography, key));
 
@@ -381,6 +392,24 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
         };
     }, [biography.handle]);
 
+    // The Drives this channel's saved videos are filed under. Skipped when the DB owner hides Drives.
+    useEffect(() => {
+        if (!flags.showDrive) {
+            setDrives([]);
+            return;
+        }
+        let cancelled = false;
+        getHandleDrives(biography.handle)
+            .then(result => { if (!cancelled) setDrives(result); })
+            .catch(error => {
+                console.error('Failed to load related drives:', error);
+                if (!cancelled) setDrives([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [biography.handle, flags.showDrive]);
+
     const handleVideoClick = (video: Video) => {
         onClose();
         onVideoSelect?.(video);
@@ -398,7 +427,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                      <div className="flex items-center gap-2">
                          {onEdit && allowEditBio !== false && (
                              <button onClick={onEdit} className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-500 cursor-pointer">
-                                 Edit Bio
+                                 Edit {labels.aliasBiographyItem}
                              </button>
                          )}
                          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
@@ -416,19 +445,10 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                                oversized next to it. */}
                            <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
                                <ReactMarkdown
-                                   remarkPlugins={[remarkGfm]}
+                                   remarkPlugins={[remarkGfm, remarkHighlight]}
+ urlTransform={markdownUrlTransform}
                                    components={{
-                                       a: ({ node, ...props }) => (
-                                           <a
-                                               {...props}
-                                               href="#"
-                                               onClick={(e) => {
-                                                   e.preventDefault();
-                                                   if (props.href) openExternalUrl(props.href);
-                                               }}
-                                               className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
-                                           />
-                                       ),
+                                       a: MarkdownLink,
                                        img: ({ node, ...props }) => (
                                            <img
                                                {...props}
@@ -444,8 +464,8 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
 
                        {/* Sidebar Content: Latest Videos — kept narrower than the About panel gets wide
                            (was w-96) so About has more horizontal room for markdown text. */}
-                       <div className="w-full lg:w-80 bg-[#0f0f0f] flex flex-col p-6 space-y-4">
-                          <div className="flex items-center justify-between mb-4">
+                       <div className="w-full lg:w-80 bg-[#0f0f0f] flex flex-col p-6 space-y-4 overflow-y-auto">
+                          <div className="flex items-center justify-between mb-4 shrink-0">
                               <h3 className="text-lg font-bold text-white">Latest Videos</h3>
                              {videos.length > 0 && (
                                  <button
@@ -469,7 +489,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                                  <p>No videos found for this channel</p>
                              </div>
                          ) : (
-                             <div className="space-y-3 overflow-y-auto">
+                             <div className="space-y-3 shrink-0">
                                  {videos.map((video) => (
                                      <div
                                          key={video.id}
@@ -490,6 +510,39 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                                           <h4 className="text-sm text-white leading-tight flex-1">{video.title}</h4>
                                      </div>
                                  ))}
+                             </div>
+                         )}
+
+                         {drives.length > 0 && (
+                             <div className="pt-4 border-t border-[#272727] flex flex-col lg:flex-1 lg:min-h-[10rem]">
+                                 <h3 className="text-lg font-bold text-white mb-3 shrink-0">In {labels.aliasDriveName}</h3>
+                                 <ul className="space-y-1 overflow-y-auto max-h-64 lg:max-h-none lg:flex-1 lg:min-h-0 pr-1">
+                                     {drives.map((drive) => {
+                                         // Hovering shows the Drive's alias (falling back to its path when it has none).
+                                         const tooltip = drive.alias ?? drive.display;
+                                         const content = (
+                                             <>
+                                                 <span className="text-gray-200 truncate">{drive.display}</span>
+                                                 <span className="text-xs text-gray-500 shrink-0">{drive.count} video{drive.count === 1 ? '' : 's'}</span>
+                                             </>
+                                         );
+                                         return (
+                                             <li key={drive.path}>
+                                                 {onDriveSelect ? (
+                                                     <button
+                                                         onClick={() => onDriveSelect(drive.path, driveSegmentLabel(drive.display))}
+                                                         className="w-full flex items-center justify-between gap-3 text-sm text-left px-2 py-1.5 rounded-lg hover:bg-[#272727] transition-colors cursor-pointer"
+                                                         title={tooltip}
+                                                     >
+                                                         {content}
+                                                     </button>
+                                                 ) : (
+                                                     <div className="flex items-center justify-between gap-3 text-sm px-2 py-1.5" title={tooltip}>{content}</div>
+                                                 )}
+                                             </li>
+                                         );
+                                     })}
+                                 </ul>
                              </div>
                          )}
                      </div>

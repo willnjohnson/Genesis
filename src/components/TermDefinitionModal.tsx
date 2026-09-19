@@ -1,9 +1,11 @@
 import { X, FileText, Hash, Search } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import React, { useEffect, useState } from 'react';
-import { openExternalUrl, getSetting } from '../api';
-import { BRAND } from '../branding';
+import { remarkHighlight } from '../lib/remark-highlight';
+import { markdownUrlTransform } from '../lib/internal-links';
+import { MarkdownLink } from './MarkdownLink';
+import { useFlags } from '../hooks/useFlags';
+import { useWorkspace } from '../hooks/useWorkspace';
 
 interface GlossaryTerm {
     term: string;
@@ -17,13 +19,11 @@ interface Props {
 }
 
 export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
-    const [showTag, setShowTag] = useState(true);
-    const [showLibrarySearch, setShowLibrarySearch] = useState(true);
-
-    useEffect(() => {
-        getSetting('showGlossarySearchByTag').then(v => { if (v === 'false') setShowTag(false); });
-        getSetting('showGlossarySearchInLibrary').then(v => { if (v === 'false') setShowLibrarySearch(false); });
-    }, []);
+    // Which "search" buttons this modal offers is up to the DB owner (see lib/flags.ts).
+    const { flags } = useFlags();
+    const { labels } = useWorkspace();
+    const showTag = flags.showGlossarySearchByTag;
+    const showLibrarySearch = flags.showGlossarySearchInLibrary;
 
     return (
         <div
@@ -51,19 +51,10 @@ export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
                         panel, both of which moved off prose-lg for reading oversized next to them. */}
                     <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
                         <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
+                            remarkPlugins={[remarkGfm, remarkHighlight]}
+ urlTransform={markdownUrlTransform}
                             components={{
-                                a: ({ node, ...props }) => (
-                                    <a
-                                        {...props}
-                                        href="#"
-                                        onClick={(e) => {
-                                            e.preventDefault();
-                                            if (props.href) openExternalUrl(props.href);
-                                        }}
-                                        className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
-                                    />
-                                ),
+                                a: MarkdownLink,
                                 img: ({ node, ...props }) => (
                                     <img
                                         {...props}
@@ -101,7 +92,7 @@ export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
                                 className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
                             >
                                 <Search className="w-3.5 h-3.5" />
-                                Search in {BRAND.libraryLabel}
+                                Search in {labels.aliasLibrary}
                             </button>
                         )}
                     </div>

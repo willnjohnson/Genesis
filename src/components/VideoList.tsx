@@ -4,6 +4,7 @@ import { useState, useMemo, useRef, useEffect, useLayoutEffect, useCallback } fr
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { format } from 'date-fns';
 import { saveImageAs } from '../lib/save-image-as';
+import { useFlags } from '../hooks/useFlags';
 
 // Mirrors the Tailwind breakpoints used by the grid className below (sm/md/lg/xl/2xl at
 // Tailwind's default 640/768/1024/1280/1536px) so the virtualizer knows how many cards land in
@@ -99,6 +100,8 @@ export function VideoList({
     loading = false, emptyTitle, emptyMessage,
     bulkAssignMode = false, bulkSelectedIds, onToggleBulkSelect, onBulkSelectRange, onBulkContextMenu,
 }: Props) {
+    // A DB owner can hide the sort and filter controls (see lib/flags.ts).
+    const { flags } = useFlags();
     const [internalSortField, setInternalSortField] = useState<SortField>('date');
     const [internalSortOrder, setInternalSortOrder] = useState<SortOrder>('desc');
     const [internalFilter, setInternalFilter] = useState<FilterType>('all');
@@ -314,6 +317,7 @@ export function VideoList({
                         </button>
                     )}
 
+                    {flags.showSortControls && (
                     <div className="flex items-center bg-[#1a1a1a] p-0.5 rounded-lg border border-[#272727] gap-0.5">
                         <div className="flex gap-0.5">
                             <button
@@ -355,8 +359,9 @@ export function VideoList({
                             )}
                         </button>
                     </div>
+                    )}
 
-                    {isLibrary && (
+                    {isLibrary && flags.showFilterControls && (
                         <div className="flex items-center bg-[#1a1a1a] p-0.5 rounded-lg border border-[#272727] gap-0.5">
                             <button
                                 onClick={() => handleFilter('all')}

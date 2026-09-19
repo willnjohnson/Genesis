@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tauri::command;
-use crate::{get_db_path, db, types::*, DRIVE_LABEL};
+use crate::{get_db_path, db, types::*};
 
 /// Transforms a Warp Drive designator from user-facing display format (":UAP-GERB-VVV") into the
 /// storage encoding the WDBS column actually uses — ':' and '-' become 'θψ' and '_' respectively,
@@ -11,7 +11,7 @@ use crate::{get_db_path, db, types::*, DRIVE_LABEL};
 /// input, or an `Err` with a plain-language message if the input isn't in the expected ":..."
 /// shape (shared by update_wdbs and add_video_wdbs_link so both editors reject malformed input
 /// the same way).
-pub(crate) fn encode_wdbs_display(raw: &str) -> Result<Option<String>, String> {
+pub(crate) fn encode_wdbs_display(raw: &str, drive_label: &str) -> Result<Option<String>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -21,7 +21,7 @@ pub(crate) fn encode_wdbs_display(raw: &str) -> Result<Option<String>, String> {
         Some(_) => Ok(None),
         None => Err(format!(
             "{} designators must start with ':' (e.g. \":UAP-GERB-VVV\"). \"{}\" doesn't.",
-            DRIVE_LABEL, trimmed
+            drive_label, trimmed
         )),
     }
 }
@@ -49,12 +49,13 @@ pub(crate) fn encode_wdbs_display(raw: &str) -> Result<Option<String>, String> {
 #[command]
 pub async fn update_wdbs(app: tauri::AppHandle, video_id: String, wdbs: String) -> Result<(), String> {
     let db_path = get_db_path(&app);
+    let drive_label = db::drive_label(&db_path);
     // Uppercased before both encoding and tblWDBS registration, so the two stay in sync — the
     // trigger that validates a video's WDBS resolves against tblWDBS's own case (see
     // encode_wdbs_display), and SQLite TEXT comparison is case-sensitive by default.
     let trimmed = wdbs.trim().to_uppercase();
     let trimmed = trimmed.as_str();
-    let encoded = encode_wdbs_display(trimmed)?;
+    let encoded = encode_wdbs_display(trimmed, &drive_label)?;
     let is_clearing = encoded.is_none();
 
     let value = match encoded {
@@ -71,7 +72,7 @@ pub async fn update_wdbs(app: tauri::AppHandle, video_id: String, wdbs: String) 
     db::update_video_wdbs(&db_path, &video_id, &value).map_err(|e| {
         format!(
             "That {} designator wasn't accepted ({}). Double-check it against the {} taxonomy and try again.",
-            DRIVE_LABEL, e, DRIVE_LABEL
+            drive_label, e, drive_label
         )
     })?;
 
@@ -149,9 +150,10 @@ pub async fn set_wdbs_alias(app: tauri::AppHandle, path: String, alias: String) 
 #[command]
 pub async fn set_wdbs_icon(app: tauri::AppHandle, path: String, icon: String) -> Result<(), String> {
     let db_path = get_db_path(&app);
+    let drive_label = db::drive_label(&db_path);
     let icon = icon.trim();
     if !icon.is_empty() && !db::WDBS_ICONS.contains(&icon) {
-        return Err(format!("\"{}\" isn't a recognized {} icon.", icon, DRIVE_LABEL));
+        return Err(format!("\"{}\" isn't a recognized {} icon.", icon, drive_label));
     }
     db::set_wdbs_icon(&db_path, &path, icon).map_err(|e| e.to_string())
 }
@@ -192,21 +194,22 @@ pub async fn get_video_wdbs_links(app: tauri::AppHandle, video_id: String) -> Re
 #[command]
 pub async fn add_video_wdbs_link(app: tauri::AppHandle, video_id: String, wdbs: String) -> Result<String, String> {
     let db_path = get_db_path(&app);
+    let drive_label = db::drive_label(&db_path);
     let trimmed = wdbs.trim().to_uppercase();
     let trimmed = trimmed.as_str();
-    let encoded = encode_wdbs_display(trimmed)?
-        .ok_or_else(|| format!("Enter a {} designator to link, e.g. \":UAP-GERB-VVV\".", DRIVE_LABEL))?;
+    let encoded = encode_wdbs_display(trimmed, &drive_label)?
+        .ok_or_else(|| format!("Enter a {} designator to link, e.g. \":UAP-GERB-VVV\".", drive_label))?;
 
     let primary = db::get_video_wdbs_primary(&db_path, &video_id).map_err(|e| e.to_string())?;
     if primary.as_deref() == Some(encoded.as_str()) {
-        return Err(format!("That's already this video's primary {}.", DRIVE_LABEL));
+        return Err(format!("That's already this video's primary {}.", drive_label));
     }
 
     db::ensure_wdbs_path_exists(&db_path, trimmed).map_err(|e| e.to_string())?;
     db::add_video_wdbs_link(&db_path, &video_id, &encoded).map_err(|e| {
         format!(
             "That {} designator wasn't accepted ({}). Double-check it against the {} taxonomy and try again.",
-            DRIVE_LABEL, e, DRIVE_LABEL
+            drive_label, e, drive_label
         )
     })?;
     Ok(encoded)
@@ -234,9 +237,10 @@ pub struct BulkWdbsResult {
 #[command]
 pub async fn bulk_update_wdbs(app: tauri::AppHandle, video_ids: Vec<String>, wdbs: String) -> Result<BulkWdbsResult, String> {
     let db_path = get_db_path(&app);
+    let drive_label = db::drive_label(&db_path);
     let trimmed = wdbs.trim().to_uppercase();
     let trimmed = trimmed.as_str();
-    let encoded = encode_wdbs_display(trimmed)?;
+    let encoded = encode_wdbs_display(trimmed, &drive_label)?;
     let is_clearing = encoded.is_none();
 
     let value = match encoded {
@@ -267,11 +271,26 @@ pub async fn bulk_update_wdbs(app: tauri::AppHandle, video_ids: Vec<String>, wdb
                 video_id,
                 format!(
                     "That {} designator wasn't accepted ({}). Double-check it against the {} taxonomy and try again.",
-                    DRIVE_LABEL, e, DRIVE_LABEL
+                    drive_label, e, drive_label
                 ),
             )),
         }
     }
 
     Ok(BulkWdbsResult { succeeded, failed })
+}
+
+/// Every Drive a channel's saved videos are filed under (for the Biography's "Related Drives").
+#[command]
+pub async fn get_handle_drives(app: tauri::AppHandle, handle: String) -> Result<Vec<db::HandleDrive>, String> {
+    let db_path = get_db_path(&app);
+    db::get_handle_drives(&db_path, &handle).map_err(|e| e.to_string())
+}
+
+/// Curated aliases for the given Drive paths (storage form), keyed by that same path. Drives without
+/// an alias of their own are left out. For the tooltips on a video's Drive and "Also in" tags.
+#[command]
+pub async fn get_wdbs_aliases(app: tauri::AppHandle, paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
+    let db_path = get_db_path(&app);
+    db::get_wdbs_aliases(&db_path, &paths).map_err(|e| e.to_string())
 }

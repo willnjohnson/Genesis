@@ -4,10 +4,12 @@ import { setApiKey as saveApiKeyCmd, removeApiKey as removeApiKeyCmd } from "../
 
 interface Props {
     hasKey: boolean;
+    /** Name of the sync server whose license covers the YouTube API, when there is one. */
+    licensedBy?: string | null;
     onKeyChange: (hasKey: boolean) => void;
 }
 
-export function ApiKeyTab({ hasKey: initialHasKey, onKeyChange }: Props) {
+export function ApiKeyTab({ hasKey: initialHasKey, licensedBy, onKeyChange }: Props) {
     const [hasKey, setHasKey] = useState(initialHasKey);
     const [apiKeyInput, setApiKeyInput] = useState("");
     const [loading, setLoading] = useState(false);
@@ -53,6 +55,16 @@ export function ApiKeyTab({ hasKey: initialHasKey, onKeyChange }: Props) {
                 <p className="text-xs text-[#aaaaaa] mb-4">
                     Required for fetching high-quality transcripts and searching channel.
                 </p>
+
+                {licensedBy && (
+                    <div className="mb-4 flex items-start gap-2 text-blue-300 bg-blue-900/10 border border-blue-500/30 rounded-lg px-3 py-2.5 text-xs leading-relaxed">
+                        <Check className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>
+                            Covered by {licensedBy}'s license, so you don't need your own key.
+                            {hasKey ? " Your own key is used instead unless the server requires its license." : " You can still add your own key if you prefer."}
+                        </span>
+                    </div>
+                )}
 
                 {hasKey ? (
                     <div className="flex gap-3 items-center">

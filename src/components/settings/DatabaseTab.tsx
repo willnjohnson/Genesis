@@ -1,5 +1,7 @@
 import { Database, Settings } from "lucide-react";
 import { type DbDetails } from "../../api";
+import { useFlags } from "../../hooks/useFlags";
+import { useWorkspace } from "../../hooks/useWorkspace";
 
 interface Props {
     dbDetails: DbDetails;
@@ -17,23 +19,39 @@ function formatSize(bytes: number): string {
 }
 
 export function DatabaseTab({ dbDetails, onOpen, onChangeLocation, loading }: Props) {
+    const { flags } = useFlags();
+    const { labels } = useWorkspace();
+    // What the library holds, two per line. Rows for parts of the app a DB owner has
+    // hidden are left out; the database's own size always closes the list, across both columns.
+    const rows: { label: string; value: string; detail?: string; wide?: boolean }[] = [
+        { label: 'Videos Stored', value: String(dbDetails.video_count) },
+        { label: 'Channels', value: String(dbDetails.channel_count) },
+        ...(flags.showDrive ? [{ label: `${labels.aliasDriveName}s`, value: String(dbDetails.drive_count) }] : []),
+        ...(flags.showGlossary ? [{ label: `${labels.aliasGlossary} Tags`, value: String(dbDetails.glossary_count) }] : []),
+        ...(flags.showGlossary && flags.showQuickTags ? [{ label: 'Quick Tags', value: String(dbDetails.quick_tag_count) }] : []),
+        ...(flags.showBiography ? [{ label: labels.aliasBiography, value: String(dbDetails.biography_count) }] : []),
+        ...(flags.showAttachments ? [{
+            label: 'Attachments',
+            value: String(dbDetails.attachment_count),
+            detail: dbDetails.attachment_count > 0 ? formatSize(dbDetails.attachment_bytes) : undefined,
+        }] : []),
+        { label: `${labels.aliasSearch} History`, value: String(dbDetails.history_count) },
+        { label: 'Database Size', value: formatSize(dbDetails.size_bytes), wide: true },
+    ];
     return (
         <div className="space-y-6 animate-in slide-in-from-right-4 duration-300">
             <div>
-                <h3 className="text-base font-bold mb-4">Storage Management</h3>
-                <div className="grid grid-cols-3 gap-4 mb-6">
-                    <div className="bg-[#121212] border border-[#303030] p-4 rounded-xl">
-                        <span className="text-[10px] uppercase font-bold text-[#aaaaaa] tracking-widest block mb-1">Videos Stored</span>
-                        <span className="text-xl font-bold text-white">{dbDetails.video_count}</span>
-                    </div>
-                    <div className="bg-[#121212] border border-[#303030] p-4 rounded-xl">
-                        <span className="text-[10px] uppercase font-bold text-[#aaaaaa] tracking-widest block mb-1">Search History</span>
-                        <span className="text-xl font-bold text-white">{dbDetails.history_count}</span>
-                    </div>
-                    <div className="bg-[#121212] border border-[#303030] p-4 rounded-xl">
-                        <span className="text-[10px] uppercase font-bold text-[#aaaaaa] tracking-widest block mb-1">Database Size</span>
-                        <span className="text-xl font-bold text-white">{formatSize(dbDetails.size_bytes)}</span>
-                    </div>
+                <h3 className="text-base font-bold mb-3">Storage Management</h3>
+                <div className="grid grid-cols-2 gap-2 mb-4">
+                    {rows.map(row => (
+                        <div key={row.label} className={`flex items-center justify-between gap-3 bg-[#121212] border border-[#303030] px-3 py-2 rounded-lg ${row.wide ? 'col-span-2' : ''}`}>
+                            <span className="text-[10px] uppercase font-bold text-[#aaaaaa] tracking-widest truncate">{row.label}</span>
+                            <span className="flex items-baseline gap-2">
+                                {row.detail && <span className="text-[11px] text-[#777777]">{row.detail}</span>}
+                                <span className="text-sm font-bold text-white">{row.value}</span>
+                            </span>
+                        </div>
+                    ))}
                 </div>
                 <div className="space-y-3">
                     <div>
@@ -42,24 +60,30 @@ export function DatabaseTab({ dbDetails, onOpen, onChangeLocation, loading }: Pr
                             {dbDetails.path}
                         </code>
                     </div>
+                    {(flags.allowOpenDbFolder || flags.allowChangeDbLocation) && (
                     <div className="flex gap-2">
+                        {flags.allowOpenDbFolder && (
                         <button
                             onClick={onOpen}
                             disabled={loading}
-                            className="flex-1 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer mt-4 disabled:opacity-50"
+                            className="flex-1 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-2.5 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer mt-1 disabled:opacity-50"
                         >
                             <Database className="w-4 h-4" />
                             Open DB Location
                         </button>
+                        )}
+                        {flags.allowChangeDbLocation && (
                         <button
                             onClick={onChangeLocation}
                             disabled={loading}
-                            className="flex-1 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer mt-4 disabled:opacity-50"
+                            className="flex-1 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-2.5 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer mt-1 disabled:opacity-50"
                         >
                             <Settings className="w-4 h-4" />
                             Change DB Path
                         </button>
+                        )}
                     </div>
+                    )}
                 </div>
             </div>
         </div>

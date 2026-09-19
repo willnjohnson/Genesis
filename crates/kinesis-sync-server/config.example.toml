@@ -1,0 +1,65 @@
+# Kinesis sync server: example configuration.
+# Copy to config.toml and run:  kinesis-sync-server --config config.toml
+
+bind = "127.0.0.1:8787"          # put a TLS-terminating reverse proxy in front for real deployments
+server_name = "Acme Research Library"
+
+# The admin's Kinesis database. It is opened READ-ONLY and never modified: curate it with the
+# Kinesis app itself (videos, categories, aliases, icons, glossary, bios, prompts, settings).
+master_db = "/srv/kinesis/kinesis_data.db"
+
+# The server's own bookkeeping (a revision log of hashes). Safe to delete; clients then resync.
+state_db = "sync_server_state.db"
+
+scan_interval_secs = 30          # how often to notice changes to the master. 0 = only at startup
+retention_revisions = 100000     # deletions are remembered this long; further-behind clients resync
+
+# A scan that would remove more than half of a catalogue (20+ items) is refused, in case master_db
+# points at the wrong or an empty database. Set true only to confirm an intentional cleanup.
+allow_mass_removal = false
+
+# Oldest Kinesis app version allowed to sync ("" = any).
+# min_client_version = "0.4.2"
+
+# "fallback": a user's own provider key wins; the license is used when they have none.
+# "enforce":  everyone goes through this server's license (their own keys are bypassed).
+license_mode = "fallback"
+
+# Requests per token per minute through the provider proxy. 0 = unlimited.
+proxy_rate_limit_per_minute = 60
+
+# Allow clients with no token. They get content and settings, never a license.
+allow_anonymous = false
+
+# Settings every client must follow. Values come from the `settings` table of master_db, so set
+# them there (most flags have no UI toggle; edit the table directly). Only keys on the sync
+# allowlist are accepted: API keys, paths and migration flags are refused at startup.
+[policy]
+enforced = [
+    "showSummarizeVenice",
+    "showSynthesizeVenice",
+    "plugin_summarize_enabled",
+    "allowDeletionLibrary",
+]
+
+# One entry per user or group. Generate tokens with:  openssl rand -hex 24
+[[tokens]]
+name = "alice"
+token = "replace-with-a-long-random-token"
+licenses = ["venice", "youtube", "pixabay"]   # providers this token may use through the proxy
+
+[[tokens]]
+name = "read-only-guest"
+token = "another-long-random-token-here"
+licenses = []
+
+# Provider keys stay on the server. Prefer environment variables over literals in this file.
+[providers.venice]
+api_key_env = "VENICE_API_KEY"
+# base_url = "https://api.venice.ai/api/v1"
+
+[providers.youtube]
+api_key_env = "YOUTUBE_API_KEY"
+
+[providers.pixabay]
+api_key_env = "PIXABAY_API_KEY"

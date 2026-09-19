@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use serde_json::Value;
 use tauri::command;
 use crate::{get_db_path, db, types::*};
-use crate::youtube::{self, YouTubeClient, ClientType, decode_html};
+use crate::sync::license::{self, Route};
+use crate::youtube::{self, YouTubeClient, ClientType, decode_html, is_live_or_upcoming};
 
 /// Parses an ISO-8601 duration as returned by the Data API's contentDetails.duration
 /// (e.g. "PT1H2M30S", "PT45S") into whole seconds.
@@ -34,19 +36,27 @@ fn parse_iso8601_duration_secs(s: &str) -> Option<i32> {
 /// matching entry in `videos` in place: view count and length_seconds. Used after both the
 /// channel-uploads and keyword-search endpoints, neither of which returns view counts or
 /// durations in their own response.
-async fn fetch_video_details(client: &reqwest::Client, api_key: &str, video_ids: &[String], videos: &mut [Video]) {
+///
+/// Returns the ids among `video_ids` that aren't published yet (a live stream in progress, or one
+/// that's scheduled), per each video's `snippet.liveBroadcastContent`. Callers drop those: the
+/// channel-uploads endpoint, unlike keyword search, doesn't say whether a video is live.
+async fn fetch_video_details(client: &reqwest::Client, route: &Route, video_ids: &[String], videos: &mut [Video]) -> HashSet<String> {
+    let mut unpublished = HashSet::new();
     if video_ids.is_empty() {
-        return;
+        return unpublished;
     }
-    let stats_url = format!(
-        "https://youtube.googleapis.com/youtube/v3/videos?part=statistics,contentDetails&id={}&key={}",
-        video_ids.join(","), api_key
-    );
-    if let Ok(stats_res) = client.get(&stats_url).send().await {
+    let stats_url = route.url(&format!(
+        "youtube/v3/videos?part=statistics,contentDetails,snippet&id={}",
+        video_ids.join(",")
+    ));
+    if let Ok(stats_res) = route.apply(client.get(&stats_url)).send().await {
         if let Ok(stats_data) = stats_res.json::<Value>().await {
             if let Some(items) = stats_data["items"].as_array() {
                 for item in items {
                     if let Some(vid) = item["id"].as_str() {
+                        if is_unpublished_broadcast(item["snippet"]["liveBroadcastContent"].as_str()) {
+                            unpublished.insert(vid.to_string());
+                        }
                         if let Some(v) = videos.iter_mut().find(|v| v.id == vid) {
                             v.view_count = item["statistics"]["viewCount"].as_str().unwrap_or("0").to_string();
                             if let Some(len) = item["contentDetails"]["duration"].as_str().and_then(parse_iso8601_duration_secs) {
@@ -58,6 +68,13 @@ async fn fetch_video_details(client: &reqwest::Client, api_key: &str, video_ids:
             }
         }
     }
+    unpublished
+}
+
+/// The Data API's `liveBroadcastContent` is "live" or "upcoming" for a stream that's in progress or
+/// scheduled, and "none" for everything published (including a finished livestream).
+fn is_unpublished_broadcast(value: Option<&str>) -> bool {
+    matches!(value, Some("live") | Some("upcoming"))
 }
 
 /// Looks up a channel's current subscriber count via the YouTube Data API. Returns `None` (the
@@ -66,13 +83,10 @@ async fn fetch_video_details(client: &reqwest::Client, api_key: &str, video_ids:
 /// field in that case rather than erroring. The digit-filter mirrors sanitize_int in
 /// commands::youtube::library: defends against a stray non-numeric character in the response
 /// tripping up the parse.
-pub(crate) async fn fetch_subscriber_count(api_key: &str, channel_id: &str) -> Option<i64> {
+pub(crate) async fn fetch_subscriber_count(route: &Route, channel_id: &str) -> Option<i64> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "https://youtube.googleapis.com/youtube/v3/channels?part=statistics&id={}&key={}",
-        channel_id, api_key
-    );
-    let res = client.get(&url).send().await.ok()?;
+    let url = route.url(&format!("youtube/v3/channels?part=statistics&id={}", channel_id));
+    let res = route.apply(client.get(&url)).send().await.ok()?;
     let data: Value = res.json().await.ok()?;
     let raw = data["items"][0]["statistics"]["subscriberCount"].as_str()?;
     let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -93,8 +107,15 @@ pub async fn resolve_channel(_app: tauri::AppHandle, query: String) -> Result<Ch
 /// but which one varies by rollout.
 fn extract_video_from_item(item: &Value) -> Option<Video> {
     let v_json = if let Some(v_renderer) = item.get("playlistVideoRenderer") {
+        // Live and scheduled streams aren't published videos yet: leave them out.
+        if is_live_or_upcoming(v_renderer) {
+            return None;
+        }
         youtube::extract_playlist_video_info(v_renderer)
     } else if let Some(lockup) = item.get("lockupViewModel") {
+        if is_live_or_upcoming(lockup) {
+            return None;
+        }
         youtube::extract_lockup_video_info(lockup)
     } else {
         None
@@ -165,7 +186,7 @@ pub async fn fetch_channel_videos_v3(
     continuation: Option<String>,
 ) -> Result<VideoResponse, String> {
     let db_path = get_db_path(&app);
-    let api_key = db::get_setting(&db_path, "api_key").unwrap_or(None).ok_or("API Key not found")?;
+    let route = license::route(&db_path, "youtube").ok_or("API Key not found")?;
     let channel_id = youtube::extract_channel_id(&query).await?.unwrap_or(query);
     let client = reqwest::Client::new();
 
@@ -175,25 +196,28 @@ pub async fn fetch_channel_videos_v3(
         channel_id.clone()
     };
 
-    let mut url = format!(
-        "https://youtube.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&maxResults=50&playlistId={}&key={}",
-        uploads_playlist_id, api_key
+    // Built without a key: `route.url` adds it (own key) or routes through the sync server's proxy.
+    let mut path = format!(
+        "youtube/v3/playlistItems?part=snippet,contentDetails&maxResults=50&playlistId={}",
+        uploads_playlist_id
     );
     if let Some(token) = continuation.as_ref() {
-        url = format!("{}&pageToken={}", url, token);
+        path = format!("{}&pageToken={}", path, token);
     }
+    let url = route.url(&path);
 
-    let mut res: Value = client.get(&url).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
+    let mut res: Value = route.apply(client.get(&url)).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
 
     if res.get("error").is_some() {
-        let mut search_url = format!(
-            "https://youtube.googleapis.com/youtube/v3/search?part=snippet&maxResults=50&channelId={}&order=date&type=video&key={}",
-            channel_id, api_key
+        let mut search_path = format!(
+            "youtube/v3/search?part=snippet&maxResults=50&channelId={}&order=date&type=video",
+            channel_id
         );
         if let Some(token) = continuation {
-            search_url = format!("{}&pageToken={}", search_url, token);
+            search_path = format!("{}&pageToken={}", search_path, token);
         }
-        res = client.get(&search_url).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
+        let search_url = route.url(&search_path);
+        res = route.apply(client.get(&search_url)).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
         if res.get("error").is_some() {
             return Err(format!("API Error: {}", res["error"]["message"].as_str().unwrap_or("Unknown")));
         }
@@ -228,7 +252,11 @@ pub async fn fetch_channel_videos_v3(
         }
     }
 
-    fetch_video_details(&client, &api_key, &video_ids, &mut videos).await;
+    // The uploads playlist includes streams that are live or scheduled; the details call tells us
+    // which, so only published videos are returned. A page may therefore carry fewer than 50
+    // items; the continuation token still advances normally.
+    let unpublished = fetch_video_details(&client, &route, &video_ids, &mut videos).await;
+    videos.retain(|v| !unpublished.contains(&v.id));
 
     Ok(VideoResponse { videos, continuation: next_page_token, total_count: None })
 }
@@ -314,22 +342,23 @@ pub async fn fetch_video_handle(_app: tauri::AppHandle, video_id: String) -> Res
 #[command]
 pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: Option<String>) -> Result<VideoResponse, String> {
     let db_path = get_db_path(&app);
-    let api_key = db::get_setting(&db_path, "api_key").unwrap_or(None);
+    let route = license::route(&db_path, "youtube");
 
-    log::info!("Search called - query: {}, continuation: {:?}, api_key present: {}", query, continuation, api_key.is_some());
+    log::info!("Search called - query: {}, continuation: {:?}, api access present: {}", query, continuation, route.is_some());
 
-    // If API key is available, use YouTube Data API with pagination
-    if let Some(key) = api_key {
+    // If API access is available (own key or a sync-server license), use the YouTube Data API with pagination
+    if let Some(route) = route {
         let client = reqwest::Client::new();
-        let mut url = format!(
-            "https://youtube.googleapis.com/youtube/v3/search?part=snippet&maxResults=50&q={}&type=video&key={}",
-            urlencoding::encode(&query), key
+        let mut path = format!(
+            "youtube/v3/search?part=snippet&maxResults=50&q={}&type=video",
+            urlencoding::encode(&query)
         );
         if let Some(token) = continuation.as_ref() {
-            url = format!("{}&pageToken={}", url, token);
+            path = format!("{}&pageToken={}", path, token);
         }
+        let url = route.url(&path);
 
-        let res: Value = client.get(&url).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
+        let res: Value = route.apply(client.get(&url)).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
 
         if res.get("error").is_some() {
             return Err(format!("API Error: {}", res["error"]["message"].as_str().unwrap_or("Unknown")));
@@ -342,6 +371,11 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
         if let Some(items) = res["items"].as_array() {
             for item in items {
                 let snippet = &item["snippet"];
+                // Search results say up front whether a video is live or scheduled. Only videos
+                // that are actually published belong in the results.
+                if is_unpublished_broadcast(snippet["liveBroadcastContent"].as_str()) {
+                    continue;
+                }
                 if let Some(vid) = item["id"]["videoId"].as_str() {
                     video_ids.push(vid.to_string());
                     let channel_title = snippet["channelTitle"].as_str().map(|s| decode_html(s));
@@ -364,7 +398,9 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
             }
         }
 
-        fetch_video_details(&client, &key, &video_ids, &mut videos).await;
+        // Belt and braces: the details call also reports live/scheduled status per video.
+        let unpublished = fetch_video_details(&client, &route, &video_ids, &mut videos).await;
+        videos.retain(|v| !unpublished.contains(&v.id));
 
         // Shorts filtering only applies to keyword search — channel/handle browsing
         // (fetch_channel_videos_v3) intentionally shows a channel's full uploads. Filtering
@@ -392,6 +428,10 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
             if let Some(items) = section["itemSectionRenderer"]["contents"].as_array() {
                 for item in items {
                     if let Some(v_renderer) = item.get("videoRenderer") {
+                        // Skip streams that are live now or scheduled: not published videos yet.
+                        if is_live_or_upcoming(v_renderer) {
+                            continue;
+                        }
                         if let Some(v_json) = youtube::extract_video_basic_info(v_renderer) {
                             if let Ok(mut v) = serde_json::from_value::<Video>(v_json) {
                                 v.date_added = None;

@@ -8,37 +8,47 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-// Mirrors branding.ts's BRAND.driveLabel — user-facing error strings in commands::wdbs reference
-// this instead of hardcoding "Warp Drive" so they stay correct for Genesis too.
-#[cfg(feature = "genesis")]
-pub(crate) const DRIVE_LABEL: &str = "Drive";
-#[cfg(not(feature = "genesis"))]
-pub(crate) const DRIVE_LABEL: &str = "Warp Drive";
+const VERSION: &str = "0.4.3";
 
-const VERSION: &str = "0.4.2";
+/// "<Workspace name> - Kinesis v0.4.2": the workspace's own name (see db/workspace.rs) leads, so
+/// several open workspaces are easy to tell apart.
+fn get_window_title(db_path: &str) -> String {
+    let workspace = db::get_workspace_labels(db_path)
+        .ok()
+        .and_then(|mut labels| labels.remove(db::WORKSPACE_NAME_KEY))
+        .unwrap_or_else(|| "New Workspace".to_string());
+    format!("{} - {} v{}", workspace, APP_NAME, VERSION)
+}
 
-fn get_window_title() -> String {
-    format!("{} v{}", APP_NAME, VERSION)
+/// Re-reads the workspace name and updates the main window's title, after it was renamed or the
+/// database was switched.
+pub(crate) fn refresh_window_title(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_title(&get_window_title(&get_db_path(app)));
+    }
 }
 
 mod db;
+mod flags;
 mod youtube;
 mod history;
 mod types;
 mod ollama;
 mod venice;
 mod commands;
+mod sync;
 
 pub use types::{Video, ChannelInfo, VideoResponse, DisplaySettings, DbDetails};
 pub use types::{parse_view_count, extract_handle_from_url};
 
 
-// ─── App state ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ App state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub(crate) struct DbPathState(pub Mutex<Option<String>>);
 pub(crate) struct EmbedServerPortState(pub Mutex<Option<u16>>);
 
-// ─── Config file manager ──────────────────────────────────────────────────────
+// â”€â”€â”€ Config file manager â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub(crate) struct ConfManager;
 impl ConfManager {
@@ -79,7 +89,7 @@ impl ConfManager {
     }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub(crate) fn ensure_no_ghost_db(path: &str) {
     let p = PathBuf::from(path);
@@ -126,7 +136,7 @@ fn get_embed_server_port(app: tauri::AppHandle) -> Option<u16> {
     *guard
 }
 
-// ─── App entry point ──────────────────────────────────────────────────────────
+// â”€â”€â”€ App entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn run() {
     use tauri::webview::WebviewWindowBuilder;
@@ -150,6 +160,9 @@ pub fn run() {
             commands::get_display_settings,
             commands::set_display_settings,
             commands::get_setting,
+            commands::get_settings,
+            commands::get_workspace_labels,
+            commands::set_workspace_label,
             commands::set_setting,
             // YouTube
             commands::resolve_channel,
@@ -229,6 +242,19 @@ pub fn run() {
             commands::add_glossary_term,
             commands::get_glossary_terms,
             commands::delete_glossary_term,
+            commands::save_glossary_term,
+            commands::get_glossary_drive_links,
+            commands::get_wdbs_roots,
+            commands::get_handle_drives,
+            commands::get_wdbs_aliases,
+            commands::get_video_by_id,
+            commands::get_video_attachments,
+            commands::save_video_note,
+            commands::pick_attachment_files,
+            commands::add_attachments,
+            commands::remove_attachment,
+            commands::open_attachment,
+            commands::save_attachment_as,
             // Biography
             commands::get_biographies,
             commands::get_biography,
@@ -237,11 +263,27 @@ pub fn run() {
             commands::export_to_obsidian,
             // Similar Videos
             commands::get_similar_videos,
+            // Sync
+            commands::sync_test,
+            commands::sync_connect,
+            commands::sync_run,
+            commands::sync_cancel,
+            commands::sync_status,
+            commands::sync_set_options,
+            commands::sync_disconnect,
+            commands::get_locked_settings,
+            commands::get_key_status,
+            commands::export_sync_pack,
+            commands::import_sync_pack,
+            commands::select_pack_file,
+            commands::select_pack_save_path,
+            commands::select_vault_path,
             get_app_info,
             get_embed_server_port,
         ])
         .manage(DbPathState(Mutex::new(None)))
         .manage(EmbedServerPortState(Mutex::new(None)))
+        .manage(sync::SyncState::default())
         .setup(move |app| {
             let app_handle = app.handle();
             let db_path = get_db_path(app_handle);
@@ -257,6 +299,9 @@ pub fn run() {
                     log::error!("Failed to start YouTube embed HTTP server; embeds will be unavailable: {}", e);
                 }
             }
+
+            // Attachments opened in other apps are temporary copies; start clean.
+            commands::clear_attachment_temp();
 
             // Get saved window settings
             let resolution = db::get_setting(&db_path, "resolution").unwrap_or(None).unwrap_or_else(|| "1440x900".to_string());
@@ -281,7 +326,7 @@ pub fn run() {
             
             // Create the main window
             WebviewWindowBuilder::new(app_handle, "main", url)
-                .title(&get_window_title())
+                .title(&get_window_title(&db_path))
                 .inner_size(width, height)
                 .fullscreen(fullscreen)
                 .build()?;

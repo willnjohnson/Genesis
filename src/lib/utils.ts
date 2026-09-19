@@ -25,3 +25,11 @@ export function normalizeText(text: string): string {
         .replace(/…/g, "...")
         .replace(/[—–]/g, "-");
 }
+
+/** The folder part of a file path, for either separator (Windows paths use backslashes). */
+export const parentDir = (path: string): string => path.replace(/[\\/][^\\/]*$/, "");
+
+/** The name shown for a Drive in the tree: the last segment of its display path (":CRYPTO-DOAC" -> "DOAC"). */
+export function driveSegmentLabel(displayPath: string): string {
+    return displayPath.split('-').pop()?.replace(/^:/, '') || displayPath;
+}

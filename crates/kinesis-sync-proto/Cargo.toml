@@ -1,0 +1,18 @@
+[package]
+name = "kinesis-sync-proto"
+version = "0.1.0"
+description = "Shared wire types, settings allowlist, hashing and pack codec for Kinesis sync."
+edition = "2021"
+rust-version = "1.88.0"
+license = "MIT"
+
+[features]
+# Row readers over a Kinesis SQLite database, shared by the client's export and the server's scanner.
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+flate2 = "1"
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }

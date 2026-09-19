@@ -2,7 +2,8 @@ import { Search, AtSign, Youtube, ListVideo, Filter, X, Lightbulb, History, Cloc
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { addSearchHistory, getSearchHistory, type HistoryEntry } from '../api';
 import { decodeHtmlEntities } from '../lib/utils';
-import { BRAND } from '../branding';
+import { useFlags } from '../hooks/useFlags';
+import { useWorkspace } from '../hooks/useWorkspace';
 
 export interface Facet {
     type: SearchFacet;
@@ -32,6 +33,9 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     const [query, setQuery] = useState(initialQuery);
     const [facets, setFacets] = useState<Facet[]>(initialFacets);
     const [showHistory, setShowHistory] = useState(false);
+    // A DB owner can hide the recent-searches dropdown and stop it removing entries (see lib/flags.ts).
+    const { flags } = useFlags();
+    const { labels } = useWorkspace();
     const [history, setHistory] = useState<HistoryEntry[]>([]);
     const userActionRef = useRef(false);
     const inputRef = useRef<HTMLInputElement>(null);
@@ -303,7 +307,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     };
 
     const handleFocus = () => {
-        if (!isLibrary) {
+        if (!isLibrary && flags.showSearchHistory) {
             loadHistory();
             setShowHistory(true);
         }
@@ -320,8 +324,8 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         }
         if (viewMode === 'biography') {
             return [
-                { type: 'person_search' as const, label: 'Person (!b)' },
-                { type: 'bio_search' as const, label: 'Biography (!m)' },
+                { type: 'person_search' as const, label: `${labels.aliasBiographyItem} (!b)` },
+                { type: 'bio_search' as const, label: `${labels.aliasBiography} (!m)` },
             ];
         }
         if (viewMode === 'search') {
@@ -429,10 +433,10 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                 <Lightbulb className="w-4 h-4 text-gray-500 hover:text-orange-400 transition-colors cursor-help" />
 
                                 <div className="absolute top-full right-0 mt-3 w-80 bg-[#1a1a1a] border border-[#333] rounded-xl p-4 opacity-0 translate-y-2 pointer-events-none group-hover/hint:opacity-100 group-hover/hint:translate-y-0 transition-all duration-200 z-[100]">
-                                    <h4 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 border-b border-[#333] pb-2">Search Tips</h4>
+                                    <h4 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 border-b border-[#333] pb-2">{labels.aliasSearch} Tips</h4>
                                 <div className="space-y-4">
                                     <div className="flex flex-col gap-1">
-                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-tighter">{isGlossary ? "Glossary Mode" : isLibrary ? `${BRAND.libraryLabel} Mode` : "Paste Mode"}</span>
+                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-tighter">{isGlossary ? `${labels.aliasGlossary} Mode` : isLibrary ? `${labels.aliasLibrary} Mode` : "Paste Mode"}</span>
                                         <p className="text-[12px] text-gray-300">
                                             {isGlossary ? "Filter your glossary terms." : isLibrary ? "Filter your saved videos using facets." : "Paste any YouTube URL directly into the search bar."}
                                         </p>
@@ -490,7 +494,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                     </div>
 
                     {/* Search History Dropdown */}
-                    {showHistory && !isLibraryOrGlossary && filteredHistory.length > 0 && (
+                    {flags.showSearchHistory && showHistory && !isLibraryOrGlossary && filteredHistory.length > 0 && (
                         <div className="absolute top-full left-0 right-0 mt-1.5 bg-[#141414] border border-[#303030] rounded-xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
                             <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[#272727]">
                                 <History className="w-3.5 h-3.5 text-[#666]" />
@@ -512,6 +516,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                                 {new Date(entry.searchedAt).toLocaleDateString()}
                                             </span>
                                         </button>
+                                        {flags.allowClearHistory && (
                                         <button
                                             type="button"
                                             onClick={async (e) => {
@@ -525,6 +530,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                         >
                                             <X className="w-3.5 h-3.5" />
                                         </button>
+                                        )}
                                     </li>
                                 ))}
                             </ul>
@@ -536,7 +542,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                         type="submit"
                         disabled={loading || (query.trim() === '' && facets.length === 0)}
                         className="flex items-center justify-center px-6 bg-[#222222] border border-[#404040] border-l-0 rounded-r-full transition-colors disabled:opacity-50 group h-auto min-h-11 hover:bg-[#444444] hover:border-[#505050] cursor-pointer"
-                        title="Search"
+                        title={labels.aliasSearch}
                     >
                         <Search className="w-5 h-5 text-[#aaaaaa] group-hover:text-white" />
                     </button>

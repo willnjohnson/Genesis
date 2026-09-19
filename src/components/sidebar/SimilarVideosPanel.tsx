@@ -1,4 +1,5 @@
 import type { Video } from '../../api';
+import { useWorkspace } from '../../hooks/useWorkspace';
 
 interface Props {
     videos: Video[];
@@ -10,6 +11,7 @@ interface Props {
  *  getSimilarVideos (backed by db::get_similar_videos's BM25-over-FTS5 ranking). Clicking a row
  *  swaps the Sidebar to that video in place via `onSelect`, without closing it. */
 export function SimilarVideosPanel({ videos, loading, onSelect }: Props) {
+    const { labels } = useWorkspace();
     if (loading) {
         return (
             <p className="text-[11px] text-[#666666] italic py-2">Finding similar videos...</p>
@@ -19,7 +21,7 @@ export function SimilarVideosPanel({ videos, loading, onSelect }: Props) {
     if (videos.length === 0) {
         return (
             <p className="text-[11px] text-[#666666] italic py-2">
-                No similar videos found yet — this grows as your library does.
+                No similar videos found yet. Add more videos to the {labels.aliasLibrary.toLowerCase()} to increase discovery.
             </p>
         );
     }

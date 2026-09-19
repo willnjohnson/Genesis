@@ -1,0 +1,28 @@
+[package]
+name = "kinesis-sync-server"
+version = "0.1.0"
+description = "Reference sync server for Kinesis: serves a curated Kinesis database, admin policy and an optional provider license."
+edition = "2021"
+rust-version = "1.88.0"
+license = "MIT"
+
+[lib]
+name = "kinesis_sync_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kinesis-sync-server"
+path = "src/main.rs"
+
+[dependencies]
+kinesis-sync-proto = { path = "../kinesis-sync-proto", features = ["sqlite"] }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "json"] }
+tower-http = { version = "0.5", features = ["compression-gzip"] }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }

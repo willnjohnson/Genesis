@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import { getWdbsTree, setWdbsAlias, setWdbsIcon, type WdbsNode } from '../api';
-import { BRAND } from '../branding';
+import { useWorkspace } from '../hooks/useWorkspace';
 import { WdbsAliasMenu } from './WdbsAliasMenu';
 import { WdbsIconMenu } from './WdbsIconMenu';
 import { getWdbsIconComponent } from '../lib/wdbs-icons';
@@ -21,6 +21,16 @@ interface WdbsTreePanelProps {
     // Gates the right-click "Edit Alias"/"Edit Icon" menu, same settings flag (allowEditWDBS)
     // that gates Bulk Assign Mode and the Sidebar's Warp Drive editor — see App.tsx.
     allowEditAlias?: boolean;
+}
+
+/** The paths of the nodes above `path` (root first), or null when `path` isn't in the tree. */
+function ancestorPaths(nodes: WdbsNode[], path: string, trail: string[] = []): string[] | null {
+    for (const node of nodes) {
+        if (node.path === path) return trail;
+        const found = ancestorPaths(node.children, path, [...trail, node.path]);
+        if (found) return found;
+    }
+    return null;
 }
 
 function findNodeByPath(nodes: WdbsNode[], path: string): WdbsNode | undefined {
@@ -91,7 +101,7 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
     const [iconMenu, setIconMenu] = useState<{ x: number; y: number; path: string; segment: string; icon: string | null } | null>(null);
     const [savingIcon, setSavingIcon] = useState(false);
     const [iconError, setIconError] = useState<string | null>(null);
-    const label = BRAND.driveLabel;
+    const label = useWorkspace().labels.aliasDriveName;
 
     const fetchTree = useCallback(() => {
         let cancelled = false;
@@ -109,6 +119,15 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
     // one-line alias strip below doesn't need App.tsx (or any other caller) to thread it through
     // its own selection state on top of the plain path/label onSelect already reports.
     const selectedAlias = selectedPath ? findNodeByPath(tree, selectedPath)?.alias : undefined;
+
+    // A selection made from outside the tree (e.g. a Biography's "In Drive" list) may sit inside
+    // collapsed branches, so open the ones above it.
+    useEffect(() => {
+        if (!selectedPath || tree.length === 0) return;
+        const trail = ancestorPaths(tree, selectedPath);
+        if (!trail || trail.length === 0) return;
+        setExpanded(prev => (trail.every(p => prev.has(p)) ? prev : new Set([...prev, ...trail])));
+    }, [selectedPath, tree]);
 
     const toggleExpanded = useCallback((path: string) => {
         setExpanded(prev => {

@@ -120,6 +120,75 @@ impl YouTubeClient {
     }
 }
 
+/// True for a video that isn't published yet: a live stream in progress, or one that's scheduled
+/// (a stream or premiere that hasn't started). Works on each renderer shape YouTube serves:
+///   - search `videoRenderer` / channel `playlistVideoRenderer`: a `LIVE_NOW` badge, a time-status
+///     overlay of `LIVE`/`UPCOMING`, or an `upcomingEventData` object;
+///   - the newer `lockupViewModel`: a thumbnail badge styled `..._LIVE` (or reading LIVE/UPCOMING).
+/// A finished livestream is an ordinary published video (normal duration, "Streamed ... ago") and
+/// is NOT matched. Only badge/overlay structures are inspected, never text such as titles or
+/// descriptions, which routinely contain the word "live".
+///
+/// The live markers and the search-result scheduled markers were taken from real responses. The
+/// `lockupViewModel` scheduled markers below (badge text/style, "Scheduled for"/"Premieres" rows)
+/// are the best-effort counterpart: no scheduled item was available to confirm that exact shape.
+pub fn is_live_or_upcoming(renderer: &Value) -> bool {
+    if renderer.get("upcomingEventData").is_some() {
+        return true;
+    }
+    if let Some(badges) = renderer["badges"].as_array() {
+        let live_badge = badges.iter().any(|b| {
+            let m = &b["metadataBadgeRenderer"];
+            m["style"].as_str() == Some("BADGE_STYLE_TYPE_LIVE_NOW") || m["icon"]["iconType"].as_str() == Some("LIVE")
+        });
+        if live_badge {
+            return true;
+        }
+    }
+    if let Some(overlays) = renderer["thumbnailOverlays"].as_array() {
+        let time_status = overlays.iter().any(|o| {
+            matches!(o["thumbnailOverlayTimeStatusRenderer"]["style"].as_str(), Some("LIVE") | Some("UPCOMING"))
+        });
+        if time_status {
+            return true;
+        }
+    }
+
+    // lockupViewModel
+    if let Some(overlays) = renderer["contentImage"]["thumbnailViewModel"]["overlays"].as_array() {
+        for overlay in overlays {
+            let Some(badges) = overlay["thumbnailBottomOverlayViewModel"]["badges"].as_array() else { continue };
+            for badge in badges {
+                let b = &badge["thumbnailBadgeViewModel"];
+                let style = b["badgeStyle"].as_str().unwrap_or("");
+                let text = b["text"].as_str().unwrap_or("");
+                if style.ends_with("_LIVE")
+                    || style.ends_with("_UPCOMING")
+                    || text.eq_ignore_ascii_case("LIVE")
+                    || text.eq_ignore_ascii_case("UPCOMING")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    // Row 0 of a lockup's metadata is the channel name, so scheduled-time text is only looked for
+    // below it (a channel called "Premieres ..." must not hide its own videos).
+    if let Some(rows) = renderer["metadata"]["lockupMetadataViewModel"]["metadata"]["contentMetadataViewModel"]["metadataRows"].as_array() {
+        for row in rows.iter().skip(1) {
+            if let Some(parts) = row["metadataParts"].as_array() {
+                if parts.iter().any(|p| {
+                    let t = p["text"]["content"].as_str().unwrap_or("");
+                    t.starts_with("Scheduled for") || t.starts_with("Premieres ")
+                }) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn extract_video_basic_info(renderer: &Value) -> Option<Value> {
     let video_id = renderer["videoId"].as_str()?;
     let title = decode_html(renderer["title"]["runs"][0]["text"].as_str().unwrap_or("Unknown"));
@@ -238,4 +307,107 @@ pub fn extract_lockup_video_info(lockup: &Value) -> Option<Value> {
         "author": owner_text,
         "handle": handle
     }))
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use serde_json::json;
+
+    // Trimmed from real InnerTube responses (search and a channel's uploads playlist).
+
+    #[test]
+    fn a_live_stream_in_search_results_is_detected() {
+        let live = json!({
+            "videoId": "ExF83wcgErw",
+            "badges": [
+                {"metadataBadgeRenderer": {"icon": {"iconType": "LIVE"}, "style": "BADGE_STYLE_TYPE_LIVE_NOW", "label": "LIVE"}},
+                {"metadataBadgeRenderer": {"style": "BADGE_STYLE_TYPE_SIMPLE", "label": "New"}}
+            ],
+            "thumbnailOverlays": []
+        });
+        assert!(is_live_or_upcoming(&live));
+    }
+
+    #[test]
+    fn a_scheduled_stream_in_search_results_is_detected() {
+        let upcoming = json!({
+            "videoId": "9gDxG-pm1Zo",
+            "badges": [{"metadataBadgeRenderer": {"style": "BADGE_STYLE_TYPE_SIMPLE", "label": "New"}}],
+            "thumbnailOverlays": [{"thumbnailOverlayTimeStatusRenderer": {"text": {"simpleText": "Upcoming"}, "style": "UPCOMING"}}],
+            "upcomingEventData": {"startTime": "1790583300", "upcomingEventText": {"runs": [{"text": "Scheduled for "}]}}
+        });
+        assert!(is_live_or_upcoming(&upcoming));
+        // Either marker alone is enough.
+        assert!(is_live_or_upcoming(&json!({"upcomingEventData": {"startTime": "1"}})));
+        assert!(is_live_or_upcoming(&json!({"thumbnailOverlays": [{"thumbnailOverlayTimeStatusRenderer": {"style": "UPCOMING"}}]})));
+        assert!(is_live_or_upcoming(&json!({"thumbnailOverlays": [{"thumbnailOverlayTimeStatusRenderer": {"style": "LIVE"}}]})));
+    }
+
+    #[test]
+    fn a_live_stream_in_a_channel_listing_is_detected() {
+        let lockup = json!({
+            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+            "contentId": "JcVqbivJCpQ",
+            "contentImage": {"thumbnailViewModel": {"overlays": [
+                {"thumbnailBottomOverlayViewModel": {"badges": [
+                    {"thumbnailBadgeViewModel": {"text": "LIVE", "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE"}}
+                ]}}
+            ]}},
+            "metadata": {"lockupMetadataViewModel": {"metadata": {"contentMetadataViewModel": {"metadataRows": [
+                {"metadataParts": [{"text": {"content": "SGPC, Sri Amritsar"}}]},
+                {"metadataParts": [{"text": {"content": "160K watching"}}]}
+            ]}}}}
+        });
+        assert!(is_live_or_upcoming(&lockup));
+    }
+
+    #[test]
+    fn ordinary_published_videos_are_never_matched() {
+        let normal = json!({
+            "videoId": "mefMdjvNxU4",
+            "badges": [{"metadataBadgeRenderer": {"style": "BADGE_STYLE_TYPE_SIMPLE", "label": "New"}}],
+            "thumbnailOverlays": [{"thumbnailOverlayTimeStatusRenderer": {"text": {"simpleText": "11:14"}, "style": "DEFAULT"}}]
+        });
+        assert!(!is_live_or_upcoming(&normal));
+
+        // A finished livestream is a normal video: it has a duration and a "Streamed ... ago" date.
+        let finished_stream = json!({
+            "videoId": "abc",
+            "publishedTimeText": {"simpleText": "Streamed 2 days ago"},
+            "thumbnailOverlays": [{"thumbnailOverlayTimeStatusRenderer": {"text": {"simpleText": "3:12:45"}, "style": "DEFAULT"}}]
+        });
+        assert!(!is_live_or_upcoming(&finished_stream));
+
+        let lockup = json!({
+            "contentImage": {"thumbnailViewModel": {"overlays": [
+                {"thumbnailBottomOverlayViewModel": {"badges": [{"thumbnailBadgeViewModel": {"text": "28:30", "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT"}}]}}
+            ]}},
+            "metadata": {"lockupMetadataViewModel": {"metadata": {"contentMetadataViewModel": {"metadataRows": [
+                {"metadataParts": [{"text": {"content": "SpaceX"}}]},
+                {"metadataParts": [{"text": {"content": "384K views"}}, {"text": {"content": "7 hours ago"}}]}
+            ]}}}}
+        });
+        assert!(!is_live_or_upcoming(&lockup));
+    }
+
+    #[test]
+    fn the_word_live_in_titles_descriptions_or_a_channel_name_does_not_hide_a_video() {
+        let tricky = json!({
+            "videoId": "x",
+            "title": {"runs": [{"text": "LIVE"}]},
+            "detailedMetadataSnippets": [{"snippetText": {"runs": [{"text": "LIVE"}, {"text": "upcoming"}]}}],
+            "thumbnailOverlays": [{"thumbnailOverlayTimeStatusRenderer": {"style": "DEFAULT"}}]
+        });
+        assert!(!is_live_or_upcoming(&tricky));
+
+        // A lockup whose channel (row 0) is literally named "Premieres Weekly".
+        let channel_named_premieres = json!({
+            "metadata": {"lockupMetadataViewModel": {"metadata": {"contentMetadataViewModel": {"metadataRows": [
+                {"metadataParts": [{"text": {"content": "Premieres Weekly"}}]},
+                {"metadataParts": [{"text": {"content": "1K views"}}, {"text": {"content": "1 day ago"}}]}
+            ]}}}}
+        });
+        assert!(!is_live_or_upcoming(&channel_named_premieres));
+    }
 }

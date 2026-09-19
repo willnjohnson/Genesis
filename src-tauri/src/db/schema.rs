@@ -350,6 +350,64 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     )?;
 
+    // Which Drive roots (level 1 only, e.g. ":CRYPTO") a Standard Glossary Tag is filed under. A
+    // term with no rows here is simply uncategorized (shown under "All"). Quick Tags (empty
+    // definition) never have rows. Kinesis-owned, like video_wdbs_links: created on every database.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS glossary_drives (
+            term TEXT NOT NULL,
+            root TEXT NOT NULL,
+            PRIMARY KEY (term, root)
+        )",
+        [],
+    )?;
+
+    // Per-video notes and attachments, kept inside the database (see db/attachments.rs). Blobs are
+    // content-addressed by the sha256 of the original bytes so identical files are stored once.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS attachment_blobs (
+            hash TEXT PRIMARY KEY,
+            compression TEXT NOT NULL DEFAULT 'none',
+            size INTEGER NOT NULL,
+            stored_size INTEGER NOT NULL,
+            data BLOB NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS video_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            ext TEXT NOT NULL,
+            hash TEXT NOT NULL,
+            added_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_video_attachments_video ON video_attachments(video_id)", [])?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS video_notes (
+            video_id TEXT PRIMARY KEY,
+            note TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+    // Removes a deleted video's note and attachments, then any stored file nothing points at any
+    // more. Created outside the trigger block below on purpose: these tables are Kinesis's own, so
+    // this is needed on a hand-maintained production schema too.
+    let _ = conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_kinesis_attachments_cascade_del
+        AFTER DELETE ON videos
+        BEGIN
+            DELETE FROM video_notes WHERE video_id = OLD.video_id;
+            DELETE FROM video_attachments WHERE video_id = OLD.video_id;
+            DELETE FROM attachment_blobs WHERE hash NOT IN (SELECT hash FROM video_attachments);
+        END",
+        [],
+    );
+
     // Create biographies table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS biographies (
@@ -445,9 +503,18 @@ pub fn init_db(db_path: &str) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS video_wdbs_links (
             video_id TEXT NOT NULL,
-            wdbs     TEXT NOT NULL,
-            PRIMARY KEY (video_id, wdbs)
-        )",
+            WDBS     TEXT NOT NULL,
+            PRIMARY KEY (video_id, WDBS)
+        ) STRICT",
+        [],
+    )?;
+    // Customized display names (see db/workspace.rs): the workspace's own name and the aliases for
+    // Search, Library, Drive, ... A missing row means the built-in default, so the table starts empty.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS workspace_labels (
+            key   TEXT NOT NULL PRIMARY KEY,
+            value TEXT NOT NULL
+        ) STRICT",
         [],
     )?;
     // Cleans up symlink rows when their video is deleted — but only on a from-scratch database
@@ -460,6 +527,34 @@ pub fn init_db(db_path: &str) -> Result<()> {
     if trigger_exists(&conn, "trgVideosBeforeUPD_Videos_ValidateWDBS")? {
         let _ = conn.execute("DROP TRIGGER IF EXISTS trg_kinesis_wdbs_links_cascade_del", []);
     }
+
+    // Sync bookkeeping (see db/sync.rs). Deliberately side tables rather than columns on the
+    // content tables: it leaves the production schema and its triggers untouched, and the mere
+    // presence of a `sync_items` row is what marks a row as owned by the sync server (so only
+    // those are ever overwritten/deleted by a sync). `seen` supports the mark-and-sweep a full
+    // resync does. `sync_policy` holds admin-enforced settings that overlay `settings` at read
+    // time (db/settings.rs) without ever being written into it, so disconnecting restores the
+    // user's own values.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_items (
+            kind         TEXT NOT NULL,
+            item_key     TEXT NOT NULL,
+            rev          INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT NOT NULL DEFAULT '',
+            synced_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+            seen         INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (kind, item_key)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_policy (
+            key    TEXT PRIMARY KEY,
+            value  TEXT NOT NULL,
+            locked INTEGER NOT NULL DEFAULT 1
+        )",
+        [],
+    )?;
 
     // One-time backfill of tblWDBS rows for any videos.WDBS/video_wdbs_links assignment made
     // before Kinesis started creating/owning tblWDBS itself (see the tblWDBS block above) —
@@ -502,7 +597,6 @@ pub fn init_db(db_path: &str) -> Result<()> {
         ("allowEditBio", "true"),
         ("allowEditTranscriptOnNA", "true"),
         ("navigation_orientation", "horizontal"),
-        ("librarySearchLimit", "1024"),
         ("hideShortsInSearch", "true"),
         ("setTranscriptAfterSummarizeToNA", "false"),
         // Off by default: WDBS taxonomy editing is meant to be gated to bona fide IKLAO Admin
@@ -518,6 +612,9 @@ pub fn init_db(db_path: &str) -> Result<()> {
             params![key, val],
         )?;
     }
+    // Every feature flag gets a row too (INSERT OR IGNORE, so the values above and anything a DB
+    // owner already set win), which makes `SELECT * FROM settings` a list of what can be changed.
+    crate::flags::seed_feature_flags(&conn)?;
 
     // One-time normalization of the "unassigned Warp Drive" placeholder from "θψ" to ":". "θψ" is
     // made of ordinary alphabetic Unicode characters, so FTS5's tokenizer indexes it as a real

@@ -277,16 +277,62 @@ body {
     color: #333333 !important;
 }
 
+/* ==Highlighted text== (see lib/remark-highlight.ts): a translucent yellow that reads on both the
+   dark and light themes, with the text keeping its own colour. */
+mark {
+    background-color: rgba(250, 204, 21, 0.35);
+    color: inherit;
+    padding: 0.05em 0.25em;
+    border-radius: 0.25em;
+}
+
+/* Task lists (- [ ] and - [x], nested too): no bullet, the checkbox takes its place. The boxes are
+   display-only here; they're changed by editing the text (Ctrl+Enter on a task line). */
+.prose ul.contains-task-list { list-style: none; padding-left: 0; }
+.prose ul.contains-task-list ul.contains-task-list { padding-left: 1.5em; }
+.prose li.task-list-item { padding-left: 0; }
+/* The checkbox is drawn here rather than left to the browser, which greys out a disabled one whatever
+   accent-color says: an empty box in the text colour, and the theme's accent (with the page background
+   colour for the tick, which stays visible on pale accents that white would wash out) once ticked. */
+.prose li.task-list-item > input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    margin: 0 0.5em 0.15em 0;
+    vertical-align: middle;
+    border: 1.5px solid color-mix(in srgb, currentColor 55%, transparent);
+    border-radius: 0.25em;
+    background: transparent;
+    opacity: 1;
+}
+.prose li.task-list-item > input[type="checkbox"]:checked {
+    background-color: var(--k-accent);
+    border-color: var(--k-accent);
+}
+.prose li.task-list-item > input[type="checkbox"]:checked::after {
+    content: "";
+    position: absolute;
+    left: 0.29em;
+    top: 0.08em;
+    width: 0.26em;
+    height: 0.52em;
+    border: solid var(--k-bg);
+    border-width: 0 0.13em 0.13em 0;
+    transform: rotate(45deg);
+}
+
 :root:not(.dark) .prose { color: #333333 !important; }
 :root:not(.dark) .prose h1 { color: #111111 !important; }
 :root:not(.dark) .prose h2 { color: #222222 !important; }
 :root:not(.dark) .prose h3 { color: #333333 !important; }
 :root:not(.dark) .prose strong { color: #111111 !important; }
 :root:not(.dark) .prose code { color: #333333 !important; }
-:root:not(.dark) .prose blockquote { border-left-color: #ccc !important; color: #555 !important; font-style: italic !important; }
+/* (The quote bar and the table header/borders take their colours from the theme, in the accent block below.) */
+:root:not(.dark) .prose blockquote { color: #555 !important; font-style: italic !important; }
 :root:not(.dark) .prose blockquote p { color: #555 !important; }
-:root:not(.dark) .prose th { background-color: #e0e0e0 !important; color: #111 !important; border-color: #ccc !important; }
-:root:not(.dark) .prose td { border-color: #ccc !important; }
 
 /* Reduce markdown spacing */
 .prose p { margin-top: 0.25rem !important; margin-bottom: 0.25rem !important; }
@@ -305,14 +351,41 @@ body {
     line-height: normal !important;
 }
 .prose th, .prose td {
-    border: 1px solid #444 !important;
+    border: 1px solid var(--k-border-444) !important;
     padding: 0.5rem !important;
     text-align: left !important;
 }
+/* The header row is a raised surface of the theme with its normal text colour and a stronger rule
+   beneath: Erebos's #2a2a2a and Phos's #e0e0e0 as before, and each other theme's own raised surface. */
 .prose th {
-    background-color: #2a2a2a !important;
-    color: #fff !important;
+    background-color: var(--k-bg-2a2a2a) !important;
+    color: var(--k-text-white) !important;
     font-weight: 700 !important;
+    border-bottom: 2px solid var(--k-border-505050) !important;
+}
+
+/* Quotes get the theme's accent. Rules and list markers stay neutral: they use the theme's border and
+   muted text colours, so they sit quietly in the text like the rest of the page. */
+.prose blockquote {
+    border-left: 4px solid var(--k-accent) !important;
+    background-color: color-mix(in srgb, var(--k-accent) 8%, transparent);
+    border-radius: 0 0.5rem 0.5rem 0;
+    padding: 0.25rem 1rem !important;
+    font-style: italic;
+}
+.prose hr {
+    border: 0 !important;
+    height: 2px;
+    margin: 1rem 0 !important;
+    border-radius: 1px;
+    background-color: var(--k-border-505050);
+}
+.prose ul > li::marker,
+.prose ol > li::marker {
+    color: var(--k-text-aaaaaa) !important;
+}
+.prose ol > li::marker {
+    font-weight: 600;
 }
 
 /* Custom scrollbar */
