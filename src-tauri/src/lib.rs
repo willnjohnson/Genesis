@@ -10,9 +10,13 @@ const APP_NAME: &str = "Kinesis";
 
 const VERSION: &str = "0.4.3";
 
-/// "<Workspace name> - Kinesis v0.4.2": the workspace's own name (see db/workspace.rs) leads, so
-/// several open workspaces are easy to tell apart.
+/// Windows and macOS: "<Workspace name> - Kinesis v0.4.2", the workspace's own name (see
+/// db/workspace.rs) leading so several open workspaces are easy to tell apart. Linux: plain
+/// "Kinesis v0.4.2", because the title didn't follow a rename there.
 fn get_window_title(db_path: &str) -> String {
+    if cfg!(target_os = "linux") {
+        return format!("{} v{}", APP_NAME, VERSION);
+    }
     let workspace = db::get_workspace_labels(db_path)
         .ok()
         .and_then(|mut labels| labels.remove(db::WORKSPACE_NAME_KEY))
@@ -21,11 +25,16 @@ fn get_window_title(db_path: &str) -> String {
 }
 
 /// Re-reads the workspace name and updates the main window's title, after it was renamed or the
-/// database was switched.
+/// database was switched. Nothing to update on Linux, where the title never shows the name.
 pub(crate) fn refresh_window_title(app: &tauri::AppHandle) {
     use tauri::Manager;
+    if cfg!(target_os = "linux") {
+        return;
+    }
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title(&get_window_title(&get_db_path(app)));
+        if let Err(e) = window.set_title(&get_window_title(&get_db_path(app))) {
+            log::warn!("Couldn't update the window title: {}", e);
+        }
     }
 }
 
