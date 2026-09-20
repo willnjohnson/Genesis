@@ -494,8 +494,8 @@ mod tests {
             build_link("gone", LinkKind::Glossary, "Missing"),
         );
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute("UPDATE videos SET summary = ?1 WHERE video_id = 'vid1abcdefg'", [&summary]).unwrap();
-        conn.execute("INSERT INTO biographies (handle, display_name, bio) VALUES ('@ann', 'Ann', 'Friend of [First Talk](kinesis://video/vid1abcdefg).')", []).unwrap();
+        conn.execute("UPDATE Videos SET summary = ?1 WHERE video_id = 'vid1abcdefg'", [&summary]).unwrap();
+        conn.execute("INSERT INTO Biographies (handle, display_name, bio) VALUES ('@ann', 'Ann', 'Friend of [First Talk](kinesis://video/vid1abcdefg).')", []).unwrap();
         drop(conn);
 
         let out_dir = temp_dir("wlout");

@@ -1,6 +1,6 @@
 //! Applying content from a sync server to the local database.
 //!
-//! Ownership model: a row is "server-owned" iff `sync_items` has a row for (kind, key). Only owned
+//! Ownership model: a row is "server-owned" iff `SyncItems` has a row for (kind, key). Only owned
 //! rows are ever deleted by a sync; on a key collision the server takes the row over. Field
 //! merging is "server non-null wins" — a null/absent server field never clobbers a local value
 //! (same idea as `save_video` keeping the old summary when the incoming one is NULL).
@@ -22,7 +22,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::Serialize;
 
 use super::schema::table_exists;
-use super::search::regenerate_tokens_from_transcript;
+use super::tokens::{load_stop_words, set_tokens_from_transcript};
 use super::wdbs::{ensure_wdbs_path_exists_with_conn, is_unassigned_sentinel, storage_to_display_path, WDBS_ICONS};
 
 /// Largest single enforced setting value (custom theme JSON is the biggest legitimate one).
@@ -75,7 +75,7 @@ pub fn open_sync_conn(db_path: &str) -> Result<Connection> {
 
 fn owned_hash(conn: &Connection, kind: Kind, key: &str) -> Result<Option<String>> {
     conn.query_row(
-        "SELECT content_hash FROM sync_items WHERE kind = ?1 AND item_key = ?2",
+        "SELECT content_hash FROM SyncItems WHERE kind = ?1 AND item_key = ?2",
         params![kind.as_str(), key],
         |row| row.get(0),
     )
@@ -84,7 +84,7 @@ fn owned_hash(conn: &Connection, kind: Kind, key: &str) -> Result<Option<String>
 
 fn mark_owned(conn: &Connection, kind: Kind, key: &str, rev: i64, hash: &str) -> Result<()> {
     conn.execute(
-        "INSERT INTO sync_items (kind, item_key, rev, content_hash, synced_at, seen)
+        "INSERT INTO SyncItems (kind, item_key, rev, content_hash, synced_at, seen)
          VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, 1)
          ON CONFLICT(kind, item_key) DO UPDATE SET
             rev = excluded.rev, content_hash = excluded.content_hash,
@@ -96,7 +96,7 @@ fn mark_owned(conn: &Connection, kind: Kind, key: &str, rev: i64, hash: &str) ->
 
 fn mark_seen(conn: &Connection, kind: Kind, key: &str) -> Result<()> {
     conn.execute(
-        "UPDATE sync_items SET seen = 1 WHERE kind = ?1 AND item_key = ?2",
+        "UPDATE SyncItems SET seen = 1 WHERE kind = ?1 AND item_key = ?2",
         params![kind.as_str(), key],
     )?;
     Ok(())
@@ -104,7 +104,7 @@ fn mark_seen(conn: &Connection, kind: Kind, key: &str) -> Result<()> {
 
 fn disown(conn: &Connection, kind: Kind, key: &str) -> Result<()> {
     conn.execute(
-        "DELETE FROM sync_items WHERE kind = ?1 AND item_key = ?2",
+        "DELETE FROM SyncItems WHERE kind = ?1 AND item_key = ?2",
         params![kind.as_str(), key],
     )?;
     Ok(())
@@ -112,7 +112,7 @@ fn disown(conn: &Connection, kind: Kind, key: &str) -> Result<()> {
 
 /// How many rows of each kind the server currently owns, for the Sync tab status card.
 pub fn owned_counts(conn: &Connection) -> Result<BTreeMap<String, u64>> {
-    let mut stmt = conn.prepare("SELECT kind, COUNT(*) FROM sync_items GROUP BY kind")?;
+    let mut stmt = conn.prepare("SELECT kind, COUNT(*) FROM SyncItems GROUP BY kind")?;
     let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)))?;
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
@@ -235,9 +235,14 @@ fn apply_video(conn: &Connection, item: &Item) -> R<bool> {
             ensure_wdbs_path_exists_with_conn(conn, &storage_to_display_path(w)).map_err(db)?;
         }
     }
+    let existed = conn
+        .query_row("SELECT 1 FROM Videos WHERE video_id = ?1", params![item.key], |_| Ok(()))
+        .optional()
+        .map_err(db)?
+        .is_some();
     upsert_coalesce(
         conn,
-        "videos",
+        "Videos",
         "video_id",
         &item.key,
         &[
@@ -250,15 +255,26 @@ fn apply_video(conn: &Connection, item: &Item) -> R<bool> {
             ("view_count", i(&d.view_count)),
             ("published_at", s(&d.published_at)),
             ("tags", s(&d.tags)),
+            // Part of the insert, not a follow-up UPDATE: the production database's insert trigger
+            // (trgVideosBeforeINS_Videos_SyncBioHandle) only infers a WDBS for a row that arrives
+            // without one, by scanning every video the creator already has. That is quadratic over a
+            // whole library (minutes for thousands of videos), and pointless when the pack has the value.
+            ("WDBS", wdbs.map(|w| Sql::Text(w.to_string())).unwrap_or(Sql::Null)),
         ],
         &[],
     )
     .map_err(db)?;
-    if let Some(w) = wdbs {
-        conn.execute("UPDATE videos SET WDBS = ?1 WHERE video_id = ?2", params![w, item.key]).map_err(db)?;
+    // A kinpak also carries when the video was added, so a copied library keeps its Library
+    // ordering. Only for rows this import created: a video you already had keeps its own date.
+    if !existed {
+        if let Some(added) = item.data.get("date_added").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+            conn.execute("UPDATE Videos SET date_added = ?1 WHERE video_id = ?2", params![added, item.key]).map_err(db)?;
+        }
     }
-    if d.transcript.is_some() {
-        regenerate_tokens_from_transcript(conn, &item.key).map_err(db)?;
+    // Search tokens, in Rust rather than the SQL that save_video uses for a single transcript: that
+    // one slows down with the square of the transcript's length, which adds up over a whole library.
+    if let Some(transcript) = &d.transcript {
+        set_tokens_from_transcript(conn, &item.key, transcript, &load_stop_words(conn)).map_err(db)?;
     }
     Ok(true)
 }
@@ -272,7 +288,7 @@ fn apply_video_link(conn: &Connection, item: &Item) -> R<bool> {
         ensure_wdbs_path_exists_with_conn(conn, &storage_to_display_path(&d.wdbs)).map_err(db)?;
     }
     conn.execute(
-        "INSERT OR IGNORE INTO video_wdbs_links (video_id, wdbs) VALUES (?1, ?2)",
+        "INSERT OR IGNORE INTO VideoWDBSLinks (video_id, wdbs) VALUES (?1, ?2)",
         params![d.video_id, d.wdbs],
     )
     .map_err(db)?;
@@ -283,7 +299,7 @@ fn apply_glossary(conn: &Connection, item: &Item) -> R<bool> {
     let d: GlossaryData = parse(item)?;
     upsert_coalesce(
         conn,
-        "glossary",
+        "Glossary",
         "term",
         &item.key,
         &[("definition", s(&d.definition))],
@@ -306,7 +322,7 @@ fn apply_biography(conn: &Connection, item: &Item) -> R<bool> {
     let d: BiographyData = parse(item)?;
     upsert_coalesce(
         conn,
-        "biographies",
+        "Biographies",
         "handle",
         &item.key,
         &[
@@ -326,7 +342,9 @@ fn apply_biography(conn: &Connection, item: &Item) -> R<bool> {
             ("channel_id", s(&d.channel_id)),
             ("subscriber_count", i(&d.subscriber_count)),
         ],
-        &[],
+        // A maintained database declares channel_id NOT NULL with no default, and a pack from a
+        // creator with no known channel ID leaves it out; "" is the app's own "unknown".
+        &[("channel_id", Sql::Text(String::new()))],
     )
     .map_err(db)?;
     Ok(true)
@@ -336,7 +354,7 @@ fn apply_custom_prompt(conn: &Connection, item: &Item) -> R<bool> {
     let d: CustomPromptData = parse(item)?;
     upsert_coalesce(
         conn,
-        "custom_prompts",
+        "CustomPrompts",
         "handle",
         &item.key,
         &[
@@ -360,14 +378,14 @@ enum Outcome {
 /// `track` = the item comes from the sync server, so its row becomes server-owned. Without it (a
 /// pack imported from a file) the row stays plain local data, and rows the server already owns are
 /// left alone so an import can never override what the server is responsible for.
-fn apply_item(conn: &Connection, item: &Item, force: bool, track: bool) -> R<Outcome> {
+fn apply_item(conn: &Connection, item: &Item, force: bool, track: bool, max_item: usize) -> R<Outcome> {
     let Some(kind) = Kind::parse(&item.kind) else {
         return Ok(Outcome::Skipped);
     };
     validate_key(&item.key)?;
-    // Cheap size guard before doing any work with the payload.
-    if item.data.to_string().len() > MAX_ITEM_BYTES {
-        return Err(format!("item larger than {MAX_ITEM_BYTES} bytes"));
+    // Cheap size guard before doing any work with the payload (off for a pack the user chose).
+    if max_item != usize::MAX && item.data.to_string().len() > max_item {
+        return Err(format!("item larger than {max_item} bytes"));
     }
     // The server's own `hash` is never trusted as a cache key: it's recomputed from the payload.
     let hash = content_hash(&item.kind, &item.key, &item.data);
@@ -400,12 +418,12 @@ fn apply_item(conn: &Connection, item: &Item, force: bool, track: bool) -> R<Out
 fn wdbs_in_use(conn: &Connection, display_key: &str) -> Result<bool> {
     let storage = display_to_storage_path(display_key);
     let used_by_videos: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM videos WHERE WDBS = ?1 OR substr(WDBS, 1, length(?1) + 1) = ?1 || '_'",
+        "SELECT COUNT(*) FROM Videos WHERE WDBS = ?1 OR substr(WDBS, 1, length(?1) + 1) = ?1 || '_'",
         params![storage],
         |r| r.get(0),
     )?;
     let used_by_links: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM video_wdbs_links WHERE wdbs = ?1 OR substr(wdbs, 1, length(?1) + 1) = ?1 || '_'",
+        "SELECT COUNT(*) FROM VideoWDBSLinks WHERE wdbs = ?1 OR substr(wdbs, 1, length(?1) + 1) = ?1 || '_'",
         params![storage],
         |r| r.get(0),
     )?;
@@ -441,10 +459,10 @@ fn apply_delete(conn: &Connection, t: &Tombstone) -> R<DeleteOutcome> {
             }
         }
         Kind::Video => {
-            conn.execute("DELETE FROM videos WHERE video_id = ?1", params![t.key]).map_err(db)?;
+            conn.execute("DELETE FROM Videos WHERE video_id = ?1", params![t.key]).map_err(db)?;
             // Link rows go with the video (trigger); their ownership rows would otherwise dangle.
             conn.execute(
-                "DELETE FROM sync_items WHERE kind = 'video_link'
+                "DELETE FROM SyncItems WHERE kind = 'video_link'
                  AND substr(item_key, 1, length(?1) + 1) = ?1 || '|'",
                 params![t.key],
             )
@@ -454,7 +472,7 @@ fn apply_delete(conn: &Connection, t: &Tombstone) -> R<DeleteOutcome> {
         Kind::VideoLink => {
             if let Some((video_id, wdbs)) = split_link_key(&t.key) {
                 conn.execute(
-                    "DELETE FROM video_wdbs_links WHERE video_id = ?1 AND wdbs = ?2",
+                    "DELETE FROM VideoWDBSLinks WHERE video_id = ?1 AND wdbs = ?2",
                     params![video_id, wdbs],
                 )
                 .map_err(db)?;
@@ -462,16 +480,16 @@ fn apply_delete(conn: &Connection, t: &Tombstone) -> R<DeleteOutcome> {
             DeleteOutcome::Deleted
         }
         Kind::Glossary => {
-            conn.execute("DELETE FROM glossary WHERE term = ?1", params![t.key]).map_err(db)?;
-            conn.execute("DELETE FROM glossary_drives WHERE term = ?1", params![t.key]).map_err(db)?;
+            conn.execute("DELETE FROM Glossary WHERE term = ?1", params![t.key]).map_err(db)?;
+            conn.execute("DELETE FROM GlossaryDrives WHERE term = ?1", params![t.key]).map_err(db)?;
             DeleteOutcome::Deleted
         }
         Kind::Biography => {
-            conn.execute("DELETE FROM biographies WHERE handle = ?1", params![t.key]).map_err(db)?;
+            conn.execute("DELETE FROM Biographies WHERE handle = ?1", params![t.key]).map_err(db)?;
             DeleteOutcome::Deleted
         }
         Kind::CustomPrompt => {
-            conn.execute("DELETE FROM custom_prompts WHERE handle = ?1", params![t.key]).map_err(db)?;
+            conn.execute("DELETE FROM CustomPrompts WHERE handle = ?1", params![t.key]).map_err(db)?;
             DeleteOutcome::Deleted
         }
     };
@@ -520,13 +538,16 @@ fn apply_deletes_in(tx: &mut rusqlite::Transaction, deletes: &[Tombstone]) -> Re
 /// tombstones, all in a single transaction so the UI never sees a half-applied page. `force`
 /// rewrites rows even when their content hash is unchanged (Full resync).
 pub fn apply_page(conn: &mut Connection, upserts: &[Item], deletes: &[Tombstone], force: bool) -> Result<ApplyStats> {
-    apply_page_with(conn, upserts, deletes, force, true)
+    apply_page_with(conn, upserts, deletes, force, true, MAX_ITEM_BYTES)
 }
 
 /// Applies a batch of items from an imported pack as ordinary local rows (no server ownership).
 /// Existing local rows are merged with the same "non-null wins" rule; server-owned rows are skipped.
+///
+/// No size cap on an item: a kinpak is a file the user picked, and a long transcript is as long as
+/// it is. (The sync server path keeps `MAX_ITEM_BYTES`.)
 pub fn import_items(conn: &mut Connection, items: &[Item]) -> Result<ApplyStats> {
-    apply_page_with(conn, items, &[], true, false)
+    apply_page_with(conn, items, &[], true, false, usize::MAX)
 }
 
 fn apply_page_with(
@@ -535,6 +556,7 @@ fn apply_page_with(
     deletes: &[Tombstone],
     force: bool,
     track: bool,
+    max_item: usize,
 ) -> Result<ApplyStats> {
     let mut tx = conn.transaction()?;
     let mut stats = ApplyStats::default();
@@ -543,7 +565,7 @@ fn apply_page_with(
     ordered.sort_by_key(|it| kind_rank(&it.kind));
     for item in ordered {
         let sp = tx.savepoint()?;
-        match apply_item(&sp, item, force, track) {
+        match apply_item(&sp, item, force, track, max_item) {
             Ok(Outcome::Applied) => {
                 sp.commit()?;
                 stats.upserted += 1;
@@ -567,13 +589,13 @@ fn apply_page_with(
 /// Marks every owned row as not-yet-seen. Rows the snapshot then delivers (changed or not) are
 /// marked seen again, so whatever is still unseen afterwards no longer exists on the server.
 pub fn begin_full_resync(conn: &Connection) -> Result<()> {
-    conn.execute("UPDATE sync_items SET seen = 0", [])?;
+    conn.execute("UPDATE SyncItems SET seen = 0", [])?;
     Ok(())
 }
 
 pub fn sweep_unseen(conn: &mut Connection) -> Result<ApplyStats> {
     let stale: Vec<Tombstone> = {
-        let mut stmt = conn.prepare("SELECT kind, item_key FROM sync_items WHERE seen = 0")?;
+        let mut stmt = conn.prepare("SELECT kind, item_key FROM SyncItems WHERE seen = 0")?;
         let rows = stmt.query_map([], |row| {
             Ok(Tombstone { kind: row.get(0)?, key: row.get(1)?, rev: 0 })
         })?;
@@ -586,20 +608,20 @@ pub fn sweep_unseen(conn: &mut Connection) -> Result<ApplyStats> {
 
 /// Keeps every synced row but forgets that the server owned it, so it becomes ordinary local data.
 pub fn disown_all(conn: &Connection) -> Result<u64> {
-    Ok(conn.execute("DELETE FROM sync_items", [])? as u64)
+    Ok(conn.execute("DELETE FROM SyncItems", [])? as u64)
 }
 
 /// Removes every server-owned row (taxonomy nodes still in use survive, just disowned).
 pub fn remove_all_owned(conn: &mut Connection) -> Result<ApplyStats> {
     let owned: Vec<Tombstone> = {
-        let mut stmt = conn.prepare("SELECT kind, item_key FROM sync_items")?;
+        let mut stmt = conn.prepare("SELECT kind, item_key FROM SyncItems")?;
         let rows = stmt.query_map([], |row| {
             Ok(Tombstone { kind: row.get(0)?, key: row.get(1)?, rev: 0 })
         })?;
         rows.filter_map(|r| r.ok()).collect()
     };
     let stats = apply_deletes(conn, &owned)?;
-    conn.execute("DELETE FROM sync_items", [])?;
+    conn.execute("DELETE FROM SyncItems", [])?;
     Ok(stats)
 }
 
@@ -611,7 +633,7 @@ pub fn remove_all_owned(conn: &mut Connection) -> Result<ApplyStats> {
 pub fn apply_policy(conn: &mut Connection, policy: &Policy) -> Result<PolicyStats> {
     let tx = conn.transaction()?;
     let mut stats = PolicyStats::default();
-    tx.execute("DELETE FROM sync_policy", [])?;
+    tx.execute("DELETE FROM SyncPolicy", [])?;
     for (key, value) in &policy.settings {
         let locked = policy.locked.iter().any(|k| k == key);
         if !locked || !is_syncable_setting(key) || value.len() > MAX_POLICY_VALUE_BYTES {
@@ -619,7 +641,7 @@ pub fn apply_policy(conn: &mut Connection, policy: &Policy) -> Result<PolicyStat
             continue;
         }
         tx.execute(
-            "INSERT OR REPLACE INTO sync_policy (key, value, locked) VALUES (?1, ?2, 1)",
+            "INSERT OR REPLACE INTO SyncPolicy (key, value, locked) VALUES (?1, ?2, 1)",
             params![key, value],
         )?;
         stats.applied += 1;
@@ -629,13 +651,13 @@ pub fn apply_policy(conn: &mut Connection, policy: &Policy) -> Result<PolicyStat
 }
 
 pub fn clear_policy(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM sync_policy", [])?;
+    conn.execute("DELETE FROM SyncPolicy", [])?;
     Ok(())
 }
 
 #[cfg(test)]
 pub fn policy_count(conn: &Connection) -> Result<u64> {
-    Ok(conn.query_row("SELECT COUNT(*) FROM sync_policy", [], |r| r.get::<_, i64>(0))? as u64)
+    Ok(conn.query_row("SELECT COUNT(*) FROM SyncPolicy", [], |r| r.get::<_, i64>(0))? as u64)
 }
 
 #[cfg(test)]
@@ -673,7 +695,7 @@ mod tests {
         let db_path = temp_db("adopt");
         let mut conn = open_sync_conn(&db_path).unwrap();
         conn.execute(
-            "INSERT INTO videos (video_id, title, summary, transcript) VALUES ('vid1', 'Local title', 'My own summary', 'old words')",
+            "INSERT INTO Videos (video_id, title, summary, transcript) VALUES ('vid1', 'Local title', 'My own summary', 'old words')",
             [],
         )
         .unwrap();
@@ -686,19 +708,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stats.upserted, 1, "{:?}", stats.errors);
-        assert_eq!(text(&conn, "SELECT title FROM videos WHERE video_id='vid1'").as_deref(), Some("Server title"));
+        assert_eq!(text(&conn, "SELECT title FROM Videos WHERE video_id='vid1'").as_deref(), Some("Server title"));
         assert_eq!(
-            text(&conn, "SELECT summary FROM videos WHERE video_id='vid1'").as_deref(),
+            text(&conn, "SELECT summary FROM Videos WHERE video_id='vid1'").as_deref(),
             Some("My own summary"),
             "a null server field must not clobber the local value"
         );
         // Transcript stored verbatim (no footer/blockquote hooks), and tokens derived locally.
         assert_eq!(
-            text(&conn, "SELECT transcript FROM videos WHERE video_id='vid1'").as_deref(),
+            text(&conn, "SELECT transcript FROM Videos WHERE video_id='vid1'").as_deref(),
             Some("fresh transcript words")
         );
-        assert!(text(&conn, "SELECT tokens FROM videos WHERE video_id='vid1'").unwrap_or_default().contains("fresh"));
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM sync_items WHERE kind='video' AND item_key='vid1'"), 1);
+        assert!(text(&conn, "SELECT tokens FROM Videos WHERE video_id='vid1'").unwrap_or_default().contains("fresh"));
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM SyncItems WHERE kind='video' AND item_key='vid1'"), 1);
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -710,13 +732,13 @@ mod tests {
         assert_eq!(apply_page(&mut conn, &[it.clone()], &[], false).unwrap().upserted, 1);
         assert_eq!(apply_page(&mut conn, &[it.clone()], &[], false).unwrap().unchanged, 1);
 
-        conn.execute("UPDATE glossary SET definition = 'edited locally' WHERE term = 'term'", []).unwrap();
+        conn.execute("UPDATE Glossary SET definition = 'edited locally' WHERE term = 'term'", []).unwrap();
         // Same hash: delta sync leaves the user's local edit alone...
         apply_page(&mut conn, &[it.clone()], &[], false).unwrap();
-        assert_eq!(text(&conn, "SELECT definition FROM glossary WHERE term='term'").as_deref(), Some("edited locally"));
+        assert_eq!(text(&conn, "SELECT definition FROM Glossary WHERE term='term'").as_deref(), Some("edited locally"));
         // ...a forced (Full resync) pass restores the server's version.
         assert_eq!(apply_page(&mut conn, &[it], &[], true).unwrap().upserted, 1);
-        assert_eq!(text(&conn, "SELECT definition FROM glossary WHERE term='term'").as_deref(), Some("d"));
+        assert_eq!(text(&conn, "SELECT definition FROM Glossary WHERE term='term'").as_deref(), Some("d"));
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -724,15 +746,15 @@ mod tests {
     fn tombstones_only_delete_owned_rows() {
         let db_path = temp_db("tomb");
         let mut conn = open_sync_conn(&db_path).unwrap();
-        conn.execute("INSERT INTO glossary (term, definition) VALUES ('mine', 'local')", []).unwrap();
+        conn.execute("INSERT INTO Glossary (term, definition) VALUES ('mine', 'local')", []).unwrap();
         apply_page(&mut conn, &[item("glossary", "theirs", json!({"definition": "server"}))], &[], false).unwrap();
 
         let stats = apply_page(&mut conn, &[], &[tomb("glossary", "mine"), tomb("glossary", "theirs")], false).unwrap();
         assert_eq!(stats.deleted, 1);
         assert_eq!(stats.skipped, 1);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary WHERE term='mine'"), 1, "local row must survive");
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary WHERE term='theirs'"), 0);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM sync_items"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='mine'"), 1, "local row must survive");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='theirs'"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM SyncItems"), 0);
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -747,7 +769,7 @@ mod tests {
         ];
         let stats = apply_page(&mut conn, &items, &[], false).unwrap();
         assert_eq!(stats.upserted, 2, "{:?}", stats.errors);
-        assert_eq!(text(&conn, "SELECT WDBS FROM videos WHERE video_id='vidA'").as_deref(), Some("θψUAP_GERB"));
+        assert_eq!(text(&conn, "SELECT WDBS FROM Videos WHERE video_id='vidA'").as_deref(), Some("θψUAP_GERB"));
         assert_eq!(text(&conn, "SELECT WDInfo FROM tblWDBS WHERE WDBS=':UAP-GERB'").as_deref(), Some("Gerb Alias"));
         assert_eq!(text(&conn, "SELECT WDIcon FROM tblWDBS WHERE WDBS=':UAP-GERB'").as_deref(), Some("star"));
         // The parent level was created too.
@@ -773,12 +795,12 @@ mod tests {
         assert_eq!(stats.upserted, 0);
         assert_eq!(stats.skipped, 1, "unknown kinds are skipped, not fatal");
         assert_eq!(stats.errors.len(), 2, "{:?}", stats.errors);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM sync_items"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM SyncItems"), 0);
         let _ = std::fs::remove_file(&db_path);
     }
 
     fn drives_of(conn: &Connection, term: &str) -> Vec<String> {
-        let mut stmt = conn.prepare("SELECT root FROM glossary_drives WHERE term = ?1 ORDER BY root").unwrap();
+        let mut stmt = conn.prepare("SELECT root FROM GlossaryDrives WHERE term = ?1 ORDER BY root").unwrap();
         stmt.query_map([term], |r| r.get::<_, String>(0)).unwrap().filter_map(|r| r.ok()).collect()
     }
 
@@ -818,8 +840,8 @@ mod tests {
         .unwrap();
         assert_eq!(stats.upserted, 0);
         assert_eq!(stats.errors.len(), 1, "{:?}", stats.errors);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary WHERE term = 'Bad'"), 0, "the term itself was rolled back too");
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary_drives"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term = 'Bad'"), 0, "the term itself was rolled back too");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM GlossaryDrives"), 0);
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -841,7 +863,7 @@ mod tests {
         assert_eq!(drives_of(&conn, "Std"), vec![":CRYPTO"]);
 
         apply_page(&mut conn, &[], &[tomb("glossary", "Std")], false).unwrap();
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary_drives"), 0, "no orphaned assignments");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM GlossaryDrives"), 0, "no orphaned assignments");
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -861,7 +883,7 @@ mod tests {
         .unwrap();
         assert_eq!(stats.upserted, 1);
         assert_eq!(stats.errors.len(), 1);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary WHERE term='good'"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='good'"), 1);
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -869,7 +891,7 @@ mod tests {
     fn full_resync_sweeps_rows_the_server_no_longer_has() {
         let db_path = temp_db("sweep");
         let mut conn = open_sync_conn(&db_path).unwrap();
-        conn.execute("INSERT INTO glossary (term, definition) VALUES ('local', 'x')", []).unwrap();
+        conn.execute("INSERT INTO Glossary (term, definition) VALUES ('local', 'x')", []).unwrap();
         apply_page(
             &mut conn,
             &[
@@ -886,9 +908,9 @@ mod tests {
         apply_page(&mut conn, &[item("glossary", "keep", json!({"definition": "k"}))], &[], false).unwrap();
         let stats = sweep_unseen(&mut conn).unwrap();
         assert_eq!(stats.deleted, 1);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary WHERE term='stale'"), 0);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary WHERE term='keep'"), 1);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary WHERE term='local'"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='stale'"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='keep'"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='local'"), 1);
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -906,10 +928,10 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM video_wdbs_links WHERE video_id='vidB'"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM VideoWDBSLinks WHERE video_id='vidB'"), 1);
         apply_page(&mut conn, &[], &[tomb("video", "vidB")], false).unwrap();
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM videos WHERE video_id='vidB'"), 0);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM sync_items WHERE kind='video_link'"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Videos WHERE video_id='vidB'"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM SyncItems WHERE kind='video_link'"), 0);
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -919,11 +941,11 @@ mod tests {
         let mut conn = open_sync_conn(&db_path).unwrap();
         apply_page(&mut conn, &[item("wdbs", ":CRYPTO", json!({"lev": 1, "wdid": "CRYPTO"}))], &[], false).unwrap();
         // The user files one of their own videos there.
-        conn.execute("INSERT INTO videos (video_id, title, WDBS) VALUES ('mine', 'm', 'θψCRYPTO')", []).unwrap();
+        conn.execute("INSERT INTO Videos (video_id, title, WDBS) VALUES ('mine', 'm', 'θψCRYPTO')", []).unwrap();
         let stats = apply_page(&mut conn, &[], &[tomb("wdbs", ":CRYPTO")], false).unwrap();
         assert_eq!(stats.disowned, 1);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM tblWDBS WHERE WDBS=':CRYPTO'"), 1);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM sync_items"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM SyncItems"), 0);
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -946,8 +968,8 @@ mod tests {
         let stats = apply_policy(&mut conn, &policy).unwrap();
         assert_eq!(stats.applied, 1);
         assert_eq!(stats.dropped, 5);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM sync_policy"), 1);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM sync_policy WHERE key LIKE '%api_key%'"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM SyncPolicy"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM SyncPolicy WHERE key LIKE '%api_key%'"), 0);
         assert_eq!(crate::db::get_setting(&db_path, "showBiography").unwrap().as_deref(), Some("false"));
 
         // A new policy replaces the old one wholesale (so removing a lock server-side releases it).
@@ -964,13 +986,13 @@ mod tests {
         assert_eq!(owned_counts(&conn).unwrap().get("glossary"), Some(&1));
 
         assert_eq!(disown_all(&conn).unwrap(), 1);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary WHERE term='g'"), 1, "keep: row becomes local");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='g'"), 1, "keep: row becomes local");
 
         apply_page(&mut conn, &[item("glossary", "h", json!({"definition": "d"}))], &[], false).unwrap();
         let stats = remove_all_owned(&mut conn).unwrap();
         assert_eq!(stats.deleted, 1);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary WHERE term='h'"), 0);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM glossary WHERE term='g'"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='h'"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='g'"), 1);
         let _ = std::fs::remove_file(&db_path);
     }
 }

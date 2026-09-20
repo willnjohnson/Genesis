@@ -1,6 +1,6 @@
 [package]
 name = "kinesis"
-version = "0.4.3"
+version = "0.4.4"
 description = "A desktop application for saving and organizing YouTube video transcripts."
 authors = ["William N. Johnson"]
 license = "MIT"
@@ -44,7 +44,7 @@ tauri-plugin-shell = "2.3.5"
 tauri-plugin-dialog = "2"
 tauri-plugin-localhost = "2"
 tiny_http = "0.12"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 chrono = "0.4"
 futures = "0.3"
 tokio = { version = "1.49.0", features = ["full"] }
@@ -52,6 +52,8 @@ base64 = "0.21"
 # Attachments: sha256 for content addressing/integrity, deflate for lossless compression.
 sha2 = "0.10"
 flate2 = "1"
+# One Kinesis window per workspace: an exclusive lock file next to the database.
+fs2 = "0.4"
 kinesis-sync-proto = { path = "../crates/kinesis-sync-proto", features = ["sqlite"] }
 
 [dev-dependencies]

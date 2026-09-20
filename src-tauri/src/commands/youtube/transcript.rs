@@ -2,37 +2,63 @@ use tauri::command;
 use crate::{get_db_path, db};
 use crate::youtube::{self, YouTubeClient, ClientType};
 
-/// Fetches a video's transcript from YouTube, retrying transient failures a few times and
-/// rejecting bot-detection/rate-limit pages that can slip through as transcript text.
+/// Fetches a video's transcript from YouTube, with no API key: it comes from the video's own caption
+/// tracks, which YouTube serves to anyone. It asks as the Android app first and, if that gets nowhere,
+/// as the iOS app, retrying a transient failure once, and rejects bot-detection/rate-limit pages that
+/// can slip through as transcript text. When there's no transcript it says why: the video has no
+/// captions, YouTube won't play it, or YouTube is limiting requests right now.
 pub(crate) async fn fetch_transcript_with_retries(video_id: &str) -> Result<String, String> {
-    let client_android = YouTubeClient::new(ClientType::Android);
+    let mut saw_captionless_video = false;
+    let mut unplayable: Option<String> = None;
+    let mut blocked: Option<String> = None;
 
-    let mut transcript = String::new();
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        let p = client_android.player(video_id).await?;
-        match youtube::fetch_transcript(&p).await {
-            Ok(Some(t)) if !t.trim().is_empty() => { transcript = t; break; }
-            Ok(_) | Err(_) if attempts < 3 => {
+    for client_type in [ClientType::Android, ClientType::Ios] {
+        let client = YouTubeClient::new(client_type);
+        for attempt in 1..=2 {
+            let player = match client.player(video_id).await {
+                Ok(p) => p,
+                Err(e) => {
+                    blocked = Some(e);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+            };
+            // A video YouTube won't play won't hand out captions either; asking again changes nothing.
+            if let Some(reason) = youtube::playability_problem(&player) {
+                unplayable = Some(reason);
+                break;
+            }
+            match youtube::fetch_transcript(&player).await {
+                Ok(Some(t)) if !t.trim().is_empty() => {
+                    // Bot-detection / rate-limit text can arrive as if it were a transcript.
+                    if youtube::contains_bot_detection_text(&t.to_lowercase()) {
+                        blocked = Some("YouTube returned a bot-detection page instead of a transcript.".to_string());
+                        break;
+                    }
+                    return Ok(t);
+                }
+                Ok(_) if !youtube::has_caption_tracks(&player) => {
+                    saw_captionless_video = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => blocked = Some(e),
+            }
+            if attempt < 2 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             }
-            _ => break,
         }
     }
 
-    if transcript.is_empty() {
-        return Err("Cannot fetch transcript for this video.".to_string());
-    }
-
-    // Reject transcript if it contains YouTube's bot-detection / rate-limit text. This catches
-    // cases where the error slipped through XML parsing as text nodes.
-    let transcript_lower = transcript.to_lowercase();
-    if youtube::contains_bot_detection_text(&transcript_lower) {
-        return Err("YouTube returned a bot-detection page instead of a transcript. Please wait a moment and try again.".to_string());
-    }
-
-    Ok(transcript)
+    Err(if saw_captionless_video {
+        "This video has no captions, so there's no transcript to get.".to_string()
+    } else if let Some(reason) = unplayable {
+        format!("YouTube won't provide this video's transcript: {reason}.")
+    } else if let Some(problem) = blocked {
+        format!("Couldn't get the transcript right now. {problem}")
+    } else {
+        "Cannot fetch transcript for this video.".to_string()
+    })
 }
 
 #[command]
@@ -44,11 +70,7 @@ pub async fn fetch_transcript(app: tauri::AppHandle, video_id: String) -> Result
         if !t.trim().is_empty() { return Ok(t); }
     }
 
-    // Own key or a sync-server license; the transcript fetch itself doesn't use the Data API.
-    if crate::sync::license::route(&db_path, "youtube").is_none() {
-        return Err("API_KEY_MISSING".to_string());
-    }
-
+    // No API key needed: a transcript comes from the video's own caption tracks, not the Data API.
     fetch_transcript_with_retries(&video_id).await
 }
 
@@ -65,4 +87,22 @@ pub async fn save_transcript(app: tauri::AppHandle, video_id: String, transcript
     };
 
     db::save_transcript(&db_path, &video_id, &transcript).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// `cargo test --lib live_ -- --ignored --nocapture` asks YouTube. No API key is involved anywhere.
+    #[tokio::test]
+    #[ignore]
+    async fn live_transcript_without_an_api_key() {
+        // A TED talk with English captions.
+        let text = fetch_transcript_with_retries("arj7oStGLkU").await.expect("a transcript");
+        println!("{} characters; starts: {}", text.len(), text.chars().take(120).collect::<String>().replace('\n', " / "));
+        assert!(text.len() > 5_000);
+        assert!(text.to_lowercase().contains("procrastinat"));
+        // Not an HTML error page or bot-check text.
+        assert!(!crate::youtube::contains_bot_detection_text(&text.to_lowercase()));
+    }
 }

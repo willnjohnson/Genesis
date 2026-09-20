@@ -26,7 +26,7 @@ pub fn list_videos(
     let where_sql = filter_kind_where("", filter_kind);
 
     let total: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM videos WHERE {where_sql}"),
+        &format!("SELECT COUNT(*) FROM Videos WHERE {where_sql}"),
         [],
         |row| row.get(0),
     )?;
@@ -34,7 +34,7 @@ pub fn list_videos(
     let columns = video_columns_sql("");
     let order = library_order_by("", sort_field, sort_order);
     let query = format!(
-        "SELECT {columns} FROM videos WHERE {where_sql} ORDER BY {order} LIMIT ?1 OFFSET ?2"
+        "SELECT {columns} FROM Videos WHERE {where_sql} ORDER BY {order} LIMIT ?1 OFFSET ?2"
     );
 
     let mut stmt = conn.prepare(&query)?;
@@ -65,20 +65,30 @@ pub fn save_video(
     let video_id = video_id.trim();
     let published_at = normalize_published_at(published_at);
     let conn = Connection::open(db_path)?;
-    conn.execute(
-        "INSERT INTO videos (video_id, title, author, length_seconds, transcript, view_count, published_at, handle, summary)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-         ON CONFLICT(video_id) DO UPDATE SET
-            title=excluded.title,
-            author=excluded.author,
-            length_seconds=excluded.length_seconds,
-            transcript=excluded.transcript,
-            view_count=excluded.view_count,
-            published_at=excluded.published_at,
-            handle=excluded.handle,
-            summary=COALESCE(excluded.summary, videos.summary)",
+    // Update first, insert only when there's no such video. An upsert (INSERT .. ON CONFLICT DO UPDATE)
+    // can't be used: the production database's BEFORE INSERT trigger (trgVideosBeforeINS_Videos_SyncBioHandle)
+    // re-inserts the row itself and cancels the original, so for a video that already exists the
+    // ON CONFLICT clause never gets a say and the re-insert fails with a UNIQUE violation.
+    let updated = conn.execute(
+        "UPDATE Videos SET
+            title=?2,
+            author=?3,
+            length_seconds=?4,
+            transcript=?5,
+            view_count=?6,
+            published_at=?7,
+            handle=?8,
+            summary=COALESCE(?9, summary)
+         WHERE video_id=?1",
         params![video_id, title, author, length, transcript, view_count, published_at, handle, summary],
     )?;
+    if updated == 0 {
+        conn.execute(
+            "INSERT INTO Videos (video_id, title, author, length_seconds, transcript, view_count, published_at, handle, summary)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![video_id, title, author, length, transcript, view_count, published_at, handle, summary],
+        )?;
+    }
     // The production database's own INSERT trigger defaults a new video's WDBS to the raw "θψ"
     // prefix marker when it can't infer anything smarter (see the schema handoff doc). Since
     // "θψ" is alphabetic and also the universal prefix every real WDBS value starts with, FTS5
@@ -87,7 +97,7 @@ pub fn save_video(
     // problem the one-time migration in schema.rs::init_db already cleaned up for existing ones.
     // Cheap: video_id is the primary key, so this never scans the table.
     let _ = conn.execute(
-        "UPDATE videos SET WDBS = ':' WHERE video_id = ?1 AND WDBS = 'θψ'",
+        "UPDATE Videos SET WDBS = ':' WHERE video_id = ?1 AND WDBS = 'θψ'",
         params![video_id],
     );
     regenerate_tokens_from_transcript(&conn, video_id)?;
@@ -108,16 +118,16 @@ pub fn delete_video(db_path: &str, video_id: &str) -> Result<()> {
     use super::links::{apply_link_edits, LinkEdit, LinkKind};
     let conn = Connection::open(db_path)?;
     let handle: Option<String> = conn
-        .query_row("SELECT handle FROM videos WHERE video_id = ?", params![video_id], |r| r.get(0))
+        .query_row("SELECT handle FROM Videos WHERE video_id = ?", params![video_id], |r| r.get(0))
         .optional()?
         .flatten();
-    conn.execute("DELETE FROM videos WHERE video_id = ?", params![video_id])?;
+    conn.execute("DELETE FROM Videos WHERE video_id = ?", params![video_id])?;
 
     let mut edits = vec![LinkEdit::Unlink(LinkKind::Video, video_id.to_string())];
     if let Some(handle) = handle.filter(|h| !h.trim().is_empty()) {
         let bio_remains: bool = conn
             .query_row(
-                "SELECT 1 FROM biographies WHERE lower(handle) = lower(?)",
+                "SELECT 1 FROM Biographies WHERE lower(handle) = lower(?)",
                 params![handle],
                 |_| Ok(()),
             )
@@ -141,7 +151,7 @@ pub fn get_video_by_id(db_path: &str, video_id: &str, include_content: bool) -> 
     let conn = Connection::open(db_path)?;
     let columns = video_columns_sql("");
     conn.query_row(
-        &format!("SELECT {columns} FROM videos WHERE video_id = ?1"),
+        &format!("SELECT {columns} FROM Videos WHERE video_id = ?1"),
         params![video_id.trim()],
         |row| video_row(row, include_content),
     )
@@ -150,7 +160,7 @@ pub fn get_video_by_id(db_path: &str, video_id: &str, include_content: bool) -> 
 
 pub fn check_video_exists(db_path: &str, video_id: &str) -> Result<bool> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT 1 FROM videos WHERE video_id = ?")?;
+    let mut stmt = conn.prepare("SELECT 1 FROM Videos WHERE video_id = ?")?;
     let mut rows = stmt.query(params![video_id])?;
     Ok(rows.next()?.is_some())
 }
@@ -158,7 +168,7 @@ pub fn check_video_exists(db_path: &str, video_id: &str) -> Result<bool> {
 pub fn get_transcript(db_path: &str, video_id: &str) -> Result<Option<String>> {
     let video_id = video_id.trim();
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT transcript FROM videos WHERE video_id = ?")?;
+    let mut stmt = conn.prepare("SELECT transcript FROM Videos WHERE video_id = ?")?;
     let mut rows = stmt.query(params![video_id])?;
     if let Some(row) = rows.next()? {
         Ok(Some(row.get(0)?))
@@ -190,7 +200,7 @@ pub fn get_video_full(
     )>,
 > {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT video_id, title, author, length_seconds, transcript, view_count, published_at, handle, date_added, summary, tags FROM videos WHERE video_id = ?")?;
+    let mut stmt = conn.prepare("SELECT video_id, title, author, length_seconds, transcript, view_count, published_at, handle, date_added, summary, tags FROM Videos WHERE video_id = ?")?;
     let mut rows = stmt.query(params![video_id])?;
     if let Some(row) = rows.next()? {
         Ok(Some((
@@ -255,8 +265,8 @@ pub fn get_library_stats(db_path: &str) -> Result<LibraryStats> {
     let mut drives: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut paths: Vec<String> = Vec::new();
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT WDBS FROM videos WHERE WDBS IS NOT NULL AND WDBS != ''
-         UNION SELECT wdbs FROM video_wdbs_links WHERE wdbs != ''",
+        "SELECT WDBS FROM Videos WHERE WDBS IS NOT NULL AND WDBS != ''
+         UNION SELECT wdbs FROM VideoWDBSLinks WHERE wdbs != ''",
     ) {
         if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
             paths.extend(rows.filter_map(|r| r.ok()));
@@ -278,13 +288,13 @@ pub fn get_library_stats(db_path: &str) -> Result<LibraryStats> {
     }
 
     Ok(LibraryStats {
-        channel_count: count("SELECT COUNT(DISTINCT LOWER(LTRIM(handle, '@'))) FROM videos WHERE handle IS NOT NULL AND TRIM(handle, '@ ') != ''"),
+        channel_count: count("SELECT COUNT(DISTINCT LOWER(LTRIM(handle, '@'))) FROM Videos WHERE handle IS NOT NULL AND TRIM(handle, '@ ') != ''"),
         drive_count: drives.len() as i64,
-        glossary_count: count("SELECT COUNT(*) FROM glossary WHERE TRIM(definition) != ''"),
-        quick_tag_count: count("SELECT COUNT(*) FROM glossary WHERE TRIM(definition) = ''"),
-        biography_count: count("SELECT COUNT(*) FROM biographies"),
-        attachment_count: count("SELECT COUNT(*) FROM video_attachments"),
-        attachment_bytes: count("SELECT COALESCE(SUM(stored_size), 0) FROM attachment_blobs"),
+        glossary_count: count("SELECT COUNT(*) FROM Glossary WHERE TRIM(definition) != ''"),
+        quick_tag_count: count("SELECT COUNT(*) FROM Glossary WHERE TRIM(definition) = ''"),
+        biography_count: count("SELECT COUNT(*) FROM Biographies"),
+        attachment_count: count("SELECT COUNT(*) FROM VideoAttachments"),
+        attachment_bytes: count("SELECT COALESCE(SUM(stored_size), 0) FROM AttachmentBlobs"),
     })
 }
 
@@ -311,8 +321,8 @@ mod library_stats_tests {
         update_video_wdbs(&db, "d", ":").unwrap();
 
         let conn = Connection::open(&db).unwrap();
-        conn.execute("INSERT INTO glossary (term, definition) VALUES ('Halving', 'Cuts rewards'), ('Blank', '  '), ('Quick', '')", []).unwrap();
-        conn.execute("INSERT INTO biographies (handle, display_name) VALUES ('@One', 'One')", []).unwrap();
+        conn.execute("INSERT INTO Glossary (term, definition) VALUES ('Halving', 'Cuts rewards'), ('Blank', '  '), ('Quick', '')", []).unwrap();
+        conn.execute("INSERT INTO Biographies (handle, display_name) VALUES ('@One', 'One')", []).unwrap();
         drop(conn);
         crate::db::attachments::add_attachment(&db, "a", "n.txt", b"hello ".repeat(100)).unwrap();
 
@@ -349,7 +359,7 @@ pub fn get_video_count(
         _ => "1=1".to_string(),
     };
 
-    let query = format!("SELECT COUNT(*) FROM videos WHERE {}", search_where);
+    let query = format!("SELECT COUNT(*) FROM Videos WHERE {}", search_where);
 
     let mut stmt = conn.prepare(&query)?;
     let count: i64 = stmt.query_row([], |row| row.get(0))?;
@@ -359,7 +369,7 @@ pub fn get_video_count(
 pub fn save_transcript(db_path: &str, video_id: &str, transcript: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "UPDATE videos SET transcript = ?1 WHERE video_id = ?2",
+        "UPDATE Videos SET transcript = ?1 WHERE video_id = ?2",
         params![transcript, video_id],
     )?;
     regenerate_tokens_from_transcript(&conn, video_id)?;
@@ -369,7 +379,7 @@ pub fn save_transcript(db_path: &str, video_id: &str, transcript: &str) -> Resul
 pub fn save_tags(db_path: &str, video_id: &str, tags: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "UPDATE videos SET tags = ?1 WHERE video_id = ?2",
+        "UPDATE Videos SET tags = ?1 WHERE video_id = ?2",
         params![tags, video_id],
     )?;
     Ok(())
@@ -389,7 +399,7 @@ pub fn save_tags(db_path: &str, video_id: &str, tags: &str) -> Result<()> {
 pub fn update_video_wdbs(db_path: &str, video_id: &str, encoded_wdbs: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "UPDATE videos SET WDBS = ?1 WHERE video_id = ?2",
+        "UPDATE Videos SET WDBS = ?1 WHERE video_id = ?2",
         params![encoded_wdbs, video_id],
     )?;
     Ok(())
@@ -397,7 +407,7 @@ pub fn update_video_wdbs(db_path: &str, video_id: &str, encoded_wdbs: &str) -> R
 
 pub fn get_unique_handles(db_path: &str) -> Result<Vec<String>> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT DISTINCT handle FROM videos WHERE handle IS NOT NULL AND handle != '' ORDER BY handle")?;
+    let mut stmt = conn.prepare("SELECT DISTINCT handle FROM Videos WHERE handle IS NOT NULL AND handle != '' ORDER BY handle")?;
     let handles = stmt
         .query_map([], |row| row.get(0))?
         .filter_map(|r| r.ok())

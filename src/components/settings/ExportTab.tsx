@@ -7,7 +7,9 @@ import { parentDir } from "../../lib/utils";
 import { workspaceFileStem } from "../../lib/workspace";
 import { useFlags } from "../../hooks/useFlags";
 import { useWorkspace } from "../../hooks/useWorkspace";
-import { SyncPackExport } from "./SyncPackExport";
+import { KinpakExport } from "./KinpakExport";
+import { settingsPrimaryBtn } from "./buttons";
+import { ProgressLine } from "../workspace/shared";
 
 const EXPORT_PATH_SETTING_KEY = "obsidianExportPath";
 // The Save As dialog opens with a name built from the workspace's, e.g. Kinesis_Metabolic_Warp_Drive_Vault,
@@ -20,7 +22,7 @@ type ExportView = 'obsidian' | 'sync';
 // Same underline-tab styling as the Sidebar's Video Tags / Similar Videos switcher.
 const EXPORT_VIEWS: { id: ExportView; label: string; Icon: React.ElementType }[] = [
     { id: 'obsidian', label: 'Export to Obsidian', Icon: FileDown },
-    { id: 'sync', label: 'Export Syncable Data', Icon: Package },
+    { id: 'sync', label: 'Export Kinpak', Icon: Package },
 ];
 
 export function ExportTab() {
@@ -53,7 +55,7 @@ export function ExportTab() {
                 )}
                 {/* The available ones stay mounted (just hidden) so switching tabs doesn't drop a running export's progress. */}
                 {flags.exportObsidianVisible && <div className={view === 'obsidian' ? '' : 'hidden'}><ObsidianExport /></div>}
-                {flags.exportSyncDataVisible && <div className={view === 'sync' ? '' : 'hidden'}><SyncPackExport /></div>}
+                {flags.exportSyncDataVisible && <div className={view === 'sync' ? '' : 'hidden'}><KinpakExport /></div>}
             </div>
         </div>
     );
@@ -112,18 +114,13 @@ function ObsidianExport() {
                 <button
                     onClick={handleExport}
                     disabled={loading}
-                    className="w-full bg-red-600 text-white hover:bg-red-500 px-4 py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    className={`w-full ${settingsPrimaryBtn}`}
                 >
-                    <FileDown className="w-4 h-4" />
+                    <FileDown className="w-3.5 h-3.5" />
                     Export to Obsidian
                 </button>
 
-                {status && (
-                    <div className="mt-4 p-2.5 bg-red-600/10 border border-red-600/20 rounded-lg flex items-center gap-2">
-                        <div className="w-2.5 h-2.5 border-2 border-red-600 border-t-transparent rounded-full animate-spin" />
-                        <span className="text-[10px] font-bold text-red-500 uppercase tracking-wider">{status}</span>
-                    </div>
-                )}
+                {status && <div className="mt-4"><ProgressLine message={status} variant="runner" /></div>}
 
                 {error && (
                     <div className="mt-4 p-3 bg-red-900/20 border border-red-500/30 rounded-lg text-red-400 text-xs">

@@ -4,6 +4,7 @@ import './index.css'
 import App from './App.tsx'
 import { FlagsProvider } from './components/FlagsProvider'
 import { WorkspaceProvider } from './components/WorkspaceProvider'
+import { WorkspaceGate } from './components/workspace/WorkspaceGate'
 // image save handler for desktop builds
 import { setupImageSaveHandler } from './lib/image-save';
 
@@ -40,7 +41,9 @@ createRoot(document.getElementById('root')!).render(
   <ErrorBoundary>
     <FlagsProvider>
       <WorkspaceProvider>
-        <App />
+        <WorkspaceGate>
+          <App />
+        </WorkspaceGate>
       </WorkspaceProvider>
     </FlagsProvider>
   </ErrorBoundary>

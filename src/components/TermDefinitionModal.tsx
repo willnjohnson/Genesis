@@ -15,13 +15,15 @@ interface GlossaryTerm {
 interface Props {
     term: GlossaryTerm;
     onClose: () => void;
-    onSearch: (term: string, mode: 'tag' | 'library') => void;
+    onSearch: (term: string, mode: 'tag' | 'term' | 'library') => void;
 }
 
 export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
     // Which "search" buttons this modal offers is up to the DB owner (see lib/flags.ts).
     const { flags } = useFlags();
     const { labels } = useWorkspace();
+    // A term has a definition; a Quick Tag doesn't. They're searched separately in the library.
+    const isTerm = term.definition.trim() !== '';
     const showTag = flags.showGlossarySearchByTag;
     const showLibrarySearch = flags.showGlossarySearchInLibrary;
 
@@ -74,13 +76,13 @@ export function TermDefinitionModal({ term, onClose, onSearch }: Props) {
                         {showTag && (
                             <button
                                 onClick={() => {
-                                    onSearch(`"${term.term}"`, 'tag');
+                                    onSearch(`"${term.term}"`, isTerm ? 'term' : 'tag');
                                     onClose();
                                 }}
                                 className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
                             >
                                 <Hash className="w-3.5 h-3.5" />
-                                Search by Tag
+                                Search by {isTerm ? 'Term' : 'Tag'}
                             </button>
                         )}
                         {showLibrarySearch && (

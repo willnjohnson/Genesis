@@ -1,5 +1,6 @@
-import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, Copy, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, ListVideo, Paperclip, Monitor, Cloud } from 'lucide-react';
+import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, ClipboardPaste, Copy, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, BookA, ListVideo, Paperclip, Monitor, Cloud } from 'lucide-react';
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { PixelLoader } from './PixelLoader';
 import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, getWdbsAliases, type Video } from '../api';
 import { saveImageAs } from '../lib/save-image-as';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
@@ -25,7 +26,9 @@ interface GlossaryTerm {
     definition: string;
 }
 
-// Persisted in the generic `settings` table (see api.ts's getSetting/setSetting) so the
+type LeftTab = 'terms' | 'tags' | 'similar' | 'attachments';
+
+// Persisted in the generic `Settings` table (see api.ts's getSetting/setSetting) so the
 // video/transcript split ratio survives closing and reopening the sidebar, and relaunching
 // the app, instead of resetting to the 65% default every time.
 const SPLIT_PERCENT_SETTING_KEY = 'sidebarSplitPercent';
@@ -41,7 +44,8 @@ interface Props {
     onSave?: (summary?: string | null) => void;
     onDelete?: () => void;
     onRefetch?: () => void;
-    hasApiKey: boolean;
+    /** The transcript was replaced by hand (pasted in): the app keeps this text as the video's transcript. */
+    onTranscriptChange?: (text: string) => void;
     pluginSummarizeEnabled: boolean;
     pluginPhotosynthesisEnabled: boolean;
     showSynthesizeVenice?: boolean;
@@ -56,7 +60,7 @@ interface Props {
     onHandleClick?: (handle: string) => void;
     onAddTag?: (term: string) => void;
     onRemoveTag?: (term: string) => void;
-    onSearchInLibrary?: (term: string, mode: 'tag' | 'library') => void;
+    onSearchInLibrary?: (term: string, mode: 'tag' | 'term' | 'library') => void;
     initialTab?: 'transcript' | 'summary';
     showBiography?: boolean;
     allowEditTranscriptOnNA?: boolean;
@@ -86,7 +90,7 @@ interface Props {
  * directly, since the two panes are asymmetric (only the summary pane supports image hover-to-
  * delete) rather than a clean shared abstraction.
  */
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, hasApiKey, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, onVideoSelect }: Props) {
+export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, onTranscriptChange, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, onVideoSelect }: Props) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
@@ -134,11 +138,15 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     // Curated aliases of this video's Drive and "Also in" tags (storage path -> alias), shown as the
     // tags' tooltips. Only Drives that have one are in here.
     const [wdbsAliases, setWdbsAliases] = useState<Record<string, string>>({});
-    const [leftTab, setLeftTab] = useState<'tags' | 'similar' | 'attachments'>('tags');
+    const [leftTab, setLeftTab] = useState<LeftTab>('terms');
     // Feature flags a DB owner sets (see lib/flags.ts): parts of this panel can be hidden or made read-only.
     const { flags } = useFlags();
     const { labels } = useWorkspace();
-    const availableLeftTabs = ([flags.showVideoTags && 'tags', flags.showSimilarVideos && 'similar', flags.showAttachments && 'attachments'].filter(Boolean)) as ('tags' | 'similar' | 'attachments')[];
+    // Terms (glossary entries with a definition) and Tags (Quick Tags, no definition) are separate
+    // tabs; showVideoTags turns both on, and showQuickTags off also drops Tags.
+    const showTermsTab = flags.showVideoTags;
+    const showTagsTab = flags.showVideoTags && flags.showQuickTags;
+    const availableLeftTabs = ([showTermsTab && 'terms', showTagsTab && 'tags', flags.showSimilarVideos && 'similar', flags.showAttachments && 'attachments'].filter(Boolean)) as LeftTab[];
     const activeLeftTab = availableLeftTabs.includes(leftTab) ? leftTab : availableLeftTabs[0];
     const [similarVideos, setSimilarVideos] = useState<Video[]>([]);
     const [loadingSimilar, setLoadingSimilar] = useState(false);
@@ -272,9 +280,17 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         if (!videoId) return;
         setIsSaving(true);
         try {
-            await saveTranscript(videoId, editedTranscript);
-            setIsEditingTranscript(false);
-            if (onRefetch) onRefetch();
+            if (existsInDb) {
+                await saveTranscript(videoId, editedTranscript);
+                setIsEditingTranscript(false);
+                if (onRefetch) onRefetch();
+            } else {
+                // Not in the library yet, so there's nothing to update there: the text becomes this video's
+                // transcript in the app (re-fetching would just fetch from YouTube again and lose it), and
+                // Save then puts it in the library like any fetched transcript.
+                onTranscriptChange?.(editedTranscript);
+                setIsEditingTranscript(false);
+            }
         } catch (e: any) {
             console.error("Failed to save transcript:", e);
         } finally {
@@ -525,15 +541,13 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     // substring match on length too — otherwise a real transcript that happens to mention
     // "No transcript" in its actual spoken content would false-positive here.
     const isTranscriptInvalid = !transcript ||
+        // The message App shows when the fetch failed always starts like this, however long the reason.
+        transcript.startsWith("Failed to load transcript:") ||
         (transcript.length < 150 && (
             transcript.includes("No transcript") ||
             transcript.includes("Failed to load") ||
             transcript.includes("Could not load")
         ));
-
-    // Transcript never loaded because no API key is set: going "back" would just show that
-    // error, so hide the button when an AI summary is available instead.
-    const isTranscriptMissingApiKey = !!transcript && transcript.includes("API key missing");
 
     // "N/A" is the placeholder left behind once a video's real transcript has been cleared in
     // favor of its AI summary (see the auto-switch effect above and clear_transcript_after_summary
@@ -564,7 +578,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         setLinkError(null);
         setPrimaryWdbs(wdbs);
         setWdbsInput(decodeWdbs(wdbs));
-        setLeftTab('tags');
+        setLeftTab('terms');
         setSimilarVideos([]);
         fetchedSimilarForRef.current = null;
         if (videoId && existsInDb) {
@@ -675,20 +689,17 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                 className={`fixed inset-y-0 right-0 w-[1400px] max-w-full bg-[#0f0f0f] border-l border-[#303030] transform transition-transform duration-300 ease-in-out z-50 ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}
             >
                 <div className="h-full flex flex-col">
-                    <div className="p-4 border-b border-[#303030] flex justify-between items-start bg-white/5">
-                        <div className="flex gap-4 items-start">
+                    <div className="px-4 py-2.5 border-b border-[#303030] flex justify-between items-start bg-white/5">
+                        <div className="flex gap-3 items-start">
                             {videoId && (
                                 <img
                                     src={`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`}
                                     alt={title || "Untitled"}
-                                    className="w-30 h-16 object-cover rounded-lg"
+                                    className="w-[72px] h-10 shrink-0 object-cover rounded-md"
                                 />
                             )}
-                            <div className="flex flex-col gap-1 overflow-hidden">
-                                <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#aaaaaa]">
-                                    Transcript
-                                </span>
-                                <h2 className="text-sm font-semibold text-white pr-8 line-clamp-2 leading-relaxed">
+                            <div className="flex flex-col gap-0.5 overflow-hidden">
+                                <h2 className="text-sm font-semibold text-white pr-8 line-clamp-2 leading-snug">
                                     {title || "Untitled"}
                                 </h2>
                                 {handle && (
@@ -944,13 +955,23 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             {existsInDb && availableLeftTabs.length > 0 && (
                                                 <div className="mt-6 p-4 bg-white/5 rounded-xl border border-white/5">
                                                     <div className="flex items-center gap-4 mb-3">
-                                                        {flags.showVideoTags && (
+                                                        {showTermsTab && (
+                                                        <button
+                                                            onClick={() => setLeftTab('terms')}
+                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'terms' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                        >
+                                                            <BookA className="w-3.5 h-3.5" />
+                                                            Terms
+                                                            {activeLeftTab === 'terms' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
+                                                        </button>
+                                                        )}
+                                                        {showTagsTab && (
                                                         <button
                                                             onClick={() => setLeftTab('tags')}
                                                             className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'tags' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                         >
                                                             <Tags className="w-3.5 h-3.5" />
-                                                            Video Tags
+                                                            Tags
                                                             {activeLeftTab === 'tags' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                         </button>
                                                         )}
@@ -975,8 +996,9 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         </button>
                                                         )}
                                                     </div>
-                                                    {activeLeftTab === 'tags' ? (
+                                                    {activeLeftTab === 'terms' || activeLeftTab === 'tags' ? (
                                                         <VideoTagsPanel
+                                                            kind={activeLeftTab}
                                                             videoTags={videoTags}
                                                             glossaryTerms={glossaryTerms}
                                                             canEdit={flags.allowEditTags}
@@ -1039,7 +1061,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                         {!showPromptEditor && (
                                             <>
                                                 {showSummary ? (
-                                                    !isTranscriptMissingApiKey && (
+                                                    (
                                                         <button
                                                             onClick={handleBackToTranscript}
                                                             className="flex items-center gap-1.5 px-3 py-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors text-[10px] font-bold uppercase tracking-wider cursor-pointer"
@@ -1338,20 +1360,12 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             </button>
                                         </div>
                                     ) : loading ? (
-                                        <div className="flex flex-col justify-start items-center h-40 pt-10 text-gray-600">
-                                            <svg className="w-8 h-8 animate-spin" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                                <circle cx="12" cy="3" r="1.5" fill="currentColor" opacity="0.1" />
-                                                <circle cx="18.36" cy="5.64" r="1.5" fill="currentColor" opacity="0.2" />
-                                                <circle cx="21" cy="12" r="1.5" fill="currentColor" opacity="0.3" />
-                                                <circle cx="18.36" cy="18.36" r="1.5" fill="currentColor" opacity="0.4" />
-                                                <circle cx="12" cy="21" r="1.5" fill="currentColor" opacity="0.6" />
-                                                <circle cx="5.64" cy="18.36" r="1.5" fill="currentColor" opacity="0.8" />
-                                                <circle cx="3" cy="12" r="1.5" fill="currentColor" opacity="1" />
-                                                <circle cx="5.64" cy="5.64" r="1.5" fill="currentColor" opacity="0.1" />
-                                            </svg>
-                                            <p className="text-[10px] uppercase tracking-[0.2em] font-bold mt-4">Analysing segments</p>
+                                        <div className="flex flex-col justify-start items-center gap-3 h-40 pt-10">
+                                            {/* The app's own pixel-art loader, with the panel's ordinary muted helper text. */}
+                                            <PixelLoader variant="invader" stationary />
+                                            <p className="text-[11px] text-[#888888]">Loading transcript</p>
                                         </div>
-                                    ) : !isTranscriptInvalid ? (
+                                    ) : (!isTranscriptInvalid || isEditingTranscript) ? (
                                         <div className="text-gray-300 leading-relaxed whitespace-pre-wrap h-full flex flex-col">
  {isEditingTranscript ? (
     <div className="flex flex-col flex-1 min-h-0 gap-2">
@@ -1396,6 +1410,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                 }}
                                                                 className="absolute inset-0 w-full h-full p-3 m-0 border-none bg-transparent text-white outline-none text-xs leading-relaxed resize-none font-mono selection:bg-green-500/30"
                                                                 spellCheck={false}
+                                                                placeholder="Paste or type the transcript here (markdown supported)."
                                                             />
                                                         </div>
                                                     ) : (
@@ -1439,7 +1454,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                             </button>
                                                             <button
                                                                 onClick={handleSaveTranscript}
-                                                                disabled={isSaving || isPreviewingTranscript}
+                                                                disabled={isSaving || isPreviewingTranscript || (isTranscriptInvalid && !editedTranscript.trim())}
                                                                 className="px-4 py-1.5 bg-green-600 text-white dark:text-white rounded-lg text-[10px] font-bold uppercase tracking-wider hover:bg-green-500 transition-colors disabled:opacity-30 cursor-pointer"
                                                             >
                                                                 {isSaving ? "Saving..." : "Save Changes"}
@@ -1453,17 +1468,35 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             )}
                                         </div>
                                     ) : (
-                                        <div className="text-center text-gray-600 mt-10 flex flex-col items-center gap-4">
-                                            <p className="text-xs uppercase tracking-widest font-bold">{transcript || "No transcript data available."}</p>
-                                            {onRefetch && (
-                                                <button
-                                                    onClick={onRefetch}
-                                                    title="Try Again"
-                                                    className="p-3 bg-gray-800/40 text-gray-400 rounded-full border border-gray-700/50 hover:bg-gray-700/60 hover:text-white transition-all cursor-pointer mt-2 group"
-                                                >
-                                                    <RotateCcw className="w-5 h-5 group-hover:rotate-[-45deg] transition-transform duration-300" />
-                                                </button>
-                                            )}
+                                        <div className="text-center mt-10 flex flex-col items-center gap-3">
+                                            {/* The panel's ordinary muted helper text, not a shouted heading. */}
+                                            <p className="text-[11px] text-[#888888] leading-relaxed max-w-xs">{transcript || "No transcript data available."}</p>
+                                            <div className="flex items-center gap-2">
+                                                {onRefetch && (
+                                                    <button
+                                                        onClick={onRefetch}
+                                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors text-[10px] font-bold uppercase tracking-wider cursor-pointer"
+                                                    >
+                                                        <RotateCcw className="w-3 h-3" />
+                                                        Try Again
+                                                    </button>
+                                                )}
+                                                {/* Whatever the reason (no captions, blocked, private), the transcript can be pasted in by hand. */}
+                                                {flags.allowEditTranscript && (
+                                                    <button
+                                                        onClick={() => {
+                                                            setIsEditingSummary(false);
+                                                            setEditedTranscript('');
+                                                            setIsPreviewingTranscript(false);
+                                                            setIsEditingTranscript(true);
+                                                        }}
+                                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors text-[10px] font-bold uppercase tracking-wider cursor-pointer"
+                                                    >
+                                                        <ClipboardPaste className="w-3 h-3" />
+                                                        Paste Transcript
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
                                     )}
                                 </div>
@@ -1542,9 +1575,9 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                         {existsInDb && onDelete && allowDeletion ? (
                                             <button
                                                 onClick={onDelete}
-                                                disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
-                                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to delete" : `Delete from ${labels.aliasLibrary}`}
-                                                className={`flex-1 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
+                                                disabled={loading || isTranscriptInvalid || checkingDb}
+                                                title={isTranscriptInvalid ? "No transcript to delete" : `Delete from ${labels.aliasLibrary}`}
+                                                className={`flex-1 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                                             >
                                                 <Trash2 className="w-3.5 h-3.5" />
                                                 Delete
@@ -1552,9 +1585,9 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                         ) : !existsInDb && flags.allowSaveToLibrary ? (
                                             <button
                                                 onClick={handleOnSave}
-                                                disabled={loading || isTranscriptInvalid || checkingDb || !hasApiKey}
-                                                title={!hasApiKey ? "API not imported" : isTranscriptInvalid ? "No transcript to save" : `Save to ${labels.aliasLibrary}`}
-                                                className={`flex-1 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb || !hasApiKey ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
+                                                disabled={loading || isTranscriptInvalid || checkingDb}
+                                                title={isTranscriptInvalid ? "No transcript to save" : `Save to ${labels.aliasLibrary}`}
+                                                className={`flex-1 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                                             >
                                                 <Save className="w-3.5 h-3.5" />
                                                 Save

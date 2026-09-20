@@ -1,5 +1,5 @@
 // Customized display names: the workspace's own name and the aliases for Search, Library, Drive, ...
-// They live in the `workspace_labels` table (see src-tauri/src/db/workspace.rs); a name that was
+// They live in the `WorkspaceLabels` table (see src-tauri/src/db/workspace.rs); a name that was
 // never set uses the default below. The keys, defaults and limits MUST match `LABELS` in that file
 // (a Rust test compares the two).
 

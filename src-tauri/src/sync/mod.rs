@@ -5,7 +5,6 @@
 
 pub mod http;
 pub mod license;
-pub mod pack;
 
 #[cfg(test)]
 mod engine_tests;

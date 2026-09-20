@@ -88,7 +88,7 @@ fn build_link(row: &Row, _: &ReadOptions) -> Built {
 fn build_glossary(row: &Row, _: &ReadOptions) -> Built {
     let k = key(row, 0)?;
     // Column 2 is the newline-joined Drive roots, "" when the term has none, and NULL on a
-    // database that predates glossary_drives (then `None`: "unknown", not "cleared").
+    // database that predates GlossaryDrives (then `None`: "unknown", not "cleared").
     let drives = os(row, 2).map(|joined| {
         let mut roots: Vec<String> = joined.split('\n').filter(|r| !r.is_empty()).map(String::from).collect();
         roots.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then(a.cmp(b)));
@@ -129,18 +129,18 @@ fn build_prompt(row: &Row, _: &ReadOptions) -> Built {
 }
 
 const GLOSSARY_ALL: &str = "SELECT g.term, g.definition,
-        COALESCE((SELECT group_concat(d.root, char(10)) FROM glossary_drives d WHERE d.term = g.term), '')
-     FROM glossary g ORDER BY g.term";
+        COALESCE((SELECT group_concat(d.root, char(10)) FROM GlossaryDrives d WHERE d.term = g.term), '')
+     FROM Glossary g ORDER BY g.term";
 const GLOSSARY_ONE: &str = "SELECT g.term, g.definition,
-        COALESCE((SELECT group_concat(d.root, char(10)) FROM glossary_drives d WHERE d.term = g.term), '')
-     FROM glossary g WHERE g.term = ?1";
-// For databases without glossary_drives: same shape, with NULL for the drives column.
-const GLOSSARY_ALL_PLAIN: &str = "SELECT term, definition, NULL FROM glossary ORDER BY term";
-const GLOSSARY_ONE_PLAIN: &str = "SELECT term, definition, NULL FROM glossary WHERE term = ?1";
+        COALESCE((SELECT group_concat(d.root, char(10)) FROM GlossaryDrives d WHERE d.term = g.term), '')
+     FROM Glossary g WHERE g.term = ?1";
+// For databases without GlossaryDrives: same shape, with NULL for the drives column.
+const GLOSSARY_ALL_PLAIN: &str = "SELECT term, definition, NULL FROM Glossary ORDER BY term";
+const GLOSSARY_ONE_PLAIN: &str = "SELECT term, definition, NULL FROM Glossary WHERE term = ?1";
 
-/// The SQL for `kind`, falling back for glossaries whose database has no `glossary_drives` table.
+/// The SQL for `kind`, falling back for glossaries whose database has no `GlossaryDrives` table.
 fn sql_for(conn: &Connection, kind: Kind, spec: &Spec, one: bool) -> &'static str {
-    if kind == Kind::Glossary && !table_exists(conn, "glossary_drives") {
+    if kind == Kind::Glossary && !table_exists(conn, "GlossaryDrives") {
         return if one { GLOSSARY_ONE_PLAIN } else { GLOSSARY_ALL_PLAIN };
     }
     if one { spec.one } else { spec.all }
@@ -164,46 +164,46 @@ fn spec(kind: Kind) -> Spec {
             build: build_wdbs,
         },
         Kind::Video => Spec {
-            table: "videos",
+            table: "Videos",
             all: "SELECT video_id, title, author, handle, length_seconds, transcript, summary,
-                         view_count, published_at, tags, WDBS FROM videos ORDER BY video_id",
+                         view_count, published_at, tags, WDBS FROM Videos ORDER BY video_id",
             one: "SELECT video_id, title, author, handle, length_seconds, transcript, summary,
-                         view_count, published_at, tags, WDBS FROM videos WHERE video_id = ?1",
+                         view_count, published_at, tags, WDBS FROM Videos WHERE video_id = ?1",
             build: build_video,
         },
         Kind::VideoLink => Spec {
-            table: "video_wdbs_links",
-            all: "SELECT video_id, wdbs FROM video_wdbs_links ORDER BY video_id, wdbs",
-            one: "SELECT video_id, wdbs FROM video_wdbs_links WHERE video_id = ?1 AND wdbs = ?2",
+            table: "VideoWDBSLinks",
+            all: "SELECT video_id, wdbs FROM VideoWDBSLinks ORDER BY video_id, wdbs",
+            one: "SELECT video_id, wdbs FROM VideoWDBSLinks WHERE video_id = ?1 AND wdbs = ?2",
             build: build_link,
         },
         Kind::Glossary => Spec {
-            table: "glossary",
+            table: "Glossary",
             all: GLOSSARY_ALL,
             one: GLOSSARY_ONE,
             build: build_glossary,
         },
         Kind::Biography => Spec {
-            table: "biographies",
+            table: "Biographies",
             all: "SELECT handle, display_name, bio, wikipedia, website, twitter, instagram, facebook,
                          threads, youtube, tiktok, twitch, reddit, discord, channel_id, subscriber_count
-                  FROM biographies ORDER BY handle",
+                  FROM Biographies ORDER BY handle",
             one: "SELECT handle, display_name, bio, wikipedia, website, twitter, instagram, facebook,
                          threads, youtube, tiktok, twitch, reddit, discord, channel_id, subscriber_count
-                  FROM biographies WHERE handle = ?1",
+                  FROM Biographies WHERE handle = ?1",
             build: build_biography,
         },
         Kind::CustomPrompt => Spec {
-            table: "custom_prompts",
-            all: "SELECT handle, local_prompt_text, cloud_prompt_text FROM custom_prompts ORDER BY handle",
-            one: "SELECT handle, local_prompt_text, cloud_prompt_text FROM custom_prompts WHERE handle = ?1",
+            table: "CustomPrompts",
+            all: "SELECT handle, local_prompt_text, cloud_prompt_text FROM CustomPrompts ORDER BY handle",
+            one: "SELECT handle, local_prompt_text, cloud_prompt_text FROM CustomPrompts WHERE handle = ?1",
             build: build_prompt,
         },
     }
 }
 
 pub fn table_exists(conn: &Connection, table: &str) -> bool {
-    conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1", [table], |r| r.get::<_, i64>(0))
+    conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1 COLLATE NOCASE", [table], |r| r.get::<_, i64>(0))
         .map(|n| n > 0)
         .unwrap_or(false)
 }
@@ -265,10 +265,10 @@ pub fn load_item(conn: &Connection, kind: Kind, item_key: &str, opts: &ReadOptio
 /// The allowlisted settings currently stored in `conn` (never keys, tokens or paths).
 pub fn read_syncable_settings(conn: &Connection) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    if !table_exists(conn, "settings") {
+    if !table_exists(conn, "Settings") {
         return out;
     }
-    let Ok(mut stmt) = conn.prepare("SELECT key, value FROM settings ORDER BY key") else {
+    let Ok(mut stmt) = conn.prepare("SELECT key, value FROM Settings ORDER BY key") else {
         return out;
     };
     let Ok(mut rows) = stmt.query([]) else {
@@ -291,13 +291,13 @@ mod tests {
     fn db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, author TEXT, handle TEXT, length_seconds INTEGER,
+            "CREATE TABLE Videos (video_id TEXT PRIMARY KEY, title TEXT, author TEXT, handle TEXT, length_seconds INTEGER,
                 transcript TEXT, summary TEXT, view_count INTEGER, published_at TEXT, tags TEXT, WDBS TEXT);
-             CREATE TABLE video_wdbs_links (video_id TEXT NOT NULL, wdbs TEXT NOT NULL, PRIMARY KEY (video_id, wdbs));
-             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
-             INSERT INTO videos VALUES ('v1', 'T', 'A', '@a', 60, 'words', NULL, 5, '2024-01-01', 'x,y', 'θψUAP');
-             INSERT INTO video_wdbs_links VALUES ('v1', 'θψCRYPTO');
-             INSERT INTO settings VALUES ('showDrive', 'false'), ('api_key', 'SECRET'), ('venice_api_key', 'SECRET2');",
+             CREATE TABLE VideoWDBSLinks (video_id TEXT NOT NULL, wdbs TEXT NOT NULL, PRIMARY KEY (video_id, wdbs));
+             CREATE TABLE Settings (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO Videos VALUES ('v1', 'T', 'A', '@a', 60, 'words', NULL, 5, '2024-01-01', 'x,y', 'θψUAP');
+             INSERT INTO VideoWDBSLinks VALUES ('v1', 'θψCRYPTO');
+             INSERT INTO Settings VALUES ('showDrive', 'false'), ('api_key', 'SECRET'), ('venice_api_key', 'SECRET2');",
         )
         .unwrap();
         conn
@@ -344,18 +344,18 @@ mod tests {
     fn glossary_terms_carry_their_drives_and_older_databases_report_unknown() {
         let conn = db();
         conn.execute_batch(
-            "CREATE TABLE glossary (term TEXT PRIMARY KEY, definition TEXT NOT NULL);
-             INSERT INTO glossary VALUES ('Halving', 'Supply cut'), ('Loose', 'No drive'), ('qt', '');",
+            "CREATE TABLE Glossary (term TEXT PRIMARY KEY, definition TEXT NOT NULL);
+             INSERT INTO Glossary VALUES ('Halving', 'Supply cut'), ('Loose', 'No drive'), ('qt', '');",
         )
         .unwrap();
 
-        // No glossary_drives table yet: drives are unknown (None), not "cleared" (Some([])).
+        // No GlossaryDrives table yet: drives are unknown (None), not "cleared" (Some([])).
         let old = load_item(&conn, Kind::Glossary, "Halving", &ReadOptions::default()).unwrap().unwrap();
         assert_eq!(old["drives"], Value::Null);
 
         conn.execute_batch(
-            "CREATE TABLE glossary_drives (term TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (term, root));
-             INSERT INTO glossary_drives VALUES ('Halving', ':FIN'), ('Halving', ':CRYPTO');",
+            "CREATE TABLE GlossaryDrives (term TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (term, root));
+             INSERT INTO GlossaryDrives VALUES ('Halving', ':FIN'), ('Halving', ':CRYPTO');",
         )
         .unwrap();
         let halving = load_item(&conn, Kind::Glossary, "Halving", &ReadOptions::default()).unwrap().unwrap();

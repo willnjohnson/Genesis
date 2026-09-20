@@ -3,7 +3,7 @@ use serde_json::Value;
 use tauri::command;
 use crate::{get_db_path, db, types::*};
 use crate::sync::license::{self, Route};
-use crate::youtube::{self, YouTubeClient, ClientType, decode_html, is_live_or_upcoming};
+use crate::youtube::{self, YouTubeClient, ClientType, decode_html};
 
 /// Parses an ISO-8601 duration as returned by the Data API's contentDetails.duration
 /// (e.g. "PT1H2M30S", "PT45S") into whole seconds.
@@ -101,30 +101,20 @@ pub async fn resolve_channel(_app: tauri::AppHandle, query: String) -> Result<Ch
     }
 }
 
-/// Extracts a `Video` from a single playlist/channel-uploads browse item, trying both renderer
-/// shapes YouTube has served for this (legacy `playlistVideoRenderer`, or the newer
-/// `lockupViewModel` — see extract_lockup_video_info) since a given response only ever uses one
-/// but which one varies by rollout.
-fn extract_video_from_item(item: &Value) -> Option<Video> {
-    let v_json = if let Some(v_renderer) = item.get("playlistVideoRenderer") {
-        // Live and scheduled streams aren't published videos yet: leave them out.
-        if is_live_or_upcoming(v_renderer) {
-            return None;
-        }
-        youtube::extract_playlist_video_info(v_renderer)
-    } else if let Some(lockup) = item.get("lockupViewModel") {
-        if is_live_or_upcoming(lockup) {
-            return None;
-        }
-        youtube::extract_lockup_video_info(lockup)
-    } else {
-        None
-    }?;
-    let mut v = serde_json::from_value::<Video>(v_json).ok()?;
-    v.date_added = None;
-    Some(v)
+/// The page's videos as the UI's `Video` type (JSON that doesn't fit is dropped, not fatal).
+fn videos_from_page(items: Vec<Value>) -> Vec<Video> {
+    items
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<Video>(v).ok())
+        .map(|mut v| {
+            v.date_added = None;
+            v
+        })
+        .collect()
 }
 
+/// A playlist, page by page, without an API key. The first call takes the playlist (or its URL); the
+/// next ones take the continuation token the previous page returned.
 #[command]
 pub async fn fetch_videos(
     _app: tauri::AppHandle,
@@ -133,50 +123,60 @@ pub async fn fetch_videos(
     continuation: Option<String>,
 ) -> Result<VideoResponse, String> {
     let client = YouTubeClient::new(ClientType::Web);
-    let playlist_id = if is_playlist {
-        youtube::extract_playlist_id(&id)
-    } else {
-        let channel_id = youtube::extract_channel_id(&id).await?.ok_or("Channel not found")?;
-        youtube::channel_id_to_uploads_playlist(&channel_id)
+    let data = match continuation.as_deref() {
+        Some(token) => client.browse_continuation(token).await?,
+        None => {
+            let playlist_id = if is_playlist {
+                youtube::extract_playlist_id(&id)
+            } else {
+                // A channel is listed as its regular videos (YouTube's UULF playlist); the older "all
+                // uploads" playlist (UU...) now errors for anonymous visitors.
+                let channel_id = youtube::extract_channel_id(&id).await?.ok_or("Channel not found")?;
+                youtube::channel_id_to_uploads_playlist(&channel_id)
+            };
+            let browse_id = if playlist_id.starts_with("VL") { playlist_id } else { format!("VL{}", playlist_id) };
+            client.browse(Some(browse_id), None).await?
+        }
     };
+    if let Some(problem) = youtube::response_problem(&data) {
+        return Err(problem);
+    }
+    let page = youtube::parse_browse_page(&data);
+    Ok(VideoResponse { videos: videos_from_page(page.videos), continuation: page.continuation, total_count: None })
+}
 
-    let browse_id = if playlist_id.starts_with("VL") { playlist_id } else { format!("VL{}", playlist_id) };
-    let data = client.browse(Some(browse_id), continuation).await?;
-    let mut videos = Vec::new();
+/// A channel's videos, newest first, without an API key: the same list as the channel's Videos tab on
+/// YouTube, which keeps going for as long as the channel has videos. Pass the continuation token
+/// from the previous page to get the next one.
+#[command]
+pub async fn fetch_channel_videos_keyless(
+    _app: tauri::AppHandle,
+    query: String,
+    continuation: Option<String>,
+) -> Result<VideoResponse, String> {
+    let client = YouTubeClient::new(ClientType::Web);
+    let data = match continuation.as_deref() {
+        Some(token) => client.browse_continuation(token).await?,
+        None => {
+            let channel_id = youtube::extract_channel_id(&query).await?.ok_or("Channel not found")?;
+            client.browse_tab(&channel_id, youtube::CHANNEL_VIDEOS_TAB).await?
+        }
+    };
+    if let Some(problem) = youtube::response_problem(&data) {
+        return Err(problem);
+    }
+    let mut page = youtube::parse_browse_page(&data);
 
-    if let Some(tabs) = data["contents"]["twoColumnBrowseResultsRenderer"]["tabs"].as_array() {
-        if let Some(contents) = tabs[0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"].as_array() {
-            if let Some(section_items) = contents[0]["itemSectionRenderer"]["contents"].as_array() {
-                for item in section_items {
-                    // Legacy shape: the section's one item is a `playlistVideoListRenderer`
-                    // wrapper whose own `contents` holds the actual per-video renderers.
-                    if let Some(nested) = item["playlistVideoListRenderer"]["contents"].as_array() {
-                        for nested_item in nested {
-                            if let Some(v) = extract_video_from_item(nested_item) {
-                                videos.push(v);
-                            }
-                        }
-                    } else if let Some(v) = extract_video_from_item(item) {
-                        // Current shape (YouTube's `lockupViewModel` rollout): each section
-                        // item IS a video entry directly, no wrapper level.
-                        videos.push(v);
-                    }
-                }
-            }
+    // If the Videos tab came back empty (YouTube changed how it's asked for), fall back to the
+    // channel's regular-videos playlist, which lists the same thing.
+    if continuation.is_none() && page.videos.is_empty() {
+        if let Some(channel_id) = youtube::extract_channel_id(&query).await? {
+            let playlist = youtube::channel_id_to_uploads_playlist(&channel_id);
+            let data = client.browse(Some(format!("VL{playlist}")), None).await?;
+            page = youtube::parse_browse_page(&data);
         }
     }
-
-    if let Some(actions) = data["onResponseReceivedActions"].as_array() {
-        if let Some(items) = actions[0]["appendContinuationItemsAction"]["continuationItems"].as_array() {
-            for item in items {
-                if let Some(v) = extract_video_from_item(item) {
-                    videos.push(v);
-                }
-            }
-        }
-    }
-
-    Ok(VideoResponse { videos, continuation: None, total_count: None })
+    Ok(VideoResponse { videos: videos_from_page(page.videos), continuation: page.continuation, total_count: None })
 }
 
 #[command]
@@ -418,31 +418,25 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
         return Ok(VideoResponse { videos, continuation: next_page_token, total_count: None });
     }
 
-    // Fallback to web scraping without pagination
+    // No API access: the same results YouTube's own site shows, page by page (each page hands back a
+    // token for the next one, which "Load more" passes back in).
     let client = YouTubeClient::new(ClientType::Web);
-    let data = client.search(&query).await?;
-    let mut videos = Vec::new();
+    let data = client.search(&query, continuation.as_deref()).await?;
+    if let Some(problem) = youtube::response_problem(&data) {
+        return Err(problem);
+    }
+    let page = youtube::parse_search_page(&data);
+    let mut videos = videos_from_page(page.videos);
 
-    if let Some(results) = data["contents"]["twoColumnSearchResultsRenderer"]["primaryContents"]["sectionListRenderer"]["contents"].as_array() {
-        for section in results {
-            if let Some(items) = section["itemSectionRenderer"]["contents"].as_array() {
-                for item in items {
-                    if let Some(v_renderer) = item.get("videoRenderer") {
-                        // Skip streams that are live now or scheduled: not published videos yet.
-                        if is_live_or_upcoming(v_renderer) {
-                            continue;
-                        }
-                        if let Some(v_json) = youtube::extract_video_basic_info(v_renderer) {
-                            if let Ok(mut v) = serde_json::from_value::<Video>(v_json) {
-                                v.date_added = None;
-                                videos.push(v);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    // The same Shorts filter as the API path; the length comes with each result.
+    let hide_shorts = db::get_setting(&db_path, "hideShortsInSearch")
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    if hide_shorts {
+        videos.retain(|v| !is_short_length(v.length_seconds));
     }
 
-    Ok(VideoResponse { videos, continuation: None, total_count: None })
+    Ok(VideoResponse { videos, continuation: page.continuation, total_count: None })
 }

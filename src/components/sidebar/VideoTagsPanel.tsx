@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Plus, X } from 'lucide-react';
-import { useWorkspace } from '../../hooks/useWorkspace';
 
 interface GlossaryTerm {
     term: string;
@@ -8,6 +7,8 @@ interface GlossaryTerm {
 }
 
 interface Props {
+    /** 'terms' = glossary entries with a definition; 'tags' = Quick Tags (no definition). */
+    kind: 'terms' | 'tags';
     videoTags: string[];
     glossaryTerms: GlossaryTerm[];
     onAddTag?: (term: string) => void;
@@ -18,12 +19,14 @@ interface Props {
     canEdit?: boolean;
 }
 
-/** Displays a video's tags (as glossary-term chips) plus an "add tag" dropdown filtered to
- *  glossary terms not already applied. Clicking a chip opens its term definition (via
+/** Displays a video's terms or tags (as chips, per `kind`) plus an "add" dropdown filtered to
+ *  the ones not already applied. Clicking a chip opens its term definition (via
  *  `onSelectTerm`); the dropdown closes on an outside click. Renders just the tag row — the
  *  surrounding card/header is owned by Sidebar.tsx's Tags/Similar Videos tab switcher. */
-export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag, onSelectTerm, canEdit = true }: Props) {
-    const { labels } = useWorkspace();
+export function VideoTagsPanel({ kind, videoTags, glossaryTerms, onAddTag, onRemoveTag, onSelectTerm, canEdit = true }: Props) {
+    const noun = kind === 'terms' ? 'term' : 'tag';
+    // A Quick Tag is a glossary entry without a definition; a term has one.
+    const ofKind = glossaryTerms.filter(t => (t.definition.trim() !== '') === (kind === 'terms'));
     const [showTagDropdown, setShowTagDropdown] = useState(false);
     const [tagFilter, setTagFilter] = useState("");
 
@@ -42,8 +45,8 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
         }
     }, [showTagDropdown, handleClickOutside]);
 
-    const filtered = [...videoTags].filter(tag => glossaryTerms.some(t => t.term === tag)).sort((a, b) => a.localeCompare(b));
-    const availableTerms = glossaryTerms.filter(t =>
+    const filtered = [...videoTags].filter(tag => ofKind.some(t => t.term === tag)).sort((a, b) => a.localeCompare(b));
+    const availableTerms = ofKind.filter(t =>
         !videoTags.includes(t.term) &&
         t.term.toLowerCase().includes(tagFilter.toLowerCase())
     );
@@ -55,7 +58,7 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
                         key={tag}
                         onClick={(e) => {
                             e.stopPropagation();
-                            const term = glossaryTerms.find(t => t.term === tag);
+                            const term = ofKind.find(t => t.term === tag);
                             if (term) {
                                 onSelectTerm(term);
                             }
@@ -79,7 +82,7 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
 
                 {canEdit && filtered.length === 0 && (
                     <span className="text-[11px] text-[#666666] font-medium italic select-none">
-                        Create a new tag
+                        Add a {noun}
                     </span>
                 )}
 
@@ -100,7 +103,7 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
                             <div className="p-3 border-b border-[#303030] bg-white/5">
                                 <input
                                     type="text"
-                                    placeholder={`Filter ${labels.aliasGlossary.toLowerCase()} terms...`}
+                                    placeholder={`Filter ${noun}s...`}
                                     value={tagFilter}
                                     onChange={(e) => setTagFilter(e.target.value)}
                                     className="w-full bg-[#222222] border border-[#383838] rounded-md px-3 py-1.5 text-[11px] text-white placeholder-[#666666] focus:outline-none focus:border-red-500"
@@ -111,7 +114,7 @@ export function VideoTagsPanel({ videoTags, glossaryTerms, onAddTag, onRemoveTag
                             <div className="overflow-y-auto max-h-[150px] custom-scrollbar p-1">
                                 {availableTerms.length === 0 ? (
                                     <p className="p-4 text-[11px] text-[#666666] text-center italic">
-                                        {tagFilter ? "No matching terms" : "No terms available"}
+                                        {tagFilter ? `No matching ${noun}s` : `No ${noun}s available`}
                                     </p>
                                 ) : (
                                     availableTerms.map((term) => (

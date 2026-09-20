@@ -6,7 +6,12 @@
       "Bash(cargo build *)",
       "Bash(cargo check *)",
       "Bash(npx eslint *)",
-      "Bash(echo \"started with pid $!\")"
+      "Bash(echo \"started with pid $!\")",
+      "Bash(python /tmp/find_test.py)",
+      "Bash(python /tmp/fe2.py)",
+      "Bash(python -c ' *)",
+      "Bash(cat)",
+      "Bash(python /tmp/docs2.py)"
     ]
   }
 }

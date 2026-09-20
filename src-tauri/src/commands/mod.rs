@@ -11,6 +11,8 @@ pub mod similar;
 pub mod sync;
 pub mod attachments;
 pub mod workspace;
+pub mod workspaces;
+pub mod kinpak;
 
 pub use settings::*;
 pub use youtube::*;
@@ -25,3 +27,5 @@ pub use similar::*;
 pub use sync::*;
 pub use attachments::*;
 pub use workspace::*;
+pub use workspaces::*;
+pub use kinpak::*;

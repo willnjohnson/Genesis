@@ -1,5 +1,5 @@
 //! Customized display names: the workspace's own name and the aliases for Search, Library, Drive
-//! and so on, stored in `workspace_labels` (key/value). A missing row means the built-in default,
+//! and so on, stored in `WorkspaceLabels` (key/value). A missing row means the built-in default,
 //! so nothing has to be seeded and "reset" is just deleting the row. The UI's copy of the keys,
 //! defaults and limits is `src/lib/workspace.ts` (a test keeps the two in step).
 //!
@@ -14,11 +14,12 @@ use super::settings::get_flag;
 
 pub const WORKSPACE_NAME_KEY: &str = "workspaceName";
 pub const MAX_WORKSPACE_NAME_LEN: usize = 64;
+pub const DEFAULT_WORKSPACE_NAME: &str = "New Workspace";
 pub const MAX_ALIAS_LEN: usize = 18;
 
 /// `(key, default, max length)` for every customizable name.
 pub const LABELS: &[(&str, &str, usize)] = &[
-    (WORKSPACE_NAME_KEY, "New Workspace", MAX_WORKSPACE_NAME_LEN),
+    (WORKSPACE_NAME_KEY, DEFAULT_WORKSPACE_NAME, MAX_WORKSPACE_NAME_LEN),
     ("aliasDriveName", "Drive", MAX_ALIAS_LEN),
     ("aliasSearch", "Search", MAX_ALIAS_LEN),
     ("aliasLibrary", "Library", MAX_ALIAS_LEN),
@@ -54,7 +55,7 @@ pub fn normalize_label(raw: &str, max: usize) -> Result<String, String> {
 pub fn get_workspace_labels(db_path: &str) -> rusqlite::Result<HashMap<String, String>> {
     let conn = Connection::open(db_path)?;
     let mut stored: HashMap<String, String> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT key, value FROM workspace_labels")?;
+    let mut stmt = conn.prepare("SELECT key, value FROM WorkspaceLabels")?;
     for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
         let (k, v) = row?;
         stored.insert(k, v);
@@ -80,7 +81,7 @@ pub fn set_workspace_label(db_path: &str, key: &str, value: &str) -> Result<Stri
 
     if key == WORKSPACE_NAME_KEY {
         let already_named: bool = conn
-            .query_row("SELECT 1 FROM workspace_labels WHERE key = ?", params![key], |_| Ok(true))
+            .query_row("SELECT 1 FROM WorkspaceLabels WHERE key = ?", params![key], |_| Ok(true))
             .unwrap_or(false);
         if already_named && !get_flag(db_path, "allowWorkspaceRename", true) {
             return Err("This workspace's name can't be changed.".into());
@@ -90,11 +91,11 @@ pub fn set_workspace_label(db_path: &str, key: &str, value: &str) -> Result<Stri
     }
 
     if cleaned.is_empty() {
-        conn.execute("DELETE FROM workspace_labels WHERE key = ?", params![key]).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM WorkspaceLabels WHERE key = ?", params![key]).map_err(|e| e.to_string())?;
         return Ok(default.to_string());
     }
     conn.execute(
-        "INSERT OR REPLACE INTO workspace_labels (key, value) VALUES (?1, ?2)",
+        "INSERT OR REPLACE INTO WorkspaceLabels (key, value) VALUES (?1, ?2)",
         params![key, cleaned],
     )
     .map_err(|e| e.to_string())?;
@@ -184,7 +185,7 @@ mod tests {
         assert!(set_workspace_label(&db, "nope", "x").is_err());
         Connection::open(&db)
             .unwrap()
-            .execute("INSERT INTO workspace_labels (key, value) VALUES ('aliasSearch', 'bad/name')", [])
+            .execute("INSERT INTO WorkspaceLabels (key, value) VALUES ('aliasSearch', 'bad/name')", [])
             .unwrap();
         assert_eq!(get_workspace_labels(&db).unwrap()["aliasSearch"], "Search");
         let _ = std::fs::remove_file(&db);

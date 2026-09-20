@@ -1,5 +1,5 @@
 use tauri::command;
-use crate::{get_db_path, db, ConfManager, DbPathState};
+use crate::{get_db_path, db};
 use crate::types::{DbDetails, DisplaySettings};
 
 #[command]
@@ -50,46 +50,73 @@ pub async fn select_folder(app: tauri::AppHandle, start_dir: Option<String>) -> 
     rx.await.map_err(|e| e.to_string())
 }
 
+/// Moves the open workspace's database to `folder_path` (an external drive, say) and records the new
+/// place in the workspace's own `init.conf`. Refuses to touch a folder that already holds a Kinesis
+/// database: overwriting one silently is how someone loses a library.
 #[command]
-pub fn set_db_path_override(app: tauri::AppHandle, folder_path: String) -> Result<String, String> {
-    use tauri::Manager;
-    let state = app.state::<DbPathState>();
-    let mut guard = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let old_db_path = if let Some(ref path) = *guard {
-        path.clone()
-    } else {
-        get_db_path(&app)
-    };
-
+pub fn set_db_path_override(
+    app: tauri::AppHandle,
+    sync: tauri::State<'_, crate::sync::SyncState>,
+    folder_path: String,
+) -> Result<String, String> {
+    use crate::workspaces as ws;
+    if sync.is_running() {
+        return Err("A sync is running. Cancel it first, then move the database.".into());
+    }
+    ws::ensure_not_busy(&app)?;
+    let ws_dir = ws::current_folder(&app).ok_or_else(|| "No workspace is open.".to_string())?;
+    let old_db = std::path::PathBuf::from(get_db_path(&app));
     let folder = std::path::PathBuf::from(&folder_path);
-    if !folder.exists() {
-        std::fs::create_dir_all(&folder).map_err(|e| format!("Failed to create directory: {}", e))?;
-    }
+    let new_db = folder.join(ws::DB_FILE);
 
-    let db_full_path = folder.join("kinesis_data.db").to_string_lossy().to_string();
-    if old_db_path == db_full_path {
-        return Ok(db_full_path);
+    if folder.join(ws::DB_FILE).exists() && old_db.exists() && same_file(&old_db, &new_db) {
+        return Ok(new_db.to_string_lossy().to_string());
     }
-
-    let old_path_buf = std::path::PathBuf::from(&old_db_path);
-    if old_path_buf.exists() {
-        std::fs::copy(&old_db_path, &db_full_path)
-            .map_err(|e| format!("Failed to migrate database: {}", e))?;
+    if new_db.exists() {
+        return Err(format!(
+            "There's already a Kinesis database in {}. Choose an empty folder, or open that one as its own workspace.",
+            folder.display()
+        ));
     }
+    std::fs::create_dir_all(&folder).map_err(|e| format!("Failed to create directory: {}", e))?;
 
-    ConfManager::write_attr(&app, "db_path", &folder_path)?;
-    *guard = Some(db_full_path.clone());
-    db::init_db(&db_full_path).map_err(|e| format!("Failed to initialize DB at new location: {}", e))?;
+    // Copy, check, switch, and only then delete the original: at no point is the only copy at risk.
+    let old_conf = ws::read_conf(&ws_dir);
+    if let Err(e) = std::fs::copy(&old_db, &new_db) {
+        let _ = std::fs::remove_file(&new_db);
+        return Err(format!("Failed to move the database: {e}"));
+    }
+    let same_size = std::fs::metadata(&old_db).ok().map(|m| m.len()) == std::fs::metadata(&new_db).ok().map(|m| m.len());
+    if !same_size {
+        let _ = std::fs::remove_file(&new_db);
+        return Err("The copy of the database came out a different size, so nothing was changed.".into());
+    }
+    let rollback = |e: String| {
+        let _ = ws::write_conf(&ws_dir, &old_conf);
+        let _ = ws::repoint_active(&app, &ws_dir);
+        let _ = std::fs::remove_file(&new_db);
+        e
+    };
+    ws::set_data_dir(&ws_dir, &folder).map_err(&rollback)?;
+    ws::repoint_active(&app, &ws_dir).map_err(&rollback)?;
+    let db_full_path = new_db.to_string_lossy().to_string();
+    db::init_db(&db_full_path).map_err(|e| rollback(format!("Failed to initialize DB at new location: {}", e)))?;
     // The new database has its own workspace name.
     crate::refresh_window_title(&app);
 
-    if old_path_buf.exists() {
-        let _ = std::fs::remove_file(&old_db_path);
-        crate::ensure_no_ghost_db(&old_db_path);
+    let _ = std::fs::remove_file(&old_db);
+    if let Some(old_dir) = old_db.parent() {
+        let _ = std::fs::remove_file(old_dir.join(".kinesis.lock"));
     }
-
+    crate::ensure_no_ghost_db(&old_db.to_string_lossy());
     Ok(db_full_path)
+}
+
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 #[command]

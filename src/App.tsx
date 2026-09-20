@@ -1,11 +1,11 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
-    getApiKey, getKeyStatus, getSetting, setDbPath, openExternalUrl, bulkUpdateVideoWdbs,
+    getApiKey, getKeyStatus, getSetting, openExternalUrl, bulkUpdateVideoWdbs,
     type Video, type BiographyEntry, saveTags, getBiography,
     getVideoById, getGlossaryTerms, getWdbsTree, decodeWdbs, type WdbsNode,
 } from "./api";
-import { driveSegmentLabel } from "./lib/utils";
+import { driveSegmentLabel, formatBytes } from "./lib/utils";
 import { setInternalLinkHandler, linkKindLabel, type LinkKind } from "./lib/internal-links";
 import { LinkPicker } from "./components/LinkPicker";
 import { MarkdownContextMenu } from "./components/MarkdownContextMenu";
@@ -17,6 +17,7 @@ import { VideoList } from "./components/VideoList";
 import { Sidebar } from "./components/Sidebar";
 import { BRAND } from "./branding";
 import { BrandLogo } from "./components/BrandLogo";
+import { WorkspaceSwitcher } from "./components/workspace/WorkspaceSwitcher";
 import { Notification, type NotificationType } from "./components/Notification";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SettingsModal } from "./components/SettingsModal";
@@ -29,6 +30,7 @@ import { BulkAssignMenu } from "./components/BulkAssignMenu";
 import { useSearch } from "./hooks/useSearch";
 import { useLibrary } from "./hooks/useLibrary";
 import { useAutoSync } from "./hooks/useAutoSync";
+import { onKinpakExportFinished } from "./lib/kinpak-export";
 import { useFlags } from "./hooks/useFlags";
 import { useWorkspace } from "./hooks/useWorkspace";
 
@@ -43,7 +45,7 @@ function getLibraryFacets(q: string, viewMode: ViewMode): Facet[] {
         ? ['term_search', 'definition_search']
         : viewMode === 'biography'
             ? ['person_search', 'bio_search']
-            : ['tag_search', 'video', 'handle'];
+            : ['tag_search', 'term_search', 'video', 'handle'];
 
     const FACET_RE = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
     const facets: Facet[] = [];
@@ -60,7 +62,7 @@ function getLibraryQuery(q: string, viewMode: ViewMode): string {
         ? ['term_search', 'definition_search']
         : viewMode === 'biography'
             ? ['person_search', 'bio_search']
-            : ['tag_search', 'video', 'handle'];
+            : ['tag_search', 'term_search', 'video', 'handle'];
 
     // Check if q starts with a facet prefix and has exactly one colon
     const colonIndex = q.indexOf(':');
@@ -214,6 +216,14 @@ function App() {
         setViewMode(v => (flags.viewVisible[v] ? v : flags.pickView()));
     }, [flagsLoaded, flags]);
 
+    // A search's message ("No videos found...", "You must import an API Key...") belongs to the Search
+    // view. Leave it and the message goes, so it isn't still sitting there in the Library or Glossary
+    // (or, stale, when you come back).
+    const clearSearchError = search.setError;
+    useEffect(() => {
+        if (viewMode !== 'search') clearSearchError(null);
+    }, [viewMode, clearSearchError]);
+
     // Drive going away takes its panel and Bulk Assign Mode with it; so does losing edit rights.
     useEffect(() => {
         if (!showDrive) setShowDrivePanel(false);
@@ -229,14 +239,9 @@ function App() {
     }, [showDrive, allowEditWDBS]);
 
     useEffect(() => {
+        // Which database is open is the workspace's business (see WorkspaceGate): by the time this
+        // runs the backend already has one, so there's nothing to restore here.
         const initialize = async () => {
-            const savedPath = localStorage.getItem(BRAND.storageKey);
-            if (savedPath) {
-                const folderPath = savedPath.endsWith(BRAND.dbName)
-                    ? savedPath.substring(0, savedPath.lastIndexOf(savedPath.includes('\\') ? '\\' : '/'))
-                    : savedPath;
-                try { await setDbPath(folderPath); } catch { /* ignore */ }
-            }
             await loadFlags();
         };
         initialize().catch(error => {
@@ -301,6 +306,14 @@ function App() {
 
     useAutoSync(handleSyncApplied);
 
+    // A Kinpak export can outlast the Settings window it was started from: say how it ended wherever you are.
+    useEffect(() => onKinpakExportFinished(({ file, summary, error }) => {
+        const name = file.split(/[\\/]/).pop() ?? file;
+        setNotification(error
+            ? { message: `Kinpak export failed: ${error}`, type: "error" }
+            : { message: `Kinpak saved: ${name} (${formatBytes(summary?.bytes ?? 0)})`, type: "success" });
+    }), []);
+
     // ── Scroll-to-top ────────────────────────────────────────────────────────
     useEffect(() => {
         const onScroll = () => setShowScrollTop(window.scrollY > 400);
@@ -357,7 +370,7 @@ function App() {
             getVideoHandle(video.id).catch(() => null)
         ]);
 
-        setTranscript(text === "API_KEY_MISSING" ? "No transcript available. API key missing." : text);
+        setTranscript(text);
 
         // If video doesn't have handle, use fetched one
         if (!video.handle && fetchedHandle) {
@@ -423,8 +436,9 @@ function App() {
         setShowDrivePanel(true);
     }, [library]);
 
-    const handleSearchInLibrary = (term: string, mode: 'tag' | 'library') => {
-        goToLibrarySearch(mode === 'tag' ? `tag_search:${term}` : term);
+    // 'tag' searches Quick Tags (#), 'term' searches glossary terms (^), 'library' is plain text.
+    const handleSearchInLibrary = (term: string, mode: 'tag' | 'term' | 'library') => {
+        goToLibrarySearch(mode === 'tag' ? `tag_search:${term}` : mode === 'term' ? `term_search:${term}` : term);
     };
 
     const handleViewBiography = useCallback(async (channelHandle: string) => {
@@ -604,7 +618,7 @@ function App() {
         <div className="min-h-screen bg-[#0f0f0f] text-white font-sans selection:bg-red-500/30 selection:text-white pb-20 select-none">
             {/* Navigation - conditional rendering */}
             {navigationOrientation === 'vertical' && (
-                <div className="fixed left-0 top-0 h-full w-16 bg-[#0f0f0f] border-r border-[#272727] z-40 flex flex-col items-center py-6">
+                <div className="fixed left-0 top-0 h-full w-16 bg-[#0f0f0f] border-r border-[#272727] z-40 flex flex-col items-center pt-6">
                     {/* Logo */}
                     <div className="mb-8">
                         <BrandLogo
@@ -656,8 +670,8 @@ function App() {
                         )}
                     </div>
 
-                    {/* Bottom Icons */}
-                    <div className="flex flex-col items-center gap-4">
+                    {/* Bottom Icons (with the bottom padding the rail used to have, now that the switcher below sits flush) */}
+                    <div className="flex flex-col items-center gap-4 pb-4">
                         {flags.showListModeToggle && (
                             <button
                                 onClick={toggleVideoListMode}
@@ -677,6 +691,10 @@ function App() {
                             </button>
                         )}
                     </div>
+
+                    {/* A direct child of the rail (not of the icon group above), so it spans the rail's full
+                        width and sits flush with the bottom of the window, without their padding. */}
+                    <WorkspaceSwitcher variant="rail" />
                 </div>
             )}
 
@@ -697,7 +715,7 @@ function App() {
                                     <h1 className="text-2xl font-bold tracking-tighter text-white">
                                         <span className="text-[var(--k-accent)]">{BRAND.name.substring(0, 3)}</span>{BRAND.name.substring(3)}
                                     </h1>
-                                    <span className="text-xs text-gray-500 -mt-0.5">{labels.workspaceName}</span>
+                                    <WorkspaceSwitcher variant="name" name={labels.workspaceName} />
                                 </div>
                             </div>
 
@@ -820,12 +838,12 @@ function App() {
                                             ? getLibraryQuery(biographySearchQuery, 'biography')
                                         : (viewMode === 'library' ? getLibraryQuery(library.librarySearch, 'library') : search.activeText)
                                 }
-                                 placeholder={viewMode === 'glossary' ? "Look up Term" : (viewMode === 'biography' ? `Look up ${labels.aliasBiographyItem}` : (viewMode === 'library' ? "Look up Videos and Transcripts" : "Search YouTube handle, playlist URL, or video URL"))}
+                                 placeholder={viewMode === 'glossary' ? "Look up Tag/Term" : (viewMode === 'biography' ? `Look up ${labels.aliasBiographyItem}` : (viewMode === 'library' ? "Look up Videos and Transcripts" : "Search YouTube handle, playlist URL, or video URL"))}
                             />
                         </div>
                     </div>
                 </header>
-                {search.error && (
+                {viewMode === 'search' && search.error && (
                     <div className="mt-8 text-center animate-in fade-in duration-300">
                         <div className="text-red-500 font-medium bg-red-900/10 px-6 py-3 rounded-lg border border-red-600/20 inline-block mx-auto text-sm">
                             {search.error}
@@ -886,6 +904,7 @@ function App() {
                                         }}
                                         refreshKey={driveVersion}
                                         allowEditAlias={allowEditWDBS}
+                                        clearNavRail={navigationOrientation === 'vertical'}
                                     />
                                     {allowEditWDBS && (
                                         <button
@@ -963,7 +982,7 @@ function App() {
                 onSave={selectedVideo ? (summary) => library.handleSaveVideo(selectedVideo, summary, transcript) : undefined}
                 onDelete={() => library.handleDeleteFromSidebar(selectedVideo)}
                 onRefetch={selectedVideo ? () => handleSelectVideo(selectedVideo) : undefined}
-                hasApiKey={hasApiKey}
+                onTranscriptChange={setTranscript}
                 pluginSummarizeEnabled={effectivePluginSummarizeEnabled}
                 pluginPhotosynthesisEnabled={effectivePluginPhotosynthesisEnabled}
                 showSynthesizeVenice={showSynthesizeVenice}

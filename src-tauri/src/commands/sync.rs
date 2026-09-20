@@ -3,7 +3,6 @@ use tauri::{command, AppHandle, Emitter, State};
 
 use crate::db::sync::ApplyStats;
 use crate::sync::http::{normalize_server_url, ServerApi};
-use crate::sync::pack::{self, ExportOptions, ExportSummary, ImportSummary};
 use crate::sync::{self, SyncReport, SyncState, SyncStatus};
 use crate::{db, get_db_path};
 
@@ -83,78 +82,6 @@ pub async fn sync_disconnect(app: AppHandle, state: State<'_, SyncState>, keep_d
     tokio::task::spawn_blocking(move || sync::disconnect(&db_path, keep_data))
         .await
         .map_err(|e| e.to_string())?
-}
-
-/// Writes the syncable data (never keys, tokens or paths) to the file the user chose in the Save As
-/// dialog. A `.gz` name is compressed, `.jsonl` is plain, and a name with neither gets `.jsonl.gz`.
-#[command]
-pub async fn export_sync_pack(
-    app: AppHandle,
-    file_path: String,
-    mut options: ExportOptions,
-) -> Result<ExportSummary, String> {
-    let db_path = get_db_path(&app);
-    let label = format!("{} {}", crate::APP_NAME, crate::VERSION);
-    let emitter = app.clone();
-    let (path, gzip) = pack::resolve_pack_path(&file_path);
-    options.gzip = gzip;
-    tokio::task::spawn_blocking(move || {
-        pack::export_pack(&db_path, &path, &label, crate::APP_NAME, &options, |m| {
-            let _ = emitter.emit("sync_pack_progress", m);
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// The "Save As" dialog for a sync pack. Compressed is the default type; the user can pick the
-/// plain `.jsonl` filter or type either extension. `start_dir` is where the dialog opens (the
-/// folder of the last export), when it still exists.
-#[command]
-pub async fn select_pack_save_path(app: AppHandle, default_name: String, start_dir: Option<String>) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut dialog = app
-        .dialog()
-        .file()
-        .set_file_name(default_name)
-        .add_filter("Compressed sync pack (.jsonl.gz)", &["gz"])
-        .add_filter("Sync pack (.jsonl)", &["jsonl"]);
-    if let Some(dir) = start_dir.filter(|d| std::path::Path::new(d).is_dir()) {
-        dialog = dialog.set_directory(dir);
-    }
-    dialog.save_file(move |f| {
-        let _ = tx.send(f.map(|p| p.to_string()));
-    });
-    rx.await.map_err(|e| e.to_string())
-}
-
-/// Imports a pack as ordinary local data. Rows the sync server owns are left alone, and settings
-/// are only applied when `apply_settings` is set.
-#[command]
-pub async fn import_sync_pack(app: AppHandle, file_path: String, apply_settings: bool) -> Result<ImportSummary, String> {
-    let db_path = get_db_path(&app);
-    let emitter = app.clone();
-    tokio::task::spawn_blocking(move || {
-        pack::import_pack(&db_path, std::path::Path::new(&file_path), apply_settings, |m| {
-            let _ = emitter.emit("sync_pack_progress", m);
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[command]
-pub async fn select_pack_file(app: AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .add_filter("Kinesis sync pack", &["jsonl", "gz"])
-        .pick_file(move |f| {
-            let _ = tx.send(f.map(|p| p.to_string()));
-        });
-    rx.await.map_err(|e| e.to_string())
 }
 
 /// Whether each provider can be reached right now, and whether that's via the server's license.

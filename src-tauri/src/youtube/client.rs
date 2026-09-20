@@ -14,6 +14,7 @@ pub(crate) fn decode_html(text: &str) -> String {
 pub enum ClientType {
     Web,
     Android,
+    Ios,
 }
 
 pub struct YouTubeClient {
@@ -44,6 +45,22 @@ impl YouTubeClient {
                     }
                 })
             }
+            ClientType::Ios => {
+                serde_json::json!({
+                    "context": {
+                        "client": {
+                            "clientName": "IOS",
+                            "clientVersion": "20.10.4",
+                            "deviceModel": "iPhone16,2",
+                            "osName": "iPhone",
+                            "osVersion": "18.3.2.22D82",
+                            "hl": "en",
+                            "gl": "US",
+                            "utcOffsetMinutes": 0,
+                        }
+                    }
+                })
+            }
             ClientType::Android => {
                 serde_json::json!({
                     "context": {
@@ -67,14 +84,20 @@ impl YouTubeClient {
         let ua = match self.client_type {
             ClientType::Web => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
             ClientType::Android => "com.google.android.youtube/21.02.35 (Linux; U; Android 14; en_US) gzip",
+            ClientType::Ios => "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
         };
         headers.insert(USER_AGENT, HeaderValue::from_str(ua).unwrap());
         headers
     }
 
-    pub async fn search(&self, query: &str) -> Result<Value, String> {
+    /// A page of keyword search results: the first page for `query`, or (with a continuation token
+    /// from the previous page) the next one. A continuation is asked for on its own, without the query.
+    pub async fn search(&self, query: &str, continuation: Option<&str>) -> Result<Value, String> {
         let mut body = self.get_context();
-        body["query"] = serde_json::json!(query);
+        match continuation {
+            Some(token) => body["continuation"] = serde_json::json!(token),
+            None => body["query"] = serde_json::json!(query),
+        }
 
         let res = self.client.post("https://www.youtube.com/youtubei/v1/search")
             .headers(self.get_headers())
@@ -86,6 +109,22 @@ impl YouTubeClient {
         res.json::<Value>().await.map_err(|e| e.to_string())
     }
 
+    /// One of a channel's tabs (`params` says which, see `listing::CHANNEL_VIDEOS_TAB`).
+    pub async fn browse_tab(&self, browse_id: &str, params: &str) -> Result<Value, String> {
+        let mut body = self.get_context();
+        body["browseId"] = serde_json::json!(browse_id);
+        body["params"] = serde_json::json!(params);
+        self.post_browse(body).await
+    }
+
+    /// The next page of a channel tab or playlist, from the token the previous page gave. A continuation
+    /// stands on its own: sending the channel or playlist id along with it is refused.
+    pub async fn browse_continuation(&self, token: &str) -> Result<Value, String> {
+        let mut body = self.get_context();
+        body["continuation"] = serde_json::json!(token);
+        self.post_browse(body).await
+    }
+
     pub async fn browse(&self, browse_id: Option<String>, continuation: Option<String>) -> Result<Value, String> {
         let mut body = self.get_context();
         if let Some(id) = browse_id {
@@ -94,6 +133,10 @@ impl YouTubeClient {
         if let Some(c) = continuation {
             body["continuation"] = serde_json::json!(c);
         }
+        self.post_browse(body).await
+    }
+
+    async fn post_browse(&self, body: Value) -> Result<Value, String> {
 
         let res = self.client.post("https://www.youtube.com/youtubei/v1/browse")
             .headers(self.get_headers())
@@ -189,6 +232,16 @@ pub fn is_live_or_upcoming(renderer: &Value) -> bool {
     false
 }
 
+/// "9:11" or "1:02:03" (a duration as YouTube prints it on a thumbnail) in seconds.
+pub(crate) fn duration_text_to_secs(text: &str) -> Option<i32> {
+    let parts: Vec<&str> = text.trim().split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 || parts.iter().any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    let secs = parts.iter().try_fold(0i64, |acc, p| p.parse::<i64>().ok().map(|n| acc * 60 + n))?;
+    i32::try_from(secs).ok()
+}
+
 pub fn extract_video_basic_info(renderer: &Value) -> Option<Value> {
     let video_id = renderer["videoId"].as_str()?;
     let title = decode_html(renderer["title"]["runs"][0]["text"].as_str().unwrap_or("Unknown"));
@@ -219,7 +272,8 @@ pub fn extract_video_basic_info(renderer: &Value) -> Option<Value> {
         "publishedAt": published_text,
         "viewCount": view_count_text,
         "author": owner_text,
-        "handle": handle
+        "handle": handle,
+        "lengthSeconds": renderer["lengthText"]["simpleText"].as_str().and_then(duration_text_to_secs)
     }))
 }
 
@@ -248,6 +302,9 @@ pub fn extract_playlist_video_info(renderer: &Value) -> Option<Value> {
         }
     }
 
+    // A playlist item states its length in seconds (as a string).
+    let length_seconds = renderer["lengthSeconds"].as_str().and_then(|s| s.parse::<i32>().ok());
+
     Some(serde_json::json!({
         "id": video_id,
         "title": title,
@@ -255,7 +312,8 @@ pub fn extract_playlist_video_info(renderer: &Value) -> Option<Value> {
         "publishedAt": published_at,
         "viewCount": view_count,
         "author": owner_text,
-        "handle": handle
+        "handle": handle,
+        "lengthSeconds": length_seconds
     }))
 }
 
@@ -298,6 +356,16 @@ pub fn extract_lockup_video_info(lockup: &Value) -> Option<Value> {
         .and_then(|run| run["onTap"]["innertubeCommand"]["browseEndpoint"]["canonicalBaseUrl"].as_str())
         .and_then(extract_handle_from_url);
 
+    // The length is the badge on the thumbnail's bottom edge ("16:36").
+    let length_seconds = lockup["contentImage"]["thumbnailViewModel"]["overlays"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| o["thumbnailBottomOverlayViewModel"]["badges"].as_array())
+        .flatten()
+        .filter_map(|b| b["thumbnailBadgeViewModel"]["text"].as_str())
+        .find_map(duration_text_to_secs);
+
     Some(serde_json::json!({
         "id": video_id,
         "title": title,
@@ -305,7 +373,8 @@ pub fn extract_lockup_video_info(lockup: &Value) -> Option<Value> {
         "publishedAt": published_at,
         "viewCount": view_count,
         "author": owner_text,
-        "handle": handle
+        "handle": handle,
+        "lengthSeconds": length_seconds
     }))
 }
 
@@ -409,5 +478,21 @@ mod live_tests {
             ]}}}}
         });
         assert!(!is_live_or_upcoming(&channel_named_premieres));
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::duration_text_to_secs;
+
+    #[test]
+    fn durations_as_printed_on_a_thumbnail_are_read() {
+        assert_eq!(duration_text_to_secs("0:45"), Some(45));
+        assert_eq!(duration_text_to_secs("9:11"), Some(551));
+        assert_eq!(duration_text_to_secs("1:02:03"), Some(3723));
+        assert_eq!(duration_text_to_secs("  16:36 "), Some(996));
+        for bad in ["", "LIVE", "12", "1:2:3:4", "a:b", "5:", ":30", "UPCOMING", "3 views"] {
+            assert_eq!(duration_text_to_secs(bad), None, "{bad:?}");
+        }
     }
 }

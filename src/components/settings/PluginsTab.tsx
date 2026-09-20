@@ -1,137 +1,17 @@
-import { Cpu, Check, Save, Terminal, Lightbulb, FolderTree } from "lucide-react";
+import { Cpu, ArrowRight, FolderTree } from "lucide-react";
 import { useState, useEffect } from "react";
-import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import {
     setSetting, getSetting,
     checkOllama, checkModelPulled, pullModel, deleteModel, installOllama,
     getOllamaPrompt, setOllamaPrompt as saveOllamaPrompt,
-    getVeniceApiKey, getVenicePrompt, setVenicePrompt as saveVenicePromptCmd,
-    getKeyStatus, type KeyStatus,
+    getKeyStatus,
 } from "../../api";
 import { useWorkspace } from "../../hooks/useWorkspace";
 import { useLockedSettings, LOCKED_TITLE } from "../../hooks/useLockedSettings";
 import { useFlags } from "../../hooks/useFlags";
-
-// Kept in sync with the backend default (venice.rs's DEFAULT_VENICE_MODEL / schema.rs's
-// "venice_model" seed value). Venice renames/deprecates models over time (e.g. "GLM 5.1" vs
-// "GLM 5.2"), which is exactly why this is a free-text field rather than a hardcoded dropdown —
-// the user can switch models the moment Venice changes its lineup, without waiting on an app
-// update.
-const DEFAULT_VENICE_MODEL = "zai-org-glm-5";
-
-// ─── Shared sub-components ───────────────────────────────────────────────────
-
-function PromptEditor({
-    label,
-    value,
-    onChange,
-    onSave,
-    dirty,
-}: {
-    label: string;
-    value: string;
-    onChange: (v: string) => void;
-    onSave: () => void;
-    dirty: boolean;
-}) {
-    // A DB owner can make the prompt templates read-only (allowEditPrompts = false).
-    const { flags } = useFlags();
-    const canEdit = flags.allowEditPrompts;
-    return (
-        <div>
-            <label className="text-[10px] uppercase font-bold text-[#aaaaaa] tracking-widest block mb-2">{label}</label>
-            <textarea
-                value={value}
-                readOnly={!canEdit}
-                onChange={(e) => onChange(e.target.value)}
-                placeholder="Create a synopsis of this video transcript with pretty format."
-                className="w-full h-80 bg-[#1a1a1a] border border-[#303030] text-sm text-white rounded-lg px-3 py-2.5 outline-none hover:bg-[#202020] transition-colors resize-y font-mono text-[11px]"
-            />
-            <div className="flex items-center justify-between mt-2">
-                {canEdit && dirty && (
-                    <button
-                        onClick={onSave}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-[10px] font-bold transition-colors cursor-pointer"
-                    >
-                        <Save className="w-3 h-3" />
-                        Save
-                    </button>
-                )}
-            </div>
-        </div>
-    );
-}
-
-function DefaultBadge() {
-    return (
-        <div className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500/10 border border-green-500/30 text-green-400 rounded-md text-[10px] font-bold">
-            <Check className="w-3 h-3" />
-            Default
-        </div>
-    );
-}
-
-function TooltipLightbulb() {
-    const [isHovered, setIsHovered] = useState(false);
-    const [rect, setRect] = useState<DOMRect | null>(null);
-
-    return (
-        <div 
-            className="relative flex items-center"
-            onMouseEnter={(e) => {
-                setRect(e.currentTarget.getBoundingClientRect());
-                setIsHovered(true);
-            }}
-            onMouseLeave={() => setIsHovered(false)}
-        >
-            <Lightbulb className="w-3.5 h-3.5 text-[#666666] hover:text-orange-400 transition-colors cursor-help" />
-            {isHovered && rect && createPortal(
-                <div 
-                    className="fixed z-[999999] w-80 bg-[#1a1a1a] shadow-2xl p-4 rounded-xl border border-[#333] pointer-events-none animate-in fade-in slide-in-from-bottom-2 duration-200"
-                    style={{ 
-                        top: rect.top - 12, 
-                        left: rect.left, 
-                        transform: 'translateY(-100%)'
-                    }}
-                >
-                    <h4 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 border-b border-[#333] pb-2 flex items-center gap-2">
-                        <Terminal className="w-3.5 h-3.5" />
-                        Supported Variables
-                    </h4>
-                    <div className="space-y-4">
-                        <div className="grid grid-cols-1 gap-1.5 pt-1 text-[11px]">
-                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                <span>{"${title}"}:</span>
-                                <span className="text-gray-500 group-hover/code:text-gray-300">Video title</span>
-                            </code>
-                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                <span>{"${author}"}:</span>
-                                <span className="text-gray-500 group-hover/code:text-gray-300">Channel name</span>
-                            </code>
-                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                <span>{"${handle}"}:</span>
-                                <span className="text-gray-500 group-hover/code:text-gray-300">Channel handle</span>
-                            </code>
-                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                <span>{"${length_seconds}"}:</span>
-                                <span className="text-gray-500 group-hover/code:text-gray-300">Video length</span>
-                            </code>
-                            <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                <span>{"${view_count}"}:</span>
-                                <span className="text-gray-500 group-hover/code:text-gray-300">View count</span>
-                            </code>
-                        </div>
-                        <p className="text-[10px] text-gray-400 leading-relaxed italic">
-                            These variables substitute dynamically when generating a summary from the library.
-                        </p>
-                    </div>
-                </div>,
-                document.body
-            )}
-        </div>
-    );
-}
+import { PromptEditor, DefaultBadge, TooltipLightbulb } from "./pluginShared";
+import { settingsPrimaryBtn, settingsSecondaryBtn } from "./buttons";
 
 // ─── Local (Ollama) sub-tab ─────────────────────────────────────────────────
 
@@ -224,7 +104,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
                             <button
                                 onClick={handleInstallOrPull}
                                 disabled={loading}
-                                className="px-3 py-1.5 bg-red-600 text-white hover:bg-red-500 rounded-md text-[10px] font-bold transition-all cursor-pointer disabled:opacity-50"
+                                className={settingsPrimaryBtn}
                             >
                                 Pull Model
                             </button>
@@ -232,7 +112,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
                             <button
                                 onClick={handleRemoveModel}
                                 disabled={loading}
-                                className="px-3 py-1.5 bg-red-600 text-white hover:bg-red-500 rounded-md text-[10px] font-bold transition-all cursor-pointer disabled:opacity-50"
+                                className={settingsPrimaryBtn}
                             >
                                 Remove Model
                             </button>
@@ -242,7 +122,7 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
                             : (
                                 <button
                                     onClick={onSetDefault}
-                                    className="px-3 py-1.5 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white rounded-md text-[10px] font-semibold transition-colors cursor-pointer"
+                                    className={settingsSecondaryBtn}
                                 >
                                     Make Default
                                 </button>
@@ -277,135 +157,49 @@ function OllamaSubTab({ summarizeProvider, onSetDefault }: OllamaProps) {
 interface VeniceProps {
     summarizeProvider: string;
     onSetDefault: () => void;
+    /** Opens API Key > Venice AI, where the key, model and prompt template are set. Absent when that tab is hidden. */
+    onOpenVeniceSettings?: () => void;
 }
 
-function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
-    const [loading, setLoading] = useState(false);
-    const [hasKey, setHasKey] = useState(false);
-    const [keyInput, setKeyInput] = useState('');
-    const [prompt, setPrompt] = useState('');
-    const [promptDirty, setPromptDirty] = useState(false);
-    const [model, setModel] = useState(DEFAULT_VENICE_MODEL);
-    const [modelInput, setModelInput] = useState('');
-    const [modelSaved, setModelSaved] = useState(false);
-    const isLocked = useLockedSettings();
-    const modelLocked = isLocked('venice_model');
-    const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
+// The key, the model and the prompt template are set under API Key > Venice AI (they're shared with the
+// image tools). This tab only says whether cloud summaries are ready, links there, and picks the default.
+function VeniceSubTab({ summarizeProvider, onSetDefault, onOpenVeniceSettings }: VeniceProps) {
+    const [ready, setReady] = useState<boolean | null>(null);
 
     useEffect(() => {
-        getKeyStatus().then(setKeyStatus).catch(() => {});
-        getVeniceApiKey().then(k => setHasKey(!!k));
-        getVenicePrompt().then(setPrompt);
-        getSetting('venice_model').then(m => {
-            const resolved = m && m.trim() ? m : DEFAULT_VENICE_MODEL;
-            setModel(resolved);
-            setModelInput(resolved);
-        });
+        getKeyStatus().then(s => setReady(s.venice.available)).catch(() => setReady(null));
     }, []);
-
-    const handleSaveModel = async () => {
-        const next = modelInput.trim() || DEFAULT_VENICE_MODEL;
-        setLoading(true);
-        try {
-            await setSetting('venice_model', next);
-            setModel(next);
-            setModelInput(next);
-            setModelSaved(true);
-            window.setTimeout(() => setModelSaved(false), 1500);
-        } catch {
-            alert("Failed to save Venice model.");
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const handleSaveKey = async () => {
-        const key = keyInput.trim();
-        if (!key) return;
-        setLoading(true);
-        setHasKey(true);
-        const original = keyInput;
-        setKeyInput('');
-        try {
-            await setSetting("venice_api_key", key);
-        } catch {
-            setHasKey(false);
-            setKeyInput(original);
-            alert("Failed to save Venice API Key.");
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const handleRemoveKey = async () => {
-        setLoading(true);
-        setHasKey(false);
-        try {
-            await setSetting("venice_api_key", "");
-        } catch {
-            setHasKey(true);
-            alert("Failed to remove Venice API Key.");
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const handleSavePrompt = async () => {
-        await saveVenicePromptCmd(prompt);
-        setPromptDirty(false);
-    };
 
     return (
         <div className="space-y-4 animate-in fade-in slide-in-from-right-2 duration-300">
-            {/* API Key */}
             <div className="bg-black/20 p-4 rounded-lg border border-[#303030]">
-                <span className="text-xs font-bold text-white block mb-3">Venice API Key</span>
-                {keyStatus?.venice.licensed && (
-                    <p className="text-[10px] text-blue-300 mb-3 leading-relaxed">
-                        Covered by {keyStatus.server_name || 'your sync server'}'s license, so you don't need your own key.
-                        {keyStatus.venice.own_key && !keyStatus.venice.via_license ? " Your own key is used instead." : ""}
-                    </p>
-                )}
-                <div className="flex items-center justify-between">
-                    <div className="flex-1 mr-4">
-                        {hasKey
-                            ? <span className="text-[10px] text-[#aaaaaa]">Activated &amp; Ready</span>
-                            : (
-                                <input
-                                    type="password"
-                                    placeholder="Paste Venice API key..."
-                                    value={keyInput}
-                                    onChange={(e) => setKeyInput(e.target.value)}
-                                    onKeyDown={(e) => { if (e.key === 'Enter' && keyInput.trim()) handleSaveKey(); }}
-                                    className="w-full bg-[#1a1a1a] border border-[#303030] hover:border-[#505050] outline-none rounded-lg px-3 py-2 text-[11px] text-white placeholder-[#444] transition-colors"
-                                />
-                            )
-                        }
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                        {hasKey ? (
+                <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                        <span className="text-xs font-bold text-white block mb-1">Venice AI</span>
+                        <p className="text-[10px] text-[#aaaaaa] leading-relaxed">
+                            {ready === false
+                                ? "Needs an API key before it can summarize."
+                                : ready === true
+                                    ? "Ready. The model and prompt template are set in the API Key settings."
+                                    : "The API key, model and prompt template are set in the API Key settings."}
+                        </p>
+                        {onOpenVeniceSettings && (
                             <button
-                                onClick={handleRemoveKey}
-                                disabled={loading}
-                                className="bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-3 py-1.5 rounded-md font-semibold text-[10px] transition-colors cursor-pointer disabled:opacity-50"
+                                onClick={onOpenVeniceSettings}
+                                className="mt-2 inline-flex items-center gap-1 text-[11px] text-[#aaaaaa] hover:text-white underline cursor-pointer"
                             >
-                                Deactivate
-                            </button>
-                        ) : (
-                            <button
-                                onClick={handleSaveKey}
-                                disabled={loading || !keyInput.trim()}
-                                className="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-md font-bold text-[10px] transition-colors cursor-pointer disabled:opacity-50"
-                            >
-                                Activate
+                                Venice AI settings
+                                <ArrowRight className="w-3 h-3" />
                             </button>
                         )}
+                    </div>
+                    <div className="shrink-0">
                         {summarizeProvider === 'cloud'
                             ? <DefaultBadge />
                             : (
                                 <button
                                     onClick={onSetDefault}
-                                    className="px-3 py-1.5 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white rounded-md text-[10px] font-semibold transition-colors cursor-pointer"
+                                    className={settingsSecondaryBtn}
                                 >
                                     Make Default
                                 </button>
@@ -414,45 +208,6 @@ function VeniceSubTab({ summarizeProvider, onSetDefault }: VeniceProps) {
                     </div>
                 </div>
             </div>
-
-            {/* Model */}
-            <div className="bg-black/20 p-4 rounded-lg border border-[#303030]">
-                <div className="flex items-center gap-2 mb-3">
-                    <span className="text-xs font-bold text-white">Venice Model</span>
-                    <TooltipLightbulb />
-                </div>
-                <p className="text-[10px] text-[#aaaaaa] mb-3">
-                    Venice periodically renames or retires models (e.g. an older GLM release in favor of a newer one). If summaries start failing, check Venice's current model list and update this.
-                </p>
-                <div className="flex items-center gap-2">
-                    <input
-                        type="text"
-                        placeholder={DEFAULT_VENICE_MODEL}
-                        value={modelInput}
-                        onChange={(e) => setModelInput(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter' && !modelLocked) handleSaveModel(); }}
-                        disabled={modelLocked}
-                        title={modelLocked ? LOCKED_TITLE : undefined}
-                        className="flex-1 bg-[#1a1a1a] border border-[#303030] hover:border-[#505050] outline-none rounded-lg px-3 py-2 text-[11px] text-white placeholder-[#444] transition-colors font-mono disabled:opacity-50"
-                    />
-                    <button
-                        onClick={handleSaveModel}
-                        disabled={modelLocked || loading || !modelInput.trim() || modelInput.trim() === model}
-                        className="bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-3 py-1.5 rounded-md font-semibold text-[10px] transition-colors cursor-pointer disabled:opacity-50 shrink-0"
-                    >
-                        {modelSaved ? <Check className="w-3.5 h-3.5" /> : "Save"}
-                    </button>
-                </div>
-            </div>
-
-            {/* Prompt */}
-            <PromptEditor
-                label="Cloud Prompt Template (Default)"
-                value={prompt}
-                onChange={(v) => { setPrompt(v); setPromptDirty(true); }}
-                onSave={handleSavePrompt}
-                dirty={promptDirty}
-            />
         </div>
     );
 }
@@ -499,7 +254,7 @@ function WarpDriveSection() {
                         onClick={toggle}
                         disabled={locked}
                         title={locked ? LOCKED_TITLE : undefined}
-                        className={`px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default ${allowEdit ? 'bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white font-semibold' : 'bg-red-600 text-white hover:bg-red-500'}`}
+                        className={allowEdit ? settingsSecondaryBtn : settingsPrimaryBtn}
                     >
                         {allowEdit ? 'Disable' : 'Enable'}
                     </button>
@@ -524,9 +279,11 @@ interface Props {
     loading: boolean;
     showSummarizeOllama?: boolean;
     showSummarizeVenice?: boolean;
+    /** Jumps to API Key > Venice AI (left out when the API Key tab is hidden). */
+    onOpenVeniceSettings?: () => void;
 }
 
-export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOllama = true, showSummarizeVenice = true }: Props) {
+export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOllama = true, showSummarizeVenice = true, onOpenVeniceSettings }: Props) {
     const [summarizeTab, setSummarizeTab] = useState<'local' | 'cloud'>('local');
     const [summarizeProvider, setSummarizeProvider] = useState<string>('local');
     const [showCustomPrompt, setShowCustomPrompt] = useState(true);
@@ -579,7 +336,7 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
                                         onClick={() => onTogglePlugin(plugin.id, !plugin.enabled)}
                                         disabled={loading || isLocked(`plugin_${plugin.id}_enabled`)}
                                         title={isLocked(`plugin_${plugin.id}_enabled`) ? LOCKED_TITLE : undefined}
-                                        className={`px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer disabled:opacity-50 ${plugin.enabled ? 'bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white font-semibold' : 'bg-red-600 text-white hover:bg-red-500'}`}
+                                        className={plugin.enabled ? settingsSecondaryBtn : settingsPrimaryBtn}
                                     >
                                         {plugin.enabled ? 'Disable' : 'Enable'}
                                     </button>
@@ -659,7 +416,7 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
                                         <OllamaSubTab summarizeProvider={summarizeProvider} onSetDefault={() => setDefault('local')} />
                                     </div>
                                     <div className={summarizeTab === 'cloud' ? 'block' : 'hidden'}>
-                                        <VeniceSubTab summarizeProvider={summarizeProvider} onSetDefault={() => setDefault('cloud')} />
+                                        <VeniceSubTab summarizeProvider={summarizeProvider} onSetDefault={() => setDefault('cloud')} onOpenVeniceSettings={onOpenVeniceSettings} />
                                     </div>
                                 </div>
                             )}

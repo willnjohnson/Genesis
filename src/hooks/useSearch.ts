@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback } from "react";
 import {
-    getVideos, getVideoInfo, searchVideos, fetchChannelVideosV3,
+    getVideos, getVideoInfo, searchVideos, fetchChannelVideosV3, fetchChannelVideosKeyless,
     type Video
 } from "../api";
 import { type Facet } from "../components/SearchBar";
@@ -10,6 +10,8 @@ interface SearchState {
     id: string;
     isPlaylist: boolean;
     isV3Channel?: boolean;
+    /** A channel listed without an API key (see fetchChannelVideosKeyless). */
+    isKeylessChannel?: boolean;
     isSearch?: boolean;
 }
 
@@ -93,15 +95,16 @@ export function useSearch(hasApiKey: boolean) {
                 setCurrentSearch({ id: videoId, isPlaylist: false });
                 videoResult = videoInfo; // deferred return so App can open sidebar
             } else if (mode === 'channel') {
-                if (!hasApiKey) {
-                    setError("You must import an API Key to search for channels.");
-                } else {
-                    const res = await fetchChannelVideosV3(targetId);
-                    setVideos(dedup(res.videos));
-                    setContinuationToken(res.continuation);
-                    setCurrentSearch({ id: targetId, isPlaylist: false, isV3Channel: true });
-                    if (res.videos.length === 0) setError("No videos found for this channel.");
-                }
+                // With an API key the Data API lists the channel; without one, the channel's Videos tab
+                // on YouTube does, page by page, so a channel can be browsed either way.
+                const keyless = !hasApiKey;
+                const res = keyless ? await fetchChannelVideosKeyless(targetId) : await fetchChannelVideosV3(targetId);
+                setVideos(dedup(res.videos));
+                setContinuationToken(res.continuation);
+                setCurrentSearch(keyless
+                    ? { id: targetId, isPlaylist: false, isKeylessChannel: true }
+                    : { id: targetId, isPlaylist: false, isV3Channel: true });
+                if (res.videos.length === 0) setError("No videos found for this channel.");
             } else {
                 const res = await searchVideos(targetId);
                 setVideos(dedup(res.videos));
@@ -114,7 +117,11 @@ export function useSearch(hasApiKey: boolean) {
             if (!forcedType) {
                 setActiveFacets([]);
                 setActiveText(effectiveQuery);
-                setSearchQuery(effectiveQuery);
+                // A keyword search hands its words to YouTube, which matches far more than titles
+                // (descriptions, other spellings: "free bird" for "freebird"). Filtering the results
+                // again by those same words would hide most of them, so nothing narrows a fresh
+                // search; only what's typed afterwards does (see handleInput).
+                setSearchQuery(mode === 'search' ? "" : effectiveQuery);
             } else {
                 setActiveFacets([]);
                 setActiveText("");
@@ -139,6 +146,8 @@ export function useSearch(hasApiKey: boolean) {
                 res = await searchVideos(currentSearch.id, continuationToken);
             } else if (currentSearch.isV3Channel) {
                 res = await fetchChannelVideosV3(currentSearch.id, continuationToken);
+            } else if (currentSearch.isKeylessChannel) {
+                res = await fetchChannelVideosKeyless(currentSearch.id, continuationToken);
             } else {
                 res = await getVideos(currentSearch.id, currentSearch.isPlaylist, continuationToken);
             }
@@ -165,6 +174,8 @@ export function useSearch(hasApiKey: boolean) {
                     res = await searchVideos(currentSearch.id, token);
                 } else if (currentSearch.isV3Channel) {
                     res = await fetchChannelVideosV3(currentSearch.id, token);
+                } else if (currentSearch.isKeylessChannel) {
+                    res = await fetchChannelVideosKeyless(currentSearch.id, token);
                 } else {
                     res = await getVideos(currentSearch.id, currentSearch.isPlaylist, token);
                 }

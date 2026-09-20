@@ -21,12 +21,12 @@ pub fn has_real_summary(summary: &str) -> bool {
 // and can be missing entirely for videos saved before that ran or via other paths).
 pub(crate) fn append_channel_info_footer(conn: &Connection, video_id: &str) -> Result<()> {
     conn.execute(
-        "UPDATE videos AS a
+        "UPDATE Videos AS a
          SET summary = IFNULL(a.summary, '') || (char(10) || char(10) || 'Channel Info: ' || src.name)
          FROM (
              SELECT v.video_id AS vid, COALESCE(NULLIF(TRIM(b.display_name), ''), v.author) AS name
-             FROM videos v
-             LEFT JOIN biographies b ON b.handle = v.handle
+             FROM Videos v
+             LEFT JOIN Biographies b ON b.handle = v.handle
              WHERE v.video_id = ?1
          ) AS src
          WHERE a.video_id = src.vid
@@ -48,7 +48,7 @@ pub fn save_summary(db_path: &str, video_id: &str, summary: &str) -> Result<()> 
         None => summary,
     };
     conn.execute(
-        "UPDATE videos SET summary = ?1 WHERE video_id = ?2",
+        "UPDATE Videos SET summary = ?1 WHERE video_id = ?2",
         params![bare_summary, video_id],
     )?;
     // Some providers (e.g. Venice.ai) emit markdown blockquote lines with stray embedded
@@ -68,7 +68,7 @@ pub fn save_summary(db_path: &str, video_id: &str, summary: &str) -> Result<()> 
         // itself wrote — never touch a transcript that's populated, or empty for some other
         // reason (e.g. mid re-fetch already).
         conn.execute(
-            "UPDATE videos SET transcript = '' WHERE transcript = 'N/A' AND video_id = ?1",
+            "UPDATE Videos SET transcript = '' WHERE transcript = 'N/A' AND video_id = ?1",
             params![video_id],
         )?;
     }
@@ -92,7 +92,7 @@ pub(crate) fn clean_blockquote_lines(conn: &Connection, video_id: &str) -> Resul
                      THEN substr(summary, instr(summary, char(10)) + 1)
                      ELSE ''
                 END
-            FROM videos
+            FROM Videos
             WHERE video_id = ?1
             AND summary IS NOT NULL AND summary != ''
             UNION ALL
@@ -135,11 +135,11 @@ pub(crate) fn clean_blockquote_lines(conn: &Connection, video_id: &str) -> Resul
             )
             GROUP BY rid
         )
-        UPDATE videos
-        SET summary = (SELECT new_summary FROM new_summaries WHERE rid = videos.rowid)
+        UPDATE Videos
+        SET summary = (SELECT new_summary FROM new_summaries WHERE rid = Videos.rowid)
         WHERE rowid IN (
             SELECT rid FROM new_summaries
-            WHERE new_summary != (SELECT summary FROM videos WHERE rowid = new_summaries.rid)
+            WHERE new_summary != (SELECT summary FROM Videos WHERE rowid = new_summaries.rid)
         )",
         params![video_id],
     )?;
@@ -156,7 +156,7 @@ pub(crate) fn clean_blockquote_lines(conn: &Connection, video_id: &str) -> Resul
 // (e.g. to regenerate the summary) by clearing the "." in the transcript editor and saving.
 pub(crate) fn clear_transcript_after_summary(conn: &Connection, video_id: &str) -> Result<()> {
     conn.execute(
-        "UPDATE videos SET transcript = 'N/A' WHERE video_id = ?1",
+        "UPDATE Videos SET transcript = 'N/A' WHERE video_id = ?1",
         params![video_id],
     )?;
     Ok(())
@@ -164,7 +164,7 @@ pub(crate) fn clear_transcript_after_summary(conn: &Connection, video_id: &str) 
 
 pub fn get_summary(db_path: &str, video_id: &str) -> Result<Option<String>> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT summary FROM videos WHERE video_id = ?")?;
+    let mut stmt = conn.prepare("SELECT summary FROM Videos WHERE video_id = ?")?;
     let mut rows = stmt.query(params![video_id])?;
     if let Some(row) = rows.next()? {
         let summary: Option<String> = row.get(0)?;
@@ -178,7 +178,7 @@ pub fn get_summary(db_path: &str, video_id: &str) -> Result<Option<String>> {
 pub fn get_summarized_count(db_path: &str) -> Result<i64> {
     let conn = Connection::open(db_path)?;
     let mut stmt =
-        conn.prepare("SELECT summary FROM videos WHERE summary IS NOT NULL AND summary != ''")?;
+        conn.prepare("SELECT summary FROM Videos WHERE summary IS NOT NULL AND summary != ''")?;
     let mut rows = stmt.query([])?;
     let mut count = 0i64;
     while let Some(row) = rows.next()? {
@@ -193,7 +193,7 @@ pub fn get_summarized_count(db_path: &str) -> Result<i64> {
 pub fn get_videos_with_summaries(db_path: &str) -> Result<Vec<String>> {
     let conn = Connection::open(db_path)?;
     let mut stmt =
-        conn.prepare("SELECT video_id, summary FROM videos WHERE summary IS NOT NULL AND summary != ''")?;
+        conn.prepare("SELECT video_id, summary FROM Videos WHERE summary IS NOT NULL AND summary != ''")?;
     let mut rows = stmt.query([])?;
     let mut ids = Vec::new();
     while let Some(row) = rows.next()? {

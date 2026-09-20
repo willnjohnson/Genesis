@@ -5,6 +5,7 @@ import { decodeHtmlEntities } from "../../lib/utils";
 import { parseBool } from "../../lib/flags";
 import { useFlags } from "../../hooks/useFlags";
 import { useWorkspace } from "../../hooks/useWorkspace";
+import { settingsPrimaryBtn } from "./buttons";
 import { useLockedSettings, LOCKED_TITLE } from "../../hooks/useLockedSettings";
 
 // Settings keys. `saveSearchHistory` is also a DB-owner flag (see docs/customizing.md): when the owner
@@ -101,7 +102,7 @@ export function HistoryTab({ entries, onDeleteEntry, onClearDate, onClearAll, on
                     {view === "timeline" && canClear && entries.length > 0 && (
                         <button
                             onClick={onClearAll}
-                            className="bg-red-600 hover:bg-red-500 text-white px-4 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer flex items-center gap-2"
+                            className={settingsPrimaryBtn}
                         >
                             <Trash2 className="w-3.5 h-3.5" />
                             Clear All

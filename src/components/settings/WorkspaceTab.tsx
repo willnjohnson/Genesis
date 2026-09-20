@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
-import { setWorkspaceLabel } from "../../api";
+import { ArrowLeftRight, ChevronDown, ChevronRight, FolderOpen } from "lucide-react";
+import { getWorkspaceStatus, revealWorkspace, setWorkspaceLabel, type WorkspaceStatus } from "../../api";
+import { WorkspaceLauncher } from "../workspace/WorkspaceLauncher";
+import { ErrorBox } from "../workspace/shared";
+import { errText } from "../workspace/helpers";
+import { settingsSecondaryBtn } from "./buttons";
 import { useFlags } from "../../hooks/useFlags";
 import { useWorkspace } from "../../hooks/useWorkspace";
 import { checkLabel, LABEL_DEFS, type LabelKey } from "../../lib/workspace";
@@ -58,14 +62,14 @@ function LabelField({ labelKey, title, hint, max, defaultValue, value, disabled,
                     placeholder={defaultValue}
                     onChange={e => { setDraft(e.target.value); setError(null); }}
                     onKeyDown={e => { if (e.key === 'Enter') void commit(draft); }}
-                    className="flex-1 min-w-0 bg-[#121212] border border-[#303030] rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-[#555555] disabled:opacity-50"
+                    className="flex-1 min-w-0 bg-[#121212] border border-[#303030] rounded-lg px-3 py-2 text-[11px] text-white outline-none focus:border-[#555555] disabled:opacity-50"
                 />
                 {!disabled && (
                     <button
                         type="button"
                         disabled={saving || !dirty}
                         onClick={() => void commit(draft)}
-                        className="px-4 py-2 rounded-lg bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-xs font-semibold text-white cursor-pointer disabled:opacity-40 disabled:cursor-default disabled:hover:bg-[#222222]"
+                        className={settingsSecondaryBtn}
                     >
                         Save
                     </button>
@@ -95,6 +99,14 @@ export function WorkspaceTab() {
     const { labels, reload } = useWorkspace();
     const [advancedOpen, setAdvancedOpen] = useState(false);
     const [advancedTab, setAdvancedTab] = useState(ADVANCED_TABS[0].id);
+    const [status, setStatus] = useState<WorkspaceStatus | null>(null);
+    const [launcherOpen, setLauncherOpen] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    // Re-read when the name changes: renaming the workspace renames its folder too.
+    useEffect(() => {
+        getWorkspaceStatus().then(setStatus).catch(e => setError(errText(e)));
+    }, [labels.workspaceName]);
 
     const [nameDef, ...aliasDefs] = LABEL_DEFS;
     const activeTab = ADVANCED_TABS.find(t => t.id === advancedTab) ?? ADVANCED_TABS[0];
@@ -109,7 +121,7 @@ export function WorkspaceTab() {
                 <LabelField
                     labelKey={nameDef.key}
                     title={nameDef.title}
-                    hint="Used in export names, e.g. My_Research. Letters, numbers and spaces. Leave it empty and save to go back to the default."
+                    hint="Also the name of the workspace's folder, and used in export names, e.g. My_Research. Letters, numbers and spaces. Leave it empty and save to go back to the default."
                     max={nameDef.max}
                     defaultValue={nameDef.default}
                     value={labels.workspaceName}
@@ -117,6 +129,22 @@ export function WorkspaceTab() {
                     disabledNote="The name of this workspace has been locked."
                     onSaved={reload}
                 />
+                <div className="flex gap-2 mt-4">
+                    {flags.allowChangeDbLocation && (
+                        <button onClick={() => status && setLauncherOpen(true)} disabled={!status} className={settingsSecondaryBtn}>
+                            <ArrowLeftRight className="w-3.5 h-3.5" />
+                            Switch workspace
+                        </button>
+                    )}
+                    {status?.current && (
+                        <button onClick={() => revealWorkspace(status.current!.folder).catch(e => setError(errText(e)))} className={settingsSecondaryBtn}>
+                            <FolderOpen className="w-3.5 h-3.5" />
+                            Show folder
+                        </button>
+                    )}
+                </div>
+                {status?.current && <p className="text-[11px] text-[#666666] mt-2 break-all select-all">{status.current.path}</p>}
+                {error && <div className="mt-3"><ErrorBox>{error}</ErrorBox></div>}
             </div>
 
             {flags.showWorkspaceAdvanced && (
@@ -165,6 +193,8 @@ export function WorkspaceTab() {
                     )}
                 </div>
             )}
+
+            {launcherOpen && status && <WorkspaceLauncher status={status} onClose={() => setLauncherOpen(false)} />}
         </div>
     );
 }

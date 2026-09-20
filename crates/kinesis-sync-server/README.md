@@ -15,7 +15,7 @@ Deploying it (Cloudflare Tunnel, systemd, publishing content): **[`setup.md`](se
   server hashes each row, and rows whose hash changed get a new revision. Rows that disappeared
   become tombstones. Clients pull the changes since their last revision.
 - **Policy.** Settings you list under `[policy] enforced` are pushed to clients and locked
-  there. Their values come from the master database's `settings` table.
+  there. Their values come from the master database's `Settings` table.
 - **License.** Users' provider calls (Venice, YouTube Data API, Pixabay) go through
   `/api/v1/proxy/...` with their token; the server adds the real key. Keys never reach a client.
 - **Pull only.** Clients never upload. A client only ever changes rows this server provided, so

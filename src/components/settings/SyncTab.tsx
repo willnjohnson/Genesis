@@ -1,12 +1,13 @@
-import { RefreshCw, PlugZap, Unplug, FileUp, Lock, KeyRound, X } from "lucide-react";
+import { RefreshCw, PlugZap, Unplug, Lock, KeyRound, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useFlags } from "../../hooks/useFlags";
+import { ProgressLine } from "../workspace/shared";
+import { settingsPrimaryBtn, settingsSecondaryBtn } from "./buttons";
 import { SYNC_OPTIONS_CHANGED_EVENT } from "../../hooks/useAutoSync";
 import {
     getSyncStatus, syncTest, syncConnect, syncRun, syncCancel, syncSetOptions, syncDisconnect,
-    selectPackFile, importSyncPack,
-    type SyncStatus, type SyncReport, type SyncProgress, type SyncManifest, type SyncPackImportSummary,
+    type SyncStatus, type SyncReport, type SyncProgress, type SyncManifest,
 } from "../../api";
 
 interface Props {
@@ -67,16 +68,14 @@ export function SyncTab({ onSyncComplete }: Props) {
     const [status, setStatus] = useState<SyncStatus | null>(null);
     const [url, setUrl] = useState("");
     const [token, setToken] = useState("");
-    const [busy, setBusy] = useState<"test" | "connect" | "sync" | "disconnect" | "import" | null>(null);
+    const [busy, setBusy] = useState<"test" | "connect" | "sync" | "disconnect" | null>(null);
     const [progress, setProgress] = useState<SyncProgress | null>(null);
     const [report, setReport] = useState<SyncReport | null>(null);
     const [info, setInfo] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [confirmDisconnect, setConfirmDisconnect] = useState(false);
     const [keepData, setKeepData] = useState(true);
-    const [importSummary, setImportSummary] = useState<SyncPackImportSummary | null>(null);
-    const [importSettings, setImportSettings] = useState(true);
-    // A DB owner can take away disconnecting and importing packs (see lib/flags.ts).
+    // A DB owner can take away disconnecting (see lib/flags.ts).
     const { flags } = useFlags();
 
     const refresh = useCallback(async () => {
@@ -176,24 +175,6 @@ export function SyncTab({ onSyncComplete }: Props) {
         }
     };
 
-    const handleImport = async () => {
-        setError(null);
-        setImportSummary(null);
-        try {
-            const file = await selectPackFile();
-            if (!file) return;
-            setBusy("import");
-            const result = await importSyncPack(file, importSettings);
-            setImportSummary(result);
-            onSyncComplete?.();
-        } catch (e) {
-            setError(String(e));
-        } finally {
-            setBusy(null);
-            refresh();
-        }
-    };
-
     if (!status) {
         return <div className="text-center text-[#555] text-xs py-8">{error ?? "Loading..."}</div>;
     }
@@ -201,8 +182,8 @@ export function SyncTab({ onSyncComplete }: Props) {
     const syncing = busy === "sync" || status.running;
     const ownedTotal = Object.values(status.owned_counts).reduce((a, b) => a + b, 0);
     const inputClass = "w-full bg-black/40 border border-[#303030] rounded-lg px-3 py-2.5 text-sm text-white placeholder:text-[#555] focus:outline-none focus:border-[#555]";
-    const primaryBtn = "bg-red-600 text-white hover:bg-red-500 px-4 py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-default";
-    const secondaryBtn = "bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-3 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-default";
+    const primaryBtn = settingsPrimaryBtn;
+    const secondaryBtn = settingsSecondaryBtn;
 
     return (
         <div className="space-y-6 animate-in slide-in-from-right-4 duration-300">
@@ -241,11 +222,11 @@ export function SyncTab({ onSyncComplete }: Props) {
                     </div>
                     <div className="flex gap-2 pt-1">
                         <button onClick={handleTest} disabled={busy !== null || !url.trim()} className={`flex-1 ${secondaryBtn}`}>
-                            <PlugZap className="w-4 h-4" />
+                            <PlugZap className="w-3.5 h-3.5" />
                             {busy === "test" ? "Testing..." : "Test connection"}
                         </button>
                         <button onClick={handleConnect} disabled={busy !== null || !url.trim()} className={`flex-1 ${primaryBtn}`}>
-                            <RefreshCw className="w-4 h-4" />
+                            <RefreshCw className="w-3.5 h-3.5" />
                             {busy === "connect" ? "Connecting..." : "Connect & sync"}
                         </button>
                     </div>
@@ -292,12 +273,12 @@ export function SyncTab({ onSyncComplete }: Props) {
 
                         <div className="flex gap-2">
                             <button onClick={() => runSync(false)} disabled={syncing || busy !== null} className={`flex-1 ${primaryBtn}`}>
-                                <RefreshCw className={`w-4 h-4 ${syncing ? "animate-spin" : ""}`} />
+                                <RefreshCw className={`w-3.5 h-3.5 ${syncing ? "animate-spin" : ""}`} />
                                 {syncing ? "Syncing..." : "Sync now"}
                             </button>
                             {syncing ? (
                                 <button onClick={() => syncCancel()} className={secondaryBtn}>
-                                    <X className="w-4 h-4" />
+                                    <X className="w-3.5 h-3.5" />
                                     Cancel
                                 </button>
                             ) : (
@@ -313,13 +294,7 @@ export function SyncTab({ onSyncComplete }: Props) {
                         </div>
 
                         {syncing && progress && (
-                            <div className="p-2.5 bg-red-600/10 border border-red-600/20 rounded-lg flex items-center gap-2">
-                                <div className="w-2.5 h-2.5 border-2 border-red-600 border-t-transparent rounded-full animate-spin" />
-                                <span className="text-[10px] font-bold text-red-500 uppercase tracking-wider">
-                                    {progress.message}
-                                    {progress.upserted > 0 ? ` ${progress.upserted.toLocaleString()} items` : ""}
-                                </span>
-                            </div>
+                            <ProgressLine message={`${progress.message}${progress.upserted > 0 ? ` ${progress.upserted.toLocaleString()} items` : ""}`} />
                         )}
                     </div>
 
@@ -357,7 +332,7 @@ export function SyncTab({ onSyncComplete }: Props) {
                         <div className="text-sm font-bold">Disconnect</div>
                         {!confirmDisconnect ? (
                             <button onClick={() => setConfirmDisconnect(true)} disabled={busy !== null || syncing} className={secondaryBtn}>
-                                <Unplug className="w-4 h-4" />
+                                <Unplug className="w-3.5 h-3.5" />
                                 Disconnect from server
                             </button>
                         ) : (
@@ -411,40 +386,6 @@ export function SyncTab({ onSyncComplete }: Props) {
                 </div>
             )}
 
-            {flags.allowSyncImport && (
-            <div className="bg-[#121212] border border-[#303030] rounded-xl p-5 space-y-3">
-                <div>
-                    <div className="text-sm font-bold">Import a sync pack</div>
-                    <div className="text-[11px] text-[#aaaaaa] leading-relaxed">
-                        Load a pack file (from the Export tab, or handed to you by an admin) into your own data. Works offline. It won't overwrite anything
-                        a connected server provides.
-                    </div>
-                </div>
-                <label className="flex items-center gap-2 text-xs cursor-pointer">
-                    <input type="checkbox" checked={importSettings} onChange={(e) => setImportSettings(e.target.checked)} />
-                    Also apply the settings in the pack
-                </label>
-                <button onClick={handleImport} disabled={busy !== null || syncing} className={secondaryBtn}>
-                    <FileUp className="w-4 h-4" />
-                    {busy === "import" ? "Importing..." : "Choose pack file..."}
-                </button>
-                {importSummary && (
-                    <div className="p-3 bg-green-900/10 border border-green-500/30 rounded-lg text-green-400 text-xs leading-relaxed">
-                        Imported {importSummary.imported.toLocaleString()} items
-                        {importSummary.skipped > 0 ? `, skipped ${importSummary.skipped.toLocaleString()}` : ""}
-                        {importSettings ? `, applied ${importSummary.settings_applied} settings` : ""}.
-                        {importSummary.error_count > 0 && (
-                            <div className="mt-2 text-yellow-400">
-                                {importSummary.error_count} couldn't be imported:
-                                <ul className="list-disc ml-4 mt-1 break-words">
-                                    {importSummary.errors.map((e, i) => <li key={i}>{e}</li>)}
-                                </ul>
-                            </div>
-                        )}
-                    </div>
-                )}
-            </div>
-            )}
         </div>
     );
 }

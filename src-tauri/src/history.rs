@@ -5,7 +5,7 @@ use rusqlite::{Connection, Result, params};
 pub fn add_history(path: &str, query: &str) -> Result<()> {
     let conn = Connection::open(path)?;
     conn.execute(
-        "INSERT INTO search_history (search_query)
+        "INSERT INTO SearchHistory (search_query)
          VALUES (?1)
          ON CONFLICT(search_query) DO UPDATE SET searched_at = CURRENT_TIMESTAMP",
         params![query],
@@ -25,7 +25,7 @@ pub struct HistoryEntry {
 pub fn get_history(path: &str, limit: i64) -> Result<Vec<HistoryEntry>> {
     let conn = Connection::open(path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, search_query, searched_at FROM search_history
+        "SELECT id, search_query, searched_at FROM SearchHistory
          ORDER BY searched_at DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit], |row| {
@@ -42,7 +42,7 @@ pub fn get_history(path: &str, limit: i64) -> Result<Vec<HistoryEntry>> {
 pub fn clear_history_before(path: &str, date: &str) -> Result<usize> {
     let conn = Connection::open(path)?;
     let n = conn.execute(
-        "DELETE FROM search_history WHERE date(searched_at) <= date(?1)",
+        "DELETE FROM SearchHistory WHERE date(searched_at) <= date(?1)",
         params![date],
     )?;
     Ok(n)
@@ -51,14 +51,14 @@ pub fn clear_history_before(path: &str, date: &str) -> Result<usize> {
 /// Delete a single entry by id.
 pub fn delete_history_entry(path: &str, id: i64) -> Result<()> {
     let conn = Connection::open(path)?;
-    conn.execute("DELETE FROM search_history WHERE id = ?1", params![id])?;
+    conn.execute("DELETE FROM SearchHistory WHERE id = ?1", params![id])?;
     Ok(())
 }
 
 /// Clear the entire history table.
 pub fn clear_all_history(path: &str) -> Result<()> {
     let conn = Connection::open(path)?;
-    conn.execute_batch("DELETE FROM search_history;")?;
+    conn.execute_batch("DELETE FROM SearchHistory;")?;
     Ok(())
 }
 
@@ -84,7 +84,7 @@ pub fn apply_retention(path: &str) -> Result<usize> {
     };
     let conn = Connection::open(path)?;
     conn.execute(
-        "DELETE FROM search_history WHERE searched_at < datetime('now', ?1)",
+        "DELETE FROM SearchHistory WHERE searched_at < datetime('now', ?1)",
         params![format!("-{months} months")],
     )
 }
@@ -108,7 +108,7 @@ mod tests {
         Connection::open(db)
             .unwrap()
             .execute(
-                "UPDATE search_history SET searched_at = datetime('now', ?1) WHERE search_query = ?2",
+                "UPDATE SearchHistory SET searched_at = datetime('now', ?1) WHERE search_query = ?2",
                 params![format!("-{days} days"), query],
             )
             .unwrap();

@@ -414,3 +414,23 @@ mark {
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
     background: var(--k-scrollbar-thumb-hover);
 }
+
+/* PixelLoader (components/PixelLoader.tsx): the invader marches along its lane in steps, the runner's
+   ground scrolls under it. Both hold still for people who ask for reduced motion. */
+@keyframes k-pixel-march {
+    from { transform: translateX(calc(var(--k-march, 28px) / -2)); }
+    to { transform: translateX(calc(var(--k-march, 28px) / 2)); }
+}
+.k-pixel-march { animation: k-pixel-march 2.6s steps(10, end) infinite alternate; }
+@keyframes k-pixel-ground {
+    from { background-position: 0 0; }
+    to { background-position: -8px 0; }
+}
+.k-pixel-ground {
+    background-image: linear-gradient(to right, currentColor 50%, transparent 50%);
+    background-size: 8px 2px;
+    animation: k-pixel-ground 0.32s steps(2, end) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+    .k-pixel-march, .k-pixel-ground { animation: none; }
+}

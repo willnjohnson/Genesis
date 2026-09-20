@@ -61,7 +61,7 @@ pub const FEATURE_FLAGS: &[(&str, &str)] = &[
     ("showGlossarySearchByTag", "true"),
     ("showGlossarySearchInLibrary", "true"),
     ("allowEditBio", "true"),
-    // ── Workspace names (the names themselves live in the `workspace_labels` table)
+    // ── Workspace names (the names themselves live in the `WorkspaceLabels` table)
     // Off hides the Advanced section where Search, Library, Drive, ... can be renamed.
     ("showWorkspaceAdvanced", "true"),
     // Off locks the workspace name once one has been set.

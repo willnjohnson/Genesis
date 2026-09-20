@@ -33,3 +33,11 @@ export const parentDir = (path: string): string => path.replace(/[\\/][^\\/]*$/,
 export function driveSegmentLabel(displayPath: string): string {
     return displayPath.split('-').pop()?.replace(/^:/, '') || displayPath;
 }
+
+/** A byte count for people: "1.4 MB". */
+export function formatBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}

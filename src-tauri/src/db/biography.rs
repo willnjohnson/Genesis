@@ -44,13 +44,13 @@ pub fn upsert_biography_from_video(
         return Ok(());
     }
     conn.execute(
-        "INSERT INTO biographies (handle, display_name, channel_id, subscriber_count)
+        "INSERT INTO Biographies (handle, display_name, channel_id, subscriber_count)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(handle) DO UPDATE SET
            display_name = CASE
-             WHEN biographies.display_name IS NULL OR TRIM(biographies.display_name) = ''
+             WHEN Biographies.display_name IS NULL OR TRIM(Biographies.display_name) = ''
              THEN excluded.display_name
-             ELSE biographies.display_name
+             ELSE Biographies.display_name
            END",
         params![cleaned_handle, display_name.trim(), channel_id.unwrap_or("").trim(), subscriber_count],
     )?;
@@ -63,7 +63,7 @@ pub fn get_biographies(db_path: &str) -> Result<Vec<BiographyRow>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT handle, display_name, bio, wikipedia, website, twitter, instagram, facebook, threads, youtube, tiktok, twitch, reddit, discord
-         FROM biographies
+         FROM Biographies
          ORDER BY
            CASE WHEN TRIM(display_name) = '' THEN handle ELSE display_name END COLLATE NOCASE",
     )?;
@@ -95,7 +95,7 @@ pub fn get_biography_by_handle(db_path: &str, handle: &str) -> Result<Option<Bio
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT handle, display_name, bio, wikipedia, website, twitter, instagram, facebook, threads, youtube, tiktok, twitch, reddit, discord
-         FROM biographies
+         FROM Biographies
          WHERE LOWER(LTRIM(handle, '@')) = LOWER(?)",
     )?;
     // The leading "@" is optional on either side: "@Name", "Name" and "name" all find the same
@@ -144,7 +144,7 @@ pub fn update_biography_details(
 ) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "UPDATE biographies
+        "UPDATE Biographies
          SET bio = ?2,
              wikipedia = ?3,
              website = ?4,

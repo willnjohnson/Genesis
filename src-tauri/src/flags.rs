@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, Result};
 /// Gives every flag a row with its default, without touching a value that's already there.
 pub(crate) fn seed_feature_flags(conn: &Connection) -> Result<()> {
     for (key, default) in FEATURE_FLAGS {
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)", params![key, default])?;
+        conn.execute("INSERT OR IGNORE INTO Settings (key, value) VALUES (?1, ?2)", params![key, default])?;
     }
     Ok(())
 }
@@ -65,11 +65,11 @@ mod tests {
             let conn = Connection::open(&db).unwrap();
             for (key, default) in FEATURE_FLAGS {
                 let v: String = conn
-                    .query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0))
+                    .query_row("SELECT value FROM Settings WHERE key = ?", [key], |r| r.get(0))
                     .unwrap_or_else(|_| panic!("{key} was not seeded"));
                 assert_eq!(&v, default, "{key}");
             }
-            conn.execute("UPDATE settings SET value = 'false' WHERE key = 'showTabTheme'", []).unwrap();
+            conn.execute("UPDATE Settings SET value = 'false' WHERE key = 'showTabTheme'", []).unwrap();
         }
         // Starting the app again (init_db runs on every launch) leaves the owner's choice alone.
         init_db(&db).unwrap();

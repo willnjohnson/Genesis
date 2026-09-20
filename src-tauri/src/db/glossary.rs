@@ -34,7 +34,7 @@ fn normalize_roots(roots: &[String]) -> Result<Vec<String>> {
 pub fn add_glossary_term(db_path: &str, term: &str, definition: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "INSERT INTO glossary (term, definition) VALUES (?1, ?2) ON CONFLICT(term) DO UPDATE SET definition=excluded.definition",
+        "INSERT INTO Glossary (term, definition) VALUES (?1, ?2) ON CONFLICT(term) DO UPDATE SET definition=excluded.definition",
         params![term, definition],
     )?;
     Ok(())
@@ -43,7 +43,7 @@ pub fn add_glossary_term(db_path: &str, term: &str, definition: &str) -> Result<
 pub fn get_glossary_terms(db_path: &str) -> Result<Vec<(String, String)>> {
     let conn = Connection::open(db_path)?;
     let mut stmt =
-        conn.prepare("SELECT term, definition FROM glossary ORDER BY term COLLATE NOCASE")?;
+        conn.prepare("SELECT term, definition FROM Glossary ORDER BY term COLLATE NOCASE")?;
     let mut rows = stmt.query([])?;
     let mut terms = Vec::new();
     while let Some(row) = rows.next()? {
@@ -55,8 +55,8 @@ pub fn get_glossary_terms(db_path: &str) -> Result<Vec<(String, String)>> {
 pub fn delete_glossary_term(db_path: &str, term: &str) -> Result<()> {
     let mut conn = Connection::open(db_path)?;
     let tx = conn.transaction()?;
-    tx.execute("DELETE FROM glossary WHERE term = ?", params![term])?;
-    tx.execute("DELETE FROM glossary_drives WHERE term = ?", params![term])?;
+    tx.execute("DELETE FROM Glossary WHERE term = ?", params![term])?;
+    tx.execute("DELETE FROM GlossaryDrives WHERE term = ?", params![term])?;
     tx.commit()?;
     // Links to a term that no longer exists are dropped, leaving their text.
     if let Err(e) = super::links::apply_link_edits(db_path, &[super::links::LinkEdit::Unlink(super::links::LinkKind::Glossary, term.to_string())]) {
@@ -69,8 +69,8 @@ pub fn delete_glossary_term(db_path: &str, term: &str) -> Result<()> {
 pub fn get_glossary_drive_links(db_path: &str) -> Result<Vec<(String, String)>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT d.term, d.root FROM glossary_drives d
-         JOIN glossary g ON g.term = d.term
+        "SELECT d.term, d.root FROM GlossaryDrives d
+         JOIN Glossary g ON g.term = d.term
          ORDER BY d.root COLLATE NOCASE, d.term COLLATE NOCASE",
     )?;
     let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
@@ -81,15 +81,15 @@ pub fn get_glossary_drive_links(db_path: &str) -> Result<Vec<(String, String)>> 
 /// be filed, so a Quick Tag, or a term that doesn't exist, ends up with none. Callers pass roots
 /// already validated with `normalize_roots`.
 pub(crate) fn set_glossary_drives(conn: &Connection, term: &str, roots: &[String]) -> Result<()> {
-    conn.execute("DELETE FROM glossary_drives WHERE term = ?", params![term])?;
+    conn.execute("DELETE FROM GlossaryDrives WHERE term = ?", params![term])?;
     let definition: Option<String> = conn
-        .query_row("SELECT definition FROM glossary WHERE term = ?", params![term], |r| r.get(0))
+        .query_row("SELECT definition FROM Glossary WHERE term = ?", params![term], |r| r.get(0))
         .ok();
     if definition.map(|d| d.trim().is_empty()).unwrap_or(true) {
         return Ok(());
     }
     for root in roots {
-        conn.execute("INSERT OR IGNORE INTO glossary_drives (term, root) VALUES (?1, ?2)", params![term, root])?;
+        conn.execute("INSERT OR IGNORE INTO GlossaryDrives (term, root) VALUES (?1, ?2)", params![term, root])?;
     }
     Ok(())
 }
@@ -112,11 +112,11 @@ pub fn save_glossary_term(
     let mut conn = Connection::open(db_path)?;
     let tx = conn.transaction()?;
     if let Some(original) = original_term.filter(|o| *o != term) {
-        tx.execute("DELETE FROM glossary WHERE term = ?", params![original])?;
-        tx.execute("DELETE FROM glossary_drives WHERE term = ?", params![original])?;
+        tx.execute("DELETE FROM Glossary WHERE term = ?", params![original])?;
+        tx.execute("DELETE FROM GlossaryDrives WHERE term = ?", params![original])?;
     }
     tx.execute(
-        "INSERT INTO glossary (term, definition) VALUES (?1, ?2) ON CONFLICT(term) DO UPDATE SET definition=excluded.definition",
+        "INSERT INTO Glossary (term, definition) VALUES (?1, ?2) ON CONFLICT(term) DO UPDATE SET definition=excluded.definition",
         params![term, definition],
     )?;
     set_glossary_drives(&tx, term, &roots)?;
@@ -223,7 +223,7 @@ mod tests {
         delete_glossary_term(&db, "New").unwrap();
         assert!(get_glossary_drive_links(&db).unwrap().is_empty());
         let conn = Connection::open(&db).unwrap();
-        let orphans: i64 = conn.query_row("SELECT COUNT(*) FROM glossary_drives", [], |r| r.get(0)).unwrap();
+        let orphans: i64 = conn.query_row("SELECT COUNT(*) FROM GlossaryDrives", [], |r| r.get(0)).unwrap();
         assert_eq!(orphans, 0, "no orphan rows left behind");
         let _ = std::fs::remove_file(&db);
     }

@@ -8,13 +8,20 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.4.3";
+const VERSION: &str = "0.4.4";
+
+/// The smallest the window can be dragged to (logical pixels). The width matches the smallest size
+/// offered under Settings > Display (600x600), so every choice there still fits; below this the header
+/// and the workspace screen start to overlap themselves.
+const MIN_WINDOW_WIDTH: f64 = 600.0;
+const MIN_WINDOW_HEIGHT: f64 = 500.0;
 
 /// Windows and macOS: "<Workspace name> - Kinesis v0.4.2", the workspace's own name (see
 /// db/workspace.rs) leading so several open workspaces are easy to tell apart. Linux: plain
-/// "Kinesis v0.4.2", because the title didn't follow a rename there.
+/// "Kinesis v0.4.2", because the title didn't follow a rename there. Also plain while no
+/// workspace is open (`db_path` is empty: the launcher is showing).
 fn get_window_title(db_path: &str) -> String {
-    if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") || db_path.is_empty() {
         return format!("{} v{}", APP_NAME, VERSION);
     }
     let workspace = db::get_workspace_labels(db_path)
@@ -47,6 +54,8 @@ mod ollama;
 mod venice;
 mod commands;
 mod sync;
+mod workspaces;
+mod kinpak;
 
 pub use types::{Video, ChannelInfo, VideoResponse, DisplaySettings, DbDetails};
 pub use types::{parse_view_count, extract_handle_from_url};
@@ -57,46 +66,8 @@ pub use types::{parse_view_count, extract_handle_from_url};
 pub(crate) struct DbPathState(pub Mutex<Option<String>>);
 pub(crate) struct EmbedServerPortState(pub Mutex<Option<u16>>);
 
-// â”€â”€â”€ Config file manager â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-pub(crate) struct ConfManager;
-impl ConfManager {
-    fn get_path(app: &tauri::AppHandle) -> PathBuf {
-        app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from(".")).join("init.conf")
-    }
-
-    pub fn read_attr(app: &tauri::AppHandle, key: &str) -> Option<String> {
-        let conf_path = Self::get_path(app);
-        if !conf_path.exists() { return None; }
-        if let Ok(content) = std::fs::read_to_string(conf_path) {
-            for line in content.lines() {
-                if let Some((k, v)) = line.split_once(':') {
-                    if k.trim() == key { return Some(v.trim().to_string()); }
-                }
-            }
-        }
-        None
-    }
-
-    pub fn write_attr(app: &tauri::AppHandle, key: &str, value: &str) -> Result<(), String> {
-        let conf_path = Self::get_path(app);
-        let mut map = std::collections::HashMap::new();
-        if conf_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&conf_path) {
-                for line in content.lines() {
-                    if let Some((k, v)) = line.split_once(':') {
-                        map.insert(k.trim().to_string(), v.trim().to_string());
-                    }
-                }
-            }
-        }
-        map.insert(key.to_string(), value.to_string());
-        let new_content: String = map.iter().map(|(k, v)| format!("{}: {}\n", k, v)).collect();
-        let dir = conf_path.parent().unwrap();
-        if !dir.exists() { let _ = std::fs::create_dir_all(dir); }
-        std::fs::write(conf_path, new_content).map_err(|e| e.to_string())
-    }
-}
+// Which workspace is open, and why none was opened at startup, live in workspaces.rs.
+pub(crate) use workspaces::{ActiveWorkspaceState, StartupNoticeState};
 
 // â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -109,28 +80,41 @@ pub(crate) fn ensure_no_ghost_db(path: &str) {
     }
 }
 
+/// The open workspace's database file, or an empty string while none is open (the launcher is
+/// showing). Never creates anything: SQLite treats an empty path as a private throwaway database, so
+/// a command that slips through before a workspace is chosen fails with "no such table" instead of
+/// writing a stray file. Workspaces are opened in workspaces.rs.
 pub(crate) fn get_db_path(app: &tauri::AppHandle) -> String {
     let state = app.state::<DbPathState>();
-    let mut guard = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.clone().unwrap_or_default()
+}
 
-    if let Some(ref path) = *guard {
-        return path.clone();
+/// The window size and fullscreen choice saved in a workspace's settings (defaults when there's no
+/// workspace open yet or the value is unreadable).
+fn window_prefs(db_path: &str) -> (f64, f64, bool) {
+    if db_path.is_empty() {
+        return (1440.0, 900.0, false);
     }
-
-    let dir = if let Some(saved_path) = ConfManager::read_attr(app, "db_path") {
-        PathBuf::from(saved_path)
-    } else {
-        app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
+    let resolution = db::get_setting(db_path, "resolution").unwrap_or(None).unwrap_or_else(|| "1440x900".to_string());
+    let fullscreen = db::get_setting(db_path, "fullscreen").unwrap_or(None).map(|s| s == "true").unwrap_or(false);
+    let parts: Vec<&str> = resolution.split('x').collect();
+    let (w, h) = match (parts.get(0).and_then(|p| p.parse::<f64>().ok()), parts.get(1).and_then(|p| p.parse::<f64>().ok())) {
+        (Some(w), Some(h)) if parts.len() == 2 => (w, h),
+        _ => (1440.0, 900.0),
     };
-    if !dir.exists() { let _ = std::fs::create_dir_all(&dir); }
-    let db_file_path = dir.join("kinesis_data.db");
+    (w, h, fullscreen)
+}
 
-    let path_str = db_file_path.to_string_lossy().to_string();
-    *guard = Some(path_str.clone());
-    if let Err(e) = db::init_db(&path_str) {
-        log::error!("Failed to initialize database at {}: {}", path_str, e);
+/// After switching workspaces: the new one's own window size and fullscreen choice take effect.
+pub(crate) fn apply_window_prefs(app: &tauri::AppHandle) {
+    let (w, h, fullscreen) = window_prefs(&get_db_path(app));
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_fullscreen(fullscreen);
+        if !fullscreen {
+            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(w, h)));
+        }
     }
-    path_str
 }
 
 #[tauri::command]
@@ -173,10 +157,24 @@ pub fn run() {
             commands::get_workspace_labels,
             commands::set_workspace_label,
             commands::set_setting,
+            // Workspaces
+            commands::get_workspace_status,
+            commands::check_workspace_name,
+            commands::create_workspace,
+            commands::open_workspace,
+            commands::open_existing_workspace,
+            commands::forget_workspace,
+            commands::relocate_workspace,
+            commands::reveal_workspace,
+            commands::inspect_kinpak,
+            commands::import_kinpak,
+            commands::select_kinpak_file,
+            commands::select_kinpak_save_path,
             // YouTube
             commands::resolve_channel,
             commands::fetch_videos,
             commands::fetch_channel_videos_v3,
+            commands::fetch_channel_videos_keyless,
             commands::fetch_view_count,
             commands::fetch_video_info,
             commands::fetch_transcript,
@@ -282,19 +280,22 @@ pub fn run() {
             commands::sync_disconnect,
             commands::get_locked_settings,
             commands::get_key_status,
-            commands::export_sync_pack,
-            commands::import_sync_pack,
-            commands::select_pack_file,
-            commands::select_pack_save_path,
+            commands::export_kinpak,
             commands::select_vault_path,
             get_app_info,
             get_embed_server_port,
         ])
         .manage(DbPathState(Mutex::new(None)))
+        .manage(ActiveWorkspaceState(Mutex::new(None)))
+        .manage(StartupNoticeState(Mutex::new(None)))
+        .manage(workspaces::BusyState(Mutex::new(None)))
         .manage(EmbedServerPortState(Mutex::new(None)))
         .manage(sync::SyncState::default())
         .setup(move |app| {
             let app_handle = app.handle();
+            // Opens the most recent workspace (adopting an older single-database install first).
+            // When there isn't one, the launcher shows and the path stays empty.
+            workspaces::startup(app_handle);
             let db_path = get_db_path(app_handle);
 
             // Start HTTP server for YouTube embeds
@@ -312,24 +313,9 @@ pub fn run() {
             // Attachments opened in other apps are temporary copies; start clean.
             commands::clear_attachment_temp();
 
-            // Get saved window settings
-            let resolution = db::get_setting(&db_path, "resolution").unwrap_or(None).unwrap_or_else(|| "1440x900".to_string());
-            let fullscreen = db::get_setting(&db_path, "fullscreen").unwrap_or(None).map(|s| s == "true").unwrap_or(false);
-            
-            // Parse resolution
-            let (width, height) = {
-                let parts: Vec<&str> = resolution.split('x').collect();
-                if parts.len() == 2 {
-                    if let (Ok(w), Ok(h)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-                        (w, h)
-                    } else {
-                        (1440.0, 900.0)
-                    }
-                } else {
-                    (1440.0, 900.0)
-                }
-            };
-            
+            let (width, height, fullscreen) = window_prefs(&db_path);
+
+
             // Load from bundled index.html
             let url = WebviewUrl::App("index.html".into());
             
@@ -337,6 +323,7 @@ pub fn run() {
             WebviewWindowBuilder::new(app_handle, "main", url)
                 .title(&get_window_title(&db_path))
                 .inner_size(width, height)
+                .min_inner_size(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
                 .fullscreen(fullscreen)
                 .build()?;
             

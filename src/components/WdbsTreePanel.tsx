@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import { getWdbsTree, setWdbsAlias, setWdbsIcon, type WdbsNode } from '../api';
 import { useWorkspace } from '../hooks/useWorkspace';
@@ -21,6 +21,10 @@ interface WdbsTreePanelProps {
     // Gates the right-click "Edit Alias"/"Edit Icon" menu, same settings flag (allowEditWDBS)
     // that gates Bulk Assign Mode and the Sidebar's Warp Drive editor — see App.tsx.
     allowEditAlias?: boolean;
+    // While the selected category's alias would be scrolled out of view it is pinned to the
+    // bottom-left of the window. With the vertical navigation rail (16 wide) on the left it has to
+    // start to the right of it.
+    clearNavRail?: boolean;
 }
 
 /** The paths of the nodes above `path` (root first), or null when `path` isn't in the tree. */
@@ -90,7 +94,7 @@ function NodeContextMenu({ x, y, onEditAlias, onEditIcon, onClose }: {
  * (see App.tsx's Drive panel button). Owns fetching and expand/collapse state; selection itself
  * is controlled by the caller (App.tsx wires it into the Library's own search/filter state).
  */
-export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, allowEditAlias = false }: WdbsTreePanelProps) {
+export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, allowEditAlias = false, clearNavRail = false }: WdbsTreePanelProps) {
     const [tree, setTree] = useState<WdbsNode[]>([]);
     const [loading, setLoading] = useState(true);
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -119,6 +123,28 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
     // one-line alias strip below doesn't need App.tsx (or any other caller) to thread it through
     // its own selection state on top of the plain path/label onSelect already reports.
     const selectedAlias = selectedPath ? findNodeByPath(tree, selectedPath)?.alias : undefined;
+
+    // The alias strip sits under the tree at the panel's width. Only when that spot isn't fully on
+    // screen (a long, expanded tree) does it pin to the window's bottom-left, sized to its text; back
+    // in view, it returns to its normal place and width. The slot keeps the strip's height while it is
+    // pinned, so nothing below it shifts and the two states can't flip back and forth.
+    const slotRef = useRef<HTMLDivElement>(null);
+    const stripRef = useRef<HTMLDivElement>(null);
+    const [pinned, setPinned] = useState(false);
+    const [stripHeight, setStripHeight] = useState(0);
+    useEffect(() => {
+        const slot = slotRef.current;
+        if (!slot || !selectedAlias) { setPinned(false); return; }
+        const observer = new IntersectionObserver(
+            ([entry]) => setPinned(entry.intersectionRatio < 0.98),
+            { threshold: 0.98 },
+        );
+        observer.observe(slot);
+        return () => observer.disconnect();
+    }, [selectedAlias]);
+    useLayoutEffect(() => {
+        if (!pinned && stripRef.current) setStripHeight(stripRef.current.offsetHeight);
+    }, [pinned, selectedAlias]);
 
     // A selection made from outside the tree (e.g. a Biography's "In Drive" list) may sit inside
     // collapsed branches, so open the ones above it.
@@ -202,11 +228,16 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
                 </div>
             )}
             {selectedAlias && (
-                <div
-                    className="mt-2 lg:sticky lg:bottom-4 bg-[#121212] border border-[#272727] rounded-lg px-3 py-1.5 text-xs text-gray-400 truncate"
-                    title={selectedAlias}
-                >
-                    {selectedAlias}
+                <div ref={slotRef} className="mt-2" style={pinned ? { minHeight: stripHeight } : undefined}>
+                    <div
+                        ref={stripRef}
+                        className={`border border-[#272727] rounded-lg px-3 py-1.5 text-xs truncate ${pinned
+                            ? `fixed bottom-4 ${clearNavRail ? 'left-20' : 'left-4'} z-30 w-fit max-w-[min(28rem,calc(100vw-2rem))] shadow-lg text-gray-300 bg-[#121212]/75`
+                            : 'text-gray-400 bg-[#121212]'}`}
+                        title={selectedAlias}
+                    >
+                        {selectedAlias}
+                    </div>
                 </div>
             )}
             {contextMenu && (

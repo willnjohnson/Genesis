@@ -1,10 +1,10 @@
 use rusqlite::{params, Connection, Result};
 
-/// The value the sync server enforces for `key`, if any. Reads `sync_policy` (db/sync.rs) and
+/// The value the sync server enforces for `key`, if any. Reads `SyncPolicy` (db/sync.rs) and
 /// treats a missing table (a connection opened before `init_db` ran) the same as no policy.
 pub(crate) fn policy_value(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row(
-        "SELECT value FROM sync_policy WHERE key = ?",
+        "SELECT value FROM SyncPolicy WHERE key = ?",
         params![key],
         |row| row.get::<_, String>(0),
     )
@@ -13,7 +13,7 @@ pub(crate) fn policy_value(conn: &Connection, key: &str) -> Option<String> {
 
 /// Every key the sync server currently locks against local edits.
 pub(crate) fn locked_keys(conn: &Connection) -> Vec<String> {
-    let Ok(mut stmt) = conn.prepare("SELECT key FROM sync_policy WHERE locked = 1 ORDER BY key") else {
+    let Ok(mut stmt) = conn.prepare("SELECT key FROM SyncPolicy WHERE locked = 1 ORDER BY key") else {
         return Vec::new();
     };
     let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
@@ -24,7 +24,7 @@ pub(crate) fn locked_keys(conn: &Connection) -> Vec<String> {
 
 fn is_locked(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row(
-        "SELECT value FROM sync_policy WHERE key = ? AND locked = 1",
+        "SELECT value FROM SyncPolicy WHERE key = ? AND locked = 1",
         params![key],
         |row| row.get::<_, String>(0),
     )
@@ -43,7 +43,7 @@ pub fn get_setting(db_path: &str, key: &str) -> Result<Option<String>> {
     if let Some(enforced) = policy_value(&conn, key) {
         return Ok(Some(enforced));
     }
-    let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?")?;
+    let mut stmt = conn.prepare("SELECT value FROM Settings WHERE key = ?")?;
     let mut rows = stmt.query(params![key])?;
     if let Some(row) = rows.next()? {
         Ok(Some(row.get(0)?))
@@ -61,7 +61,7 @@ pub fn set_setting(db_path: &str, key: &str, value: &str) -> Result<()> {
         return if enforced == value { Ok(()) } else { Err(locked_error(key)) };
     }
     conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value)
+        "INSERT OR REPLACE INTO Settings (key, value)
          VALUES (?, ?)",
         params![key, value],
     )?;
@@ -73,7 +73,7 @@ pub fn delete_setting(db_path: &str, key: &str) -> Result<()> {
     if is_locked(&conn, key).is_some() {
         return Err(locked_error(key));
     }
-    conn.execute("DELETE FROM settings WHERE key = ?", params![key])?;
+    conn.execute("DELETE FROM Settings WHERE key = ?", params![key])?;
     Ok(())
 }
 
@@ -101,7 +101,7 @@ pub fn get_settings(db_path: &str, keys: &[String]) -> Result<std::collections::
         let value = match policy_value(&conn, key) {
             Some(enforced) => Some(enforced),
             None => conn
-                .query_row("SELECT value FROM settings WHERE key = ?", params![key], |r| r.get::<_, Option<String>>(0))
+                .query_row("SELECT value FROM Settings WHERE key = ?", params![key], |r| r.get::<_, Option<String>>(0))
                 .ok()
                 .flatten(),
         };
@@ -125,7 +125,7 @@ pub(crate) fn get_setting_bool(conn: &Connection, key: &str) -> bool {
         return enforced == "true";
     }
     conn.query_row(
-        "SELECT value FROM settings WHERE key = ?",
+        "SELECT value FROM Settings WHERE key = ?",
         params![key],
         |row| row.get::<_, String>(0),
     )
@@ -150,7 +150,7 @@ mod tests {
         Connection::open(db)
             .unwrap()
             .execute(
-                "INSERT OR REPLACE INTO sync_policy (key, value, locked) VALUES (?, ?, 1)",
+                "INSERT OR REPLACE INTO SyncPolicy (key, value, locked) VALUES (?, ?, 1)",
                 params![key, value],
             )
             .unwrap();
@@ -165,7 +165,7 @@ mod tests {
         let conn = Connection::open(&db).unwrap();
         assert!(!get_setting_bool(&conn, "showBiography"));
         let local: String = conn
-            .query_row("SELECT value FROM settings WHERE key='showBiography'", [], |r| r.get(0))
+            .query_row("SELECT value FROM Settings WHERE key='showBiography'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(local, "true", "the user's own value must survive underneath the policy");
         let _ = std::fs::remove_file(&db);

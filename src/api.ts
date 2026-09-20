@@ -153,6 +153,11 @@ export async function bulkSaveVideos(ids: string[]): Promise<any[]> {
     return await invoke("bulk_save_videos", { videoIds: ids });
 }
 
+/** A channel's videos, newest first, without an API key (the same list as the channel's Videos tab). */
+export async function fetchChannelVideosKeyless(handle: string, continuationToken?: string | null): Promise<SearchResponse> {
+    return await invoke("fetch_channel_videos_keyless", { query: handle, continuation: continuationToken ?? null });
+}
+
 export async function fetchChannelVideosV3(handle: string, continuationToken?: string | null): Promise<SearchResponse> {
     return await invoke("fetch_channel_videos_v3", { query: handle, continuation: continuationToken ?? null });
 }
@@ -856,35 +861,6 @@ export interface SyncDisconnectResult {
     errors: string[];
 }
 
-export interface SyncPackOptions {
-    taxonomy: boolean;
-    videos: boolean;
-    transcripts: boolean;
-    glossary: boolean;
-    biographies: boolean;
-    prompts: boolean;
-    settings: boolean;
-}
-
-export interface SyncPackExportSummary {
-    path: string;
-    counts: Record<string, number>;
-    settings: number;
-    bytes: number;
-}
-
-export interface SyncPackImportSummary {
-    pack_app: string;
-    pack_generated_at: string;
-    imported: number;
-    skipped: number;
-    error_count: number;
-    errors: string[];
-    settings_applied: number;
-    settings_skipped: number;
-    counts: Record<string, number>;
-}
-
 export async function syncTest(url: string, token: string): Promise<SyncManifest> {
     return await invoke("sync_test", { url, token });
 }
@@ -941,20 +917,164 @@ export async function getKeyStatus(): Promise<KeyStatus> {
     return await invoke("get_key_status");
 }
 
-/** Writes the pack to `filePath` (from the Save As dialog). A `.gz` name is compressed. */
-export async function exportSyncPack(filePath: string, options: SyncPackOptions): Promise<SyncPackExportSummary> {
-    return await invoke("export_sync_pack", { filePath, options });
+// ─── Workspaces and kinpaks ──────────────────────────────────────────────────
+
+export interface WorkspaceInfo {
+    /** Folder name under the app data folder: the workspace's identity for open / remove / locate. */
+    folder: string;
+    name: string;
+    /** Where the data actually lives. */
+    path: string;
+    dbPath: string;
+    /** False when the database can't be found (an unplugged drive, a moved folder). */
+    available: boolean;
+    redirected: boolean;
+    lastOpened: number;
+    current: boolean;
 }
 
-/** The Save As dialog for a sync pack; null if cancelled. */
-export async function selectPackSavePath(defaultName: string, startDir?: string | null): Promise<string | null> {
-    return await invoke("select_pack_save_path", { defaultName, startDir: startDir ?? null });
+export interface WorkspaceStatus {
+    current: WorkspaceInfo | null;
+    /** Why nothing was opened at startup. */
+    notice: string | null;
+    recents: WorkspaceInfo[];
+    defaultLocation: string;
 }
 
-export async function importSyncPack(filePath: string, applySettings: boolean): Promise<SyncPackImportSummary> {
-    return await invoke("import_sync_pack", { filePath, applySettings });
+// The backend serializes WorkspaceInfo with snake_case field names; map them once here.
+interface RawWorkspaceInfo {
+    folder: string; name: string; path: string; db_path: string; available: boolean;
+    redirected: boolean; last_opened: number; current: boolean;
+}
+const toWorkspace = (w: RawWorkspaceInfo): WorkspaceInfo => ({
+    folder: w.folder, name: w.name, path: w.path, dbPath: w.db_path, available: w.available,
+    redirected: w.redirected, lastOpened: w.last_opened, current: w.current,
+});
+
+export async function getWorkspaceStatus(): Promise<WorkspaceStatus> {
+    const s = await invoke<{ current: RawWorkspaceInfo | null; notice: string | null; recents: RawWorkspaceInfo[]; defaultLocation: string }>("get_workspace_status");
+    return { ...s, current: s.current ? toWorkspace(s.current) : null, recents: s.recents.map(toWorkspace) };
 }
 
-export async function selectPackFile(): Promise<string | null> {
-    return await invoke("select_pack_file");
+export interface NameCheck {
+    ok: boolean;
+    /** A workspace with this name already exists. */
+    taken: boolean;
+    error: string | null;
+    name: string;
+    suggestion: string;
+}
+
+export async function checkWorkspaceName(name: string): Promise<NameCheck> {
+    return await invoke("check_workspace_name", { name });
+}
+
+/** Creates a workspace and opens it. `location` keeps its data in `<location>/<name>` instead of the app folder. */
+export async function createWorkspace(name: string, location?: string | null): Promise<WorkspaceInfo> {
+    return toWorkspace(await invoke("create_workspace", { name, location: location ?? null }));
+}
+
+export async function openWorkspace(folder: string): Promise<WorkspaceInfo> {
+    return toWorkspace(await invoke("open_workspace", { folder }));
+}
+
+/** Adds a folder holding a kinesis_data.db to the list (once) and opens it. */
+export async function openExistingWorkspace(path: string): Promise<WorkspaceInfo> {
+    return toWorkspace(await invoke("open_existing_workspace", { path }));
+}
+
+/** Removes a workspace from the list. Its data is never deleted. */
+export async function forgetWorkspace(folder: string): Promise<void> {
+    await invoke("forget_workspace", { folder });
+}
+
+/** Points a workspace whose database went missing at its new folder. */
+export async function relocateWorkspace(folder: string, path: string): Promise<WorkspaceInfo> {
+    return toWorkspace(await invoke("relocate_workspace", { folder, path }));
+}
+
+export async function revealWorkspace(folder: string): Promise<void> {
+    await invoke("reveal_workspace", { folder });
+}
+
+export interface KinpakOptions {
+    taxonomy: boolean;
+    videos: boolean;
+    transcripts: boolean;
+    glossary: boolean;
+    biographies: boolean;
+    prompts: boolean;
+    settings: boolean;
+    /** The workspace's name and its section aliases. */
+    workspace: boolean;
+    history: boolean;
+    notes: boolean;
+    attachments: boolean;
+}
+
+export interface KinpakExportSummary {
+    path: string;
+    counts: Record<string, number>;
+    settings: number;
+    bytes: number;
+}
+
+export interface KinpakImportSummary {
+    pack_app: string;
+    pack_generated_at: string;
+    imported: number;
+    skipped: number;
+    error_count: number;
+    errors: string[];
+    settings_applied: number;
+    settings_skipped: number;
+    counts: Record<string, number>;
+}
+
+export interface KinpakPreview {
+    app: string;
+    generatedAt: string;
+    workspaceName: string | null;
+    counts: Record<string, number>;
+    /** The name to offer: the pack's own, cleaned up. */
+    suggestedName: string;
+    /** A workspace already has that name, so importing would add to it. */
+    nameTaken: boolean;
+}
+
+/** Writes the kinpak to `filePath` (from the Save As dialog); the name always ends in .kinpak. */
+export async function exportKinpak(filePath: string, options: KinpakOptions): Promise<KinpakExportSummary> {
+    return await invoke("export_kinpak", { filePath, options });
+}
+
+/** The Save As dialog for a kinpak; null if cancelled. */
+export async function selectKinpakSavePath(defaultName: string, startDir?: string | null): Promise<string | null> {
+    return await invoke("select_kinpak_save_path", { defaultName, startDir: startDir ?? null });
+}
+
+export async function selectKinpakFile(): Promise<string | null> {
+    return await invoke("select_kinpak_file");
+}
+
+/** What a kinpak is and where it came from, without reading the whole file. */
+export async function inspectKinpak(filePath: string): Promise<KinpakPreview> {
+    return await invoke("inspect_kinpak", { filePath });
+}
+
+export interface ImportedWorkspace {
+    workspace: WorkspaceInfo;
+    summary: KinpakImportSummary;
+    /** Added to a workspace that already had that name, rather than made into a new one. */
+    merged: boolean;
+}
+
+/**
+ * Imports a kinpak under `name`. A workspace with that name gets what it's missing added (nothing it
+ * has is replaced or removed); any other name makes a new workspace, stored in `location` if given.
+ */
+export async function importKinpak(filePath: string, name: string, open: boolean, location?: string | null): Promise<ImportedWorkspace> {
+    const r = await invoke<{ workspace: RawWorkspaceInfo; summary: KinpakImportSummary; merged: boolean }>("import_kinpak", {
+        filePath, name, open, location: location ?? null,
+    });
+    return { workspace: toWorkspace(r.workspace), summary: r.summary, merged: r.merged };
 }

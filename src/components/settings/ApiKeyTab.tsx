@@ -1,112 +1,87 @@
-import { Check, AlertCircle } from "lucide-react";
+import { Check } from "lucide-react";
 import { useState } from "react";
 import { setApiKey as saveApiKeyCmd, removeApiKey as removeApiKeyCmd } from "../../api";
+import { ApiKeyField } from "./ApiKeyField";
+import { PixabayApiPanel } from "./PixabayApiPanel";
+import { VeniceApiPanel } from "./VeniceApiPanel";
+
+export type ApiSection = "youtube" | "venice" | "pixabay";
+
+const SECTION_LABELS: Record<ApiSection, string> = {
+    youtube: "YouTube Data API",
+    venice: "Venice AI",
+    pixabay: "Pixabay",
+};
 
 interface Props {
     hasKey: boolean;
     /** Name of the sync server whose license covers the YouTube API, when there is one. */
     licensedBy?: string | null;
     onKeyChange: (hasKey: boolean) => void;
+    /** Which page is showing. Venice AI and Pixabay are only offered while a plugin that uses them is on. */
+    section: ApiSection;
+    onSectionChange: (section: ApiSection) => void;
+    showVenice: boolean;
+    showPixabay: boolean;
 }
 
-export function ApiKeyTab({ hasKey: initialHasKey, licensedBy, onKeyChange }: Props) {
+function YouTubePanel({ hasKey: initialHasKey, licensedBy, onKeyChange }: Pick<Props, "hasKey" | "licensedBy" | "onKeyChange">) {
     const [hasKey, setHasKey] = useState(initialHasKey);
-    const [apiKeyInput, setApiKeyInput] = useState("");
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
 
-    const handleSave = async () => {
-        const key = apiKeyInput.trim();
-        if (!key) return;
-        setLoading(true);
-        setError(null);
-        try {
-            await saveApiKeyCmd(key);
-            setHasKey(true);
-            setApiKeyInput("");
-            onKeyChange(true);
-        } catch (e: any) {
-            console.error("Failed to save API key:", e);
-            setError(typeof e === "string" ? e : e?.message ?? "Unknown error saving API key.");
-        } finally {
-            setLoading(false);
-        }
-    };
+    return (
+        <div>
+            <h3 className="text-base font-bold mb-1">YouTube Data API</h3>
+            <p className="text-xs text-[#aaaaaa] mb-4">
+                Optional. Improves search quality and fills in channel subscriber counts.
+            </p>
 
-    const handleRemove = async () => {
-        setLoading(true);
-        setError(null);
-        try {
-            await removeApiKeyCmd();
-            setHasKey(false);
-            onKeyChange(false);
-        } catch (e: any) {
-            console.error("Failed to remove API key:", e);
-            setError(typeof e === "string" ? e : e?.message ?? "Unknown error removing API key.");
-        } finally {
-            setLoading(false);
-        }
-    };
+            {licensedBy && (
+                <div className="mb-4 flex items-start gap-2 text-blue-300 bg-blue-900/10 border border-blue-500/30 rounded-lg px-3 py-2.5 text-xs leading-relaxed">
+                    <Check className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>
+                        Covered by {licensedBy}'s license, so you don't need your own key.
+                        {hasKey ? " Your own key is used instead unless the server requires its license." : " You can still add your own key if you prefer."}
+                    </span>
+                </div>
+            )}
+
+            <ApiKeyField
+                hasKey={hasKey}
+                placeholder="Paste your YouTube API key"
+                onSave={async (key) => { await saveApiKeyCmd(key); setHasKey(true); onKeyChange(true); }}
+                onRemove={async () => { await removeApiKeyCmd(); setHasKey(false); onKeyChange(false); }}
+            />
+        </div>
+    );
+}
+
+export function ApiKeyTab({ hasKey, licensedBy, onKeyChange, section, onSectionChange, showVenice, showPixabay }: Props) {
+    const sections: ApiSection[] = ["youtube", ...(showVenice ? ["venice" as const] : []), ...(showPixabay ? ["pixabay" as const] : [])];
+    // A page whose plugin has been turned off falls back to YouTube's.
+    const current: ApiSection = sections.includes(section) ? section : "youtube";
 
     return (
         <div className="space-y-6 animate-in slide-in-from-right-4 duration-300">
-            <div>
-                <h3 className="text-base font-bold mb-1">YouTube Data API</h3>
-                <p className="text-xs text-[#aaaaaa] mb-4">
-                    Required for fetching high-quality transcripts and searching channel.
-                </p>
-
-                {licensedBy && (
-                    <div className="mb-4 flex items-start gap-2 text-blue-300 bg-blue-900/10 border border-blue-500/30 rounded-lg px-3 py-2.5 text-xs leading-relaxed">
-                        <Check className="w-4 h-4 shrink-0 mt-0.5" />
-                        <span>
-                            Covered by {licensedBy}'s license, so you don't need your own key.
-                            {hasKey ? " Your own key is used instead unless the server requires its license." : " You can still add your own key if you prefer."}
-                        </span>
-                    </div>
-                )}
-
-                {hasKey ? (
-                    <div className="flex gap-3 items-center">
-                        <div className="flex-1 bg-green-500/10 border border-green-500/30 text-green-400 px-4 py-2.5 rounded-lg flex items-center gap-2 font-medium">
-                            <Check className="w-4 h-4" />
-                            API Key is Active
-                        </div>
+            {/* With only YouTube's page there's nothing to switch between. */}
+            {sections.length > 1 && (
+                <div className="flex items-center gap-4">
+                    {sections.map(id => (
                         <button
-                            onClick={handleRemove}
-                            disabled={loading}
-                            className="bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-2.5 rounded-lg font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
+                            key={id}
+                            type="button"
+                            onClick={() => onSectionChange(id)}
+                            className={`pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${current === id ? "text-white" : "text-[#666666] hover:text-[#aaaaaa]"}`}
                         >
-                            Deactivate
+                            {SECTION_LABELS[id]}
+                            {current === id && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                         </button>
-                    </div>
-                ) : (
-                    <div className="flex gap-2">
-                        <input
-                            type="password"
-                            placeholder="Paste your YouTube API key..."
-                            value={apiKeyInput}
-                            onChange={(e) => setApiKeyInput(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
-                            className="flex-1 bg-[#121212] border border-[#303030] hover:border-[#505050] focus:border-red-600/50 outline-none rounded-lg px-4 py-2.5 text-sm text-white placeholder-[#505050] transition-colors"
-                        />
-                        <button
-                            onClick={handleSave}
-                            disabled={loading || !apiKeyInput.trim()}
-                            className="bg-red-600 hover:bg-red-500 text-white disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2.5 rounded-lg font-bold text-xs transition-colors cursor-pointer"
-                        >
-                            {loading ? "Saving..." : "Submit"}
-                        </button>
-                    </div>
-                )}
+                    ))}
+                </div>
+            )}
 
-                {error && (
-                    <div className="mt-3 flex items-start gap-2 text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2.5">
-                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                        <span className="text-xs">{error}</span>
-                    </div>
-                )}
-            </div>
+            {current === "youtube" && <YouTubePanel hasKey={hasKey} licensedBy={licensedBy} onKeyChange={onKeyChange} />}
+            {current === "venice" && <VeniceApiPanel />}
+            {current === "pixabay" && <PixabayApiPanel />}
         </div>
     );
 }

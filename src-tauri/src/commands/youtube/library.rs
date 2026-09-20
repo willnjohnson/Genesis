@@ -127,7 +127,7 @@ pub async fn save_video(
             let date_added = {
                 let conn = rusqlite::Connection::open(&db_path).ok();
                 conn.and_then(|c| {
-                    c.query_row("SELECT date_added FROM videos WHERE video_id = ?", rusqlite::params![video_id], |row| row.get::<_, Option<String>>(0)).ok().flatten()
+                    c.query_row("SELECT date_added FROM Videos WHERE video_id = ?", rusqlite::params![video_id], |row| row.get::<_, Option<String>>(0)).ok().flatten()
                 })
             };
 
@@ -222,7 +222,7 @@ pub async fn save_video(
     let date_added = {
         let conn = rusqlite::Connection::open(&db_path).ok();
         conn.and_then(|c| {
-            c.query_row("SELECT date_added FROM videos WHERE video_id = ?", rusqlite::params![video_id], |row| row.get::<_, Option<String>>(0)).ok().flatten()
+            c.query_row("SELECT date_added FROM Videos WHERE video_id = ?", rusqlite::params![video_id], |row| row.get::<_, Option<String>>(0)).ok().flatten()
         })
     };
 

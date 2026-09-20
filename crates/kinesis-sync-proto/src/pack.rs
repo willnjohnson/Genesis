@@ -119,11 +119,24 @@ pub struct PackReader {
     inner: Box<dyn BufRead>,
     line_no: usize,
     last_len: usize,
+    /// `None` reads a line of any length (a pack the user chose themselves: an attachment or a
+    /// transcript is as big as it is).
+    max_line: Option<usize>,
 }
 
 impl PackReader {
-    /// Detects gzip by magic bytes, so callers don't need to care how the pack was written.
+    /// Detects gzip by magic bytes, so callers don't need to care how the pack was written. Lines
+    /// are capped at `MAX_LINE_BYTES`: right for packs from a sync server or a stranger.
     pub fn new<R: Read + 'static>(reader: R) -> io::Result<Self> {
+        Self::open(reader, Some(MAX_LINE_BYTES))
+    }
+
+    /// Like `new`, with no cap on a line's length. Still one line in memory at a time.
+    pub fn new_unbounded<R: Read + 'static>(reader: R) -> io::Result<Self> {
+        Self::open(reader, None)
+    }
+
+    fn open<R: Read + 'static>(reader: R, max_line: Option<usize>) -> io::Result<Self> {
         let mut buffered = BufReader::new(reader);
         let is_gzip = {
             let head = buffered.fill_buf()?;
@@ -134,7 +147,7 @@ impl PackReader {
         } else {
             Box::new(buffered)
         };
-        Ok(PackReader { inner, line_no: 0, last_len: 0 })
+        Ok(PackReader { inner, line_no: 0, last_len: 0, max_line })
     }
 
     /// Reads one line without ever buffering more than `MAX_LINE_BYTES`, so a hostile file can't
@@ -159,8 +172,10 @@ impl PackReader {
                 }
             };
             self.inner.consume(consumed);
-            if line.len() > MAX_LINE_BYTES {
-                return Err(format!("line {}: longer than {MAX_LINE_BYTES} bytes", self.line_no + 1));
+            if let Some(max) = self.max_line {
+                if line.len() > max {
+                    return Err(format!("line {}: longer than {max} bytes", self.line_no + 1));
+                }
             }
             if done {
                 return Ok(Some(line));

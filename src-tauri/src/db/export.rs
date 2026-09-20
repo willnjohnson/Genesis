@@ -28,7 +28,7 @@ pub fn get_all_biographies_for_export(db_path: &str) -> Result<Vec<BiographyExpo
     let mut stmt = conn.prepare(
         "SELECT handle, display_name, bio, wikipedia, website, twitter, instagram, facebook, \
                 threads, youtube, tiktok, twitch, reddit, discord, subscriber_count
-         FROM biographies
+         FROM Biographies
          ORDER BY CASE WHEN TRIM(display_name) = '' THEN handle ELSE display_name END COLLATE NOCASE",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -83,7 +83,7 @@ mod tests {
         let db_path = db_path.to_string_lossy().to_string();
         let conn = Connection::open(&db_path).unwrap();
         conn.execute(
-            "CREATE TABLE biographies (
+            "CREATE TABLE Biographies (
                 handle TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL DEFAULT '',
                 bio TEXT NOT NULL DEFAULT '',
@@ -105,7 +105,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO biographies (handle, display_name, subscriber_count) VALUES ('@legacy', 'Legacy Creator', NULL)",
+            "INSERT INTO Biographies (handle, display_name, subscriber_count) VALUES ('@legacy', 'Legacy Creator', NULL)",
             [],
         )
         .unwrap();

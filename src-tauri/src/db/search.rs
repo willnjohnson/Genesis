@@ -1,6 +1,6 @@
 use crate::Video;
 use regex::Regex;
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use rusqlite::{named_params, params, Connection, OptionalExtension, Result};
 use std::collections::HashSet;
 use super::summaries::has_real_summary;
 
@@ -98,6 +98,19 @@ pub(crate) fn filter_kind_where(alias: &str, filter_kind: Option<&str>) -> Strin
 // "skip the FTS5 MATCH entirely" — FTS5 rejects an empty MATCH string as a syntax error rather
 // than treating it as "match everything".
 pub(crate) fn build_fts_query(free_text: &str) -> String {
+    // FTS5 barewords are letters, digits, '_' and any non-ASCII character; anything else in a word
+    // (a stray '!', a quote, punctuation) is a syntax error unless the word is quoted. A word with
+    // nothing searchable in it at all (just "!" while the user is still typing a "!n" shortcut) is
+    // dropped rather than sent, so it can't fail the whole search.
+    let bareword = |w: &str| w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || !c.is_ascii());
+    let searchable = |w: &str| w.chars().any(|c| c.is_alphanumeric());
+    let term = |w: &str| {
+        if bareword(w) {
+            format!("{w}*")
+        } else {
+            format!("\"{}\"*", w.replace('"', "\"\""))
+        }
+    };
     free_text
         .split_whitespace()
         .filter_map(|w| {
@@ -106,13 +119,12 @@ pub(crate) fn build_fts_query(free_text: &str) -> String {
                     return None;
                 }
                 let encoded = rest.replace('-', "_");
-                return Some(format!("θψ{}*", encoded));
+                return Some(term(&format!("θψ{}", encoded)));
             }
-            Some(if w.chars().any(|c| matches!(c, '"' | '*' | '(' | ')' | '-' | '+' | '~' | ' ')) {
-                format!("\"{}\"*", w.replace('"', "\"\""))
-            } else {
-                format!("{}*", w)
-            })
+            if !searchable(w) {
+                return None;
+            }
+            Some(term(w))
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -130,6 +142,26 @@ pub(crate) fn library_order_by(alias: &str, sort_field: Option<&str>, sort_order
     };
     let dir = if sort_order == Some("asc") { "ASC" } else { "DESC" };
     format!("{alias}{col} {dir}, {alias}rowid {dir}")
+}
+
+/// WHERE clause for the `tag_search` / `term_search` facets. A video's `tags` column is a comma
+/// separated list of glossary entry names; an entry is a Term when it has a definition and a Quick
+/// Tag when it doesn't, so each facet only matches entries of its own kind. `param` is the named
+/// parameter holding the search value ("" means the facet wasn't used). Quoted values (`exact`)
+/// must equal an entry's name, bare ones just have to be contained in it, both ignoring case.
+fn glossary_tag_clause(terms: bool, exact: bool, param: &str) -> String {
+    let kind = if terms { "<> ''" } else { "= ''" };
+    let name_matches = if exact {
+        format!("g.term = {param} COLLATE NOCASE")
+    } else {
+        format!("g.term LIKE '%' || {param} || '%'")
+    };
+    format!(
+        "({param} = '' OR EXISTS (SELECT 1 FROM Glossary g
+            WHERE COALESCE(g.definition, '') {kind}
+              AND {name_matches}
+              AND instr(',' || lower(v.tags) || ',', ',' || lower(g.term) || ',') > 0))"
+    )
 }
 
 /// Paged/sorted/filtered library search. Returns `(videos for this page, total matching count)`.
@@ -151,11 +183,15 @@ pub fn search_library_videos(
     let mut handle_val = "";
     let mut video_val = "";
     let mut tag_val = "";
+    let mut term_val = "";
     // tag_search:"exact tag" (quoted) means an exact, case-insensitive match against one of the
     // video's comma-separated tags; tag_search:contains (bare) means a substring match — the
     // same quoted-vs-bare distinction every other facet value already gets from this regex's two
-    // capture groups. Replaces the old trailing-`#` convention.
+    // capture groups. Replaces the old trailing-`#` convention. tag_search only looks at Quick
+    // Tags (glossary entries without a definition); term_search (`^`) works the same way against
+    // terms (entries with a definition).
     let mut tag_exact = false;
+    let mut term_exact = false;
     let mut remaining = query.to_string();
 
     for cap in facet_re.captures_iter(query) {
@@ -169,6 +205,10 @@ pub fn search_library_videos(
                 tag_val = value;
                 tag_exact = quoted.is_some();
             }
+            "term_search" => {
+                term_val = value;
+                term_exact = quoted.is_some();
+            }
             _ => {}
         }
         remaining = remaining.replace(&cap[0], "");
@@ -180,12 +220,8 @@ pub fn search_library_videos(
     let columns = video_columns_sql("v.");
     let order = library_order_by("v.", sort_field, sort_order);
 
-    // Exact match compares against the tag list wrapped in delimiters (",tag1,tag2,") so a
-    // pattern of "%,<value>,%" only matches a whole tag, not a substring spanning two tags or a
-    // partial word within one; contains-match is the existing plain substring LIKE. SQLite's
-    // LIKE is case-insensitive for ASCII by default, which covers the "ignoring casing" ask.
-    let tag_col = if tag_exact { "(',' || v.tags || ',')" } else { "v.tags" };
-    let tag_pattern = |v: &str| if tag_exact { format!("%,{},%", v) } else { format!("%{}%", v) };
+    let tag_clause = glossary_tag_clause(false, tag_exact, ":tag");
+    let term_clause = glossary_tag_clause(true, term_exact, ":term");
 
     let fts_query = build_fts_query(free_text);
 
@@ -198,33 +234,36 @@ pub fn search_library_videos(
         // an empty/wildcard query, which FTS5 rejects as a syntax error and would otherwise fail
         // the whole search.
         let where_sql = format!(
-            "(?1 = '' OR v.handle LIKE ?2)
-               AND (?3 = '' OR v.video_id LIKE ?4)
-               AND (?5 = '' OR {tag_col} LIKE ?6)
+            "(:handle = '' OR v.handle LIKE :handle_like)
+               AND (:video = '' OR v.video_id LIKE :video_like)
+               AND {tag_clause}
+               AND {term_clause}
                AND {filter_where}"
         );
-        let count_sql = format!("SELECT COUNT(*) FROM videos AS v WHERE {where_sql}");
+        let handle_like = format!("%{}%", handle_val);
+        let video_like = format!("%{}%", video_val);
+        let count_sql = format!("SELECT COUNT(*) FROM Videos AS v WHERE {where_sql}");
         total = conn.query_row(
             &count_sql,
-            params![
-                handle_val, format!("%{}%", handle_val),
-                video_val, format!("%{}%", video_val),
-                tag_val, tag_pattern(tag_val)
-            ],
+            named_params! {
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+            },
             |row| row.get(0),
         )?;
 
         let sql = format!(
-            "SELECT {columns} FROM videos AS v WHERE {where_sql} ORDER BY {order} LIMIT ?7 OFFSET ?8"
+            "SELECT {columns} FROM Videos AS v WHERE {where_sql} ORDER BY {order} LIMIT :limit OFFSET :offset"
         );
         let mut stmt = conn.prepare(&sql)?;
         let video_iter = stmt.query_map(
-            params![
-                handle_val, format!("%{}%", handle_val),
-                video_val, format!("%{}%", video_val),
-                tag_val, tag_pattern(tag_val),
-                limit, offset
-            ],
+            named_params! {
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+                ":limit": limit, ":offset": offset,
+            },
             |row| video_row(row, true),
         )?;
         for video in video_iter {
@@ -232,43 +271,46 @@ pub fn search_library_videos(
         }
     } else {
         let where_sql = format!(
-            "ftsVideos MATCH ?1
-               AND (?2 = '' OR v.handle LIKE ?3)
-               AND (?4 = '' OR v.video_id LIKE ?5)
-               AND (?6 = '' OR {tag_col} LIKE ?7)
+            "ftsVideos MATCH :fts
+               AND (:handle = '' OR v.handle LIKE :handle_like)
+               AND (:video = '' OR v.video_id LIKE :video_like)
+               AND {tag_clause}
+               AND {term_clause}
                AND {filter_where}"
         );
+        let handle_like = format!("%{}%", handle_val);
+        let video_like = format!("%{}%", video_val);
         let count_sql = format!(
-            "SELECT COUNT(*) FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql}"
+            "SELECT COUNT(*) FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql}"
         );
         total = conn.query_row(
             &count_sql,
-            params![
-                fts_query,
-                handle_val, format!("%{}%", handle_val),
-                video_val, format!("%{}%", video_val),
-                tag_val, tag_pattern(tag_val)
-            ],
+            named_params! {
+                ":fts": fts_query,
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+            },
             |row| row.get(0),
         )?;
 
         let sql = format!(
             "SELECT {columns}
-             FROM videos AS v
+             FROM Videos AS v
              JOIN ftsVideos ON v.rowid = ftsVideos.rowid
              WHERE {where_sql}
              ORDER BY {order}
-             LIMIT ?8 OFFSET ?9"
+             LIMIT :limit OFFSET :offset"
         );
         let mut stmt = conn.prepare(&sql)?;
         let video_iter = stmt.query_map(
-            params![
-                fts_query,
-                handle_val, format!("%{}%", handle_val),
-                video_val, format!("%{}%", video_val),
-                tag_val, tag_pattern(tag_val),
-                limit, offset
-            ],
+            named_params! {
+                ":fts": fts_query,
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+                ":limit": limit, ":offset": offset,
+            },
             |row| video_row(row, true),
         )?;
         for video in video_iter {
@@ -303,7 +345,7 @@ pub(crate) fn regenerate_tokens_from_transcript(conn: &Connection, video_id: &st
                 '  ', ' '), '  ', ' '), '  ', ' '),
             '  ', ' '), '  ', ' '), '  ', ' '), '  ', ' '), '  ', ' ')
             ) || ' ' AS txt
-            FROM videos
+            FROM Videos
             WHERE transcript IS NOT NULL AND transcript != 'N/A'
             AND video_id = ?1
         ),
@@ -329,7 +371,7 @@ pub(crate) fn regenerate_tokens_from_transcript(conn: &Connection, video_id: &st
             SELECT DISTINCT video_id, word
             FROM cleaned
             WHERE LENGTH(word) > 0
-            AND word NOT IN (SELECT culls FROM stop_words)
+            AND word NOT IN (SELECT culls FROM StopWords)
         ),
         video_tokens AS (
             SELECT video_id, GROUP_CONCAT(word, ' ') AS tokens
@@ -340,10 +382,10 @@ pub(crate) fn regenerate_tokens_from_transcript(conn: &Connection, video_id: &st
             )
             GROUP BY video_id
         )
-        UPDATE videos
+        UPDATE Videos
         SET tokens = video_tokens.tokens
         FROM video_tokens
-        WHERE videos.video_id = video_tokens.video_id",
+        WHERE Videos.video_id = video_tokens.video_id",
         params![video_id],
     )?;
     Ok(())
@@ -377,7 +419,7 @@ pub fn get_similar_videos(db_path: &str, video_id: &str, limit: i64) -> Result<V
 
     let seed = conn
         .query_row(
-            "SELECT tokens, title, author, handle, tags FROM videos WHERE video_id = ?1",
+            "SELECT tokens, title, author, handle, tags FROM Videos WHERE video_id = ?1",
             params![video_id],
             |row| {
                 Ok((
@@ -403,7 +445,7 @@ pub fn get_similar_videos(db_path: &str, video_id: &str, limit: i64) -> Result<V
     }
 
     let stopwords: HashSet<String> = {
-        let mut stmt = conn.prepare("SELECT culls FROM stop_words")?;
+        let mut stmt = conn.prepare("SELECT culls FROM StopWords")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let collected: HashSet<String> = rows.filter_map(|r| r.ok()).collect();
         collected
@@ -462,7 +504,7 @@ pub fn get_similar_videos(db_path: &str, video_id: &str, limit: i64) -> Result<V
     let overfetch = (limit.saturating_mul(5)).clamp(limit, 200);
     let sql = format!(
         "SELECT {columns}
-         FROM videos AS v
+         FROM Videos AS v
          JOIN ftsVideos ON v.rowid = ftsVideos.rowid
          WHERE ftsVideos MATCH ?1 AND v.video_id != ?2
          ORDER BY bm25(ftsVideos, 2.0, 1.5, 1.0, 0.0) ASC
@@ -496,6 +538,7 @@ pub fn get_similar_videos(db_path: &str, video_id: &str, limit: i64) -> Result<V
 #[cfg(test)]
 mod similar_videos_tests {
     use crate::db;
+    use super::build_fts_query;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -584,6 +627,68 @@ mod similar_videos_tests {
         assert!(pos_e.is_some() && pos_f.is_some(), "both candidates should be found: {:?}", ids);
         assert!(pos_f < pos_e, "a shared curated tag should outrank stronger raw keyword overlap alone: {:?}", ids);
 
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn a_stray_bang_or_punctuation_never_breaks_the_search_query() {
+        // "!" alone (the start of a "!n" shortcut) has nothing to match, so it is dropped.
+        assert_eq!(build_fts_query("!"), "");
+        assert_eq!(build_fts_query("! ? *"), "");
+        // Mixed with a real word, the word still searches.
+        assert_eq!(build_fts_query("! glucose"), "glucose*");
+        // Punctuation inside a word is quoted, not sent raw.
+        assert_eq!(build_fts_query("wow!"), "\"wow!\"*");
+        assert_eq!(build_fts_query("it's"), "\"it's\"*");
+        assert_eq!(build_fts_query(":UAP-GERB"), "θψUAP_GERB*");
+        assert_eq!(build_fts_query(":UAP!"), "\"θψUAP!\"*");
+        assert_eq!(build_fts_query(":"), "");
+    }
+
+    #[test]
+    fn searching_for_a_bang_or_a_quote_does_not_error() {
+        let db_path = temp_db_path();
+        db::init_db(&db_path).unwrap();
+        db::save_video(&db_path, "vid1", "Hello World", "Author", 60, "text", 1, "2026-01-01T00:00:00Z", "@a", None).unwrap();
+        for q in ["!", "!n", "\"", "wow!", "( )", "-", "*"] {
+            let (videos, total) = db::search_library_videos(&db_path, q, None, None, None, 10, 0)
+                .unwrap_or_else(|e| panic!("{q:?} failed: {e}"));
+            assert_eq!(videos.len() as i64, total, "{q:?}");
+        }
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn tag_search_finds_quick_tags_and_term_search_finds_terms() {
+        let db_path = temp_db_path();
+        db::init_db(&db_path).unwrap();
+        db::add_glossary_term(&db_path, "Halving", "The reward is cut in half").unwrap();
+        db::add_glossary_term(&db_path, "Halfway", "").unwrap();
+        db::save_video(&db_path, "vidA", "A", "X", 60, "t", 1, "2026-01-01T00:00:00Z", "@a", None).unwrap();
+        db::save_video(&db_path, "vidB", "B", "X", 60, "t", 1, "2026-01-02T00:00:00Z", "@b", None).unwrap();
+        db::save_video(&db_path, "vidC", "C", "X", 60, "t", 1, "2026-01-03T00:00:00Z", "@c", None).unwrap();
+        db::save_tags(&db_path, "vidA", "Halving").unwrap();
+        db::save_tags(&db_path, "vidB", "Halfway").unwrap();
+        db::save_tags(&db_path, "vidC", "Halving,Halfway").unwrap();
+
+        let ids = |q: &str| -> Vec<String> {
+            let mut v: Vec<String> = db::search_library_videos(&db_path, q, None, None, None, 10, 0)
+                .unwrap().0.into_iter().map(|v| v.id).collect();
+            v.sort();
+            v
+        };
+        // "Hal" is contained in both entries' names, but each facet only sees its own kind.
+        assert_eq!(ids("term_search:Hal"), vec!["vidA", "vidC"]);
+        assert_eq!(ids("tag_search:Hal"), vec!["vidB", "vidC"]);
+        // Quoted = exact name, ignoring case.
+        assert_eq!(ids("term_search:\"halving\""), vec!["vidA", "vidC"]);
+        assert!(ids("term_search:\"Hal\"").is_empty());
+        assert_eq!(ids("tag_search:\"HALFWAY\""), vec!["vidB", "vidC"]);
+        // A term is never found as a tag, nor the other way round.
+        assert!(ids("tag_search:Halving").is_empty());
+        assert!(ids("term_search:Halfway").is_empty());
+        // Both facets together narrow to videos with both kinds.
+        assert_eq!(ids("term_search:Halving tag_search:Halfway"), vec!["vidC"]);
         std::fs::remove_file(&db_path).ok();
     }
 }

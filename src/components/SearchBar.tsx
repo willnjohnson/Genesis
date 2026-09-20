@@ -27,7 +27,8 @@ export type SearchFacet = 'handle' | 'playlist' | 'video' | 'title_search' | 'te
  * recognizable YouTube URL/handle/video-ID/playlist-ID auto-converts the input into a facet chip
  * (see `handleInput`/`extractHandle`/`extractVideoId`/`extractPlaylistId`); `!`-prefixed shortcuts
  * switch search mode per view (`!n`/`!p` in search mode for title/playlist search, `!g`/`!d` in
- * glossary mode for term/definition search), and `#tag#` switches to library tag search.
+ * glossary mode for term/definition search), and in the library `#` starts a Quick Tag search and
+ * `^` a glossary term search.
  */
 export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search', initialFacets = [], initialQuery = '', placeholder }: Props) {
     const [query, setQuery] = useState(initialQuery);
@@ -124,7 +125,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             case 'video': return <span className="text-xs font-bold">{'>'}</span>;
             case 'definition_search': return <FileText className="w-3 h-3" />;
             case 'title_search':
-            case 'term_search': return <Type className="w-3 h-3" />;
+            case 'term_search': return isLibrary ? <span className="text-xs font-bold">^</span> : <Type className="w-3 h-3" />;
             case 'person_search': return <AtSign className="w-3 h-3" />;
             case 'bio_search': return <FileText className="w-3 h-3" />;
             case 'tag_search': return <span className="text-xs font-bold">#</span>;
@@ -142,6 +143,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             patterns['bio_search:'] = 'bio_search';
         } else if (isLibrary) {
             patterns['tag_search:'] = 'tag_search';
+            patterns['term_search:'] = 'term_search';
             patterns['handle:'] = 'handle';
             patterns['video:'] = 'video';
         } else {
@@ -195,15 +197,20 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             }
         }
 
-        if (!isGlossary && !isBiography && (facets.length === 0 || (isLibrary && facets.length === 1 && facets[0].type === 'tag_search'))) {
+        if (!isGlossary && !isBiography && (facets.length === 0 || (isLibrary && facets.length === 1 && (facets[0].type === 'tag_search' || facets[0].type === 'term_search')))) {
             const handle = extractHandle(val);
             const videoId = extractVideoId(val);
             const playlistId = !isLibrary ? extractPlaylistId(val) : null;
             const tagMatch = val.match(/^#(.+?)#?$/);
+            const termMatch = val.match(/^\^(.+?)\^?$/);
 
             if (tagMatch && isLibrary) {
                 setFacets([{ type: 'tag_search', value: '' }]);
                 setQuery(tagMatch[1]);
+                return;
+            } else if (termMatch && isLibrary) {
+                setFacets([{ type: 'term_search', value: '' }]);
+                setQuery(termMatch[1]);
                 return;
             } else if (handle && (val.includes('youtube.com') || (val.startsWith('@') && val.length > 3))) {
                 setFacets([{ type: 'handle', value: "" }]);
@@ -287,7 +294,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         const trimmed = fullQuery.trim();
         if (trimmed) {
             onSearch(trimmed);
-            const hasOnlyTagSearch = facets.length > 0 && facets.every(f => f.type === 'tag_search');
+            const hasOnlyTagSearch = facets.length > 0 && facets.every(f => f.type === 'tag_search' || f.type === 'term_search');
             if (!hasOnlyTagSearch) {
                 addSearchHistory(trimmed);
             }
@@ -339,6 +346,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         // Library mode
         return [
             { type: 'tag_search' as const, label: 'Tag (#)' },
+            { type: 'term_search' as const, label: 'Term (^)' },
             { type: 'handle' as const, label: 'Channel (@)' },
             { type: 'video' as const, label: 'Video ID (>)' },
         ];
@@ -456,10 +464,16 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                                     </code>
                                                 </>
                                             ) : isLibrary ? (
-                                                <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                                    <span>tag_search:</span>
-                                                    <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">#</span>/ Tags</span>
-                                                </code>
+                                                <>
+                                                    <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                        <span>tag_search:</span>
+                                                        <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">#</span>/ Tags</span>
+                                                    </code>
+                                                    <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                        <span>term_search:</span>
+                                                        <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">^</span>/ Terms</span>
+                                                    </code>
+                                                </>
                                             ) : (
                                                 <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                     <span>title_search:</span>

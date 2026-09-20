@@ -22,13 +22,136 @@ const DEFAULT_STOPWORDS: &[&str] = &[
     "yourselves",
 ];
 
+// Case-insensitive, like SQLite's own identifier matching: `videos` and `Videos` are the same table
+// to every query, so a database that still has the old lowercase spelling must count as having it.
 pub(crate) fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=? COLLATE NOCASE",
+        params![table_name],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+// The exact-spelling variant: tells "still under the old name" from "already renamed".
+fn table_exists_exact(conn: &Connection, table_name: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
         params![table_name],
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+// Tables Kinesis created under snake_case names before the database schema moved to mixed case. A
+// database still carrying one is renamed in place (ALTER TABLE ... RENAME TO keeps every row, and
+// SQLite rewrites the references inside triggers and views itself). Names that differ only by case
+// (`videos`/`Videos`, ...) work either way, since SQLite treats them as one identifier, but they are
+// respelled too (see CASE_ONLY_TABLE_NAMES) so the schema reads the same as a new database's.
+const LEGACY_TABLE_NAMES: [(&str, &str); 11] = [
+    ("stop_words", "StopWords"),
+    ("custom_prompts", "CustomPrompts"),
+    ("search_history", "SearchHistory"),
+    ("glossary_drives", "GlossaryDrives"),
+    ("sync_items", "SyncItems"),
+    ("sync_policy", "SyncPolicy"),
+    ("workspace_labels", "WorkspaceLabels"),
+    ("attachment_blobs", "AttachmentBlobs"),
+    ("video_attachments", "VideoAttachments"),
+    ("video_notes", "VideoNotes"),
+    ("video_wdbs_links", "VideoWDBSLinks"),
+];
+
+// A legacy table and its mixed-case successor both exist: what a build that already knew the new
+// names leaves behind when it opens a database with the old ones (it creates the new tables empty
+// beside the old, full ones). The old rows move into the new table (rows already there win) and the
+// old table goes, so nothing is left stranded under a name Kinesis no longer reads.
+fn merge_legacy_table(conn: &Connection, old: &str, new: &str) -> Result<()> {
+    let columns = |table: &str| -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1))?.filter_map(|r| r.ok()).collect();
+        Ok(names)
+    };
+    let new_columns = columns(new)?;
+    let shared: Vec<String> = columns(old)?
+        .into_iter()
+        .filter(|c| new_columns.iter().any(|n| n.eq_ignore_ascii_case(c)))
+        .map(|c| format!("\"{c}\""))
+        .collect();
+    if !shared.is_empty() {
+        let list = shared.join(", ");
+        conn.execute(&format!("INSERT OR IGNORE INTO {new} ({list}) SELECT {list} FROM {old}"), [])?;
+    }
+    // A trigger still pointing at the old table would make every write to its subject fail once the
+    // table is gone; whichever of Kinesis's own or the maintained ones these are come back afterwards.
+    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND instr(lower(sql), ?1) > 0")?;
+    let dependent: Vec<String> = stmt.query_map([old], |row| row.get::<_, String>(0))?.filter_map(|r| r.ok()).collect();
+    drop(stmt);
+    for trigger in dependent {
+        conn.execute(&format!("DROP TRIGGER IF EXISTS \"{trigger}\""), [])?;
+    }
+    conn.execute(&format!("DROP TABLE {old}"), [])?;
+    Ok(())
+}
+
+const CASE_ONLY_TABLE_NAMES: [&str; 4] = ["Videos", "Settings", "Glossary", "Biographies"];
+
+fn migrate_legacy_table_names(conn: &Connection) -> Result<()> {
+    // Kinesis's own objects that changed name with the tables: dropped here and created again under
+    // the new name further down (an index or trigger can't be renamed in place).
+    conn.execute("DROP TRIGGER IF EXISTS trg_kinesis_attachments_cascade_del", [])?;
+    conn.execute("DROP INDEX IF EXISTS idx_video_attachments_video", [])?;
+    let had_old_links_trigger = trigger_exists(conn, "trgVideosAfterDEL_video_wdbs_links_RemoveRecords")?;
+    for (old, new) in LEGACY_TABLE_NAMES {
+        if !table_exists_exact(conn, old)? {
+            continue;
+        }
+        if table_exists(conn, new)? {
+            merge_legacy_table(conn, old, new)?;
+        } else {
+            conn.execute(&format!("ALTER TABLE {old} RENAME TO {new}"), [])?;
+        }
+    }
+    // SQLite refuses to rename a table to a spelling that differs only by case, so it goes through a
+    // temporary name (each rename rewrites the references in triggers and indexes, and the FTS index
+    // finds its content table by name regardless of case).
+    for new in CASE_ONLY_TABLE_NAMES {
+        if table_exists(conn, new)? && !table_exists_exact(conn, new)? {
+            let old: String = conn.query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?1 COLLATE NOCASE",
+                [new],
+                |row| row.get(0),
+            )?;
+            conn.execute(&format!("ALTER TABLE \"{old}\" RENAME TO \"{new}_case_tmp\""), [])?;
+            conn.execute(&format!("ALTER TABLE \"{new}_case_tmp\" RENAME TO \"{new}\""), [])?;
+        }
+    }
+    // The maintained schema renamed two of its own objects along with the tables. Both are recreated
+    // (not renamed: neither can be) only where the old one was there, so a from-scratch database
+    // never gets them from here.
+    if had_old_links_trigger {
+        conn.execute("DROP TRIGGER IF EXISTS trgVideosAfterDEL_video_wdbs_links_RemoveRecords", [])?;
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS trgVideosAfterDEL_VideoWDBSLinks_CascadeDelete
+            AFTER DELETE ON Videos
+            BEGIN
+                DELETE FROM VideoWDBSLinks WHERE video_id = OLD.video_id;
+            END",
+            [],
+        )?;
+    }
+    if table_exists(conn, "Biographies")? {
+        let old_index: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_biographies_handle_lower'",
+            [],
+            |row| row.get(0),
+        )?;
+        if old_index > 0 {
+            conn.execute("DROP INDEX idx_biographies_handle_lower", [])?;
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idxBiographiesHandleLower ON Biographies(LOWER(handle))", [])?;
+        }
+    }
+    Ok(())
 }
 
 // Now that Kinesis creates its own bare-bones tblWDBS (see below) on every database, its mere
@@ -124,7 +247,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
 
     // Verify all required tables exist; if not, this is likely a corrupted/partial database
-    let required_tables = ["videos", "settings", "glossary", "biographies", "search_history", "custom_prompts"];
+    let required_tables = ["Videos", "Settings", "Glossary", "Biographies", "SearchHistory", "CustomPrompts"];
     let mut missing_tables = Vec::new();
 
     for table in &required_tables {
@@ -138,19 +261,9 @@ pub fn init_db(db_path: &str) -> Result<()> {
         log::info!("Creating missing database tables: {:?}", missing_tables);
     }
 
-    // `StopWords` predates this app's snake_case convention for tables it creates and owns —
-    // renamed in place (an ALTER TABLE RENAME TO, not a drop+recreate, so no data is lost) so a
-    // long-running install ends up on the same name a fresh install gets from here on. The check
-    // is exact-case (`table_exists` compares against sqlite_master.name, whose default BINARY
-    // collation makes `=` case-sensitive) specifically so it can tell "still under the old name"
-    // apart from "already renamed" — a case-insensitive check couldn't, since by that measure the
-    // old and new names would look identical. Case-only differences elsewhere (e.g. `Culls`/
-    // `culls`) don't need this treatment at all: SQLite matches identifiers case-insensitively, so
-    // old and new casing already refer to the exact same column with zero functional difference —
-    // only a genuinely different spelling (like an added underscore) needs an actual rename.
-    if table_exists(&conn, "StopWords")? && !table_exists(&conn, "stop_words")? {
-        conn.execute("ALTER TABLE StopWords RENAME TO stop_words", [])?;
-    }
+    // Tables Kinesis created under snake_case names (stop_words, video_notes, ...) become the
+    // mixed-case names of the current schema, in place and without losing rows.
+    migrate_legacy_table_names(&conn)?;
     // `ftsVideos`/`WDBS` are kept under their original casing (not renamed to `fts_videos`/`wdbs`)
     // — an earlier revision of this file did rename `ftsVideos` to `fts_videos` and spell `WDBS`
     // lowercase, but that's since been reverted. Because SQLite matches identifiers case-
@@ -158,7 +271,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // always interchangeable with zero functional difference either way — but `ftsVideos` is a
     // genuinely different table name than `fts_videos` (differs by more than case, an added
     // underscore), so a database that already went through the earlier rename needs an actual
-    // ALTER TABLE to come back, the same way the StopWords rename above needs one to go forward.
+    // ALTER TABLE to come back, the same way the table renames above need one.
     //
     // Both names can end up coexisting — observed in practice on a database copied mid-migration
     // (e.g. via a db-folder-location change that copies the file, then runs this same init_db
@@ -177,7 +290,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // wrong is real data loss, so ambiguity here defaults to doing nothing rather than guessing.
     if table_exists(&conn, "fts_videos")? && table_exists(&conn, "ftsVideos")? {
         let sample_word: Option<String> = conn
-            .query_row("SELECT title FROM videos WHERE title IS NOT NULL AND title != ''", [], |row| row.get::<_, String>(0))
+            .query_row("SELECT title FROM Videos WHERE title IS NOT NULL AND title != ''", [], |row| row.get::<_, String>(0))
             .ok()
             .and_then(|title| {
                 title.split_whitespace()
@@ -205,7 +318,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
 
     // Create videos table
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS videos (
+        "CREATE TABLE IF NOT EXISTS Videos (
             video_id     TEXT PRIMARY KEY,
             title        TEXT,
             author       TEXT,
@@ -214,11 +327,11 @@ pub fn init_db(db_path: &str) -> Result<()> {
             transcript   TEXT,
             summary      TEXT,
             view_count   INTEGER DEFAULT 0,
-            published_at DATETIME,
-            date_added   DATETIME DEFAULT CURRENT_TIMESTAMP,
+            published_at TEXT,
+            date_added   TEXT DEFAULT CURRENT_TIMESTAMP,
             tags         TEXT DEFAULT '',
             tokens       TEXT DEFAULT ''
-        )",
+        ) STRICT",
         [],
     )?;
 
@@ -229,11 +342,11 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // there), and save_tags/regenerate_tokens_from_transcript — plus the compatibility FTS
     // triggers below, which reference new.tokens/old.tokens on every insert/update — fail outright
     // with "no such column: tokens" the first time anything touches that video.
-    if !column_exists(&conn, "videos", "tags")? {
-        conn.execute("ALTER TABLE videos ADD COLUMN tags TEXT DEFAULT ''", [])?;
+    if !column_exists(&conn, "Videos", "tags")? {
+        conn.execute("ALTER TABLE Videos ADD COLUMN tags TEXT DEFAULT ''", [])?;
     }
-    if !column_exists(&conn, "videos", "tokens")? {
-        conn.execute("ALTER TABLE videos ADD COLUMN tokens TEXT DEFAULT ''", [])?;
+    if !column_exists(&conn, "Videos", "tokens")? {
+        conn.execute("ALTER TABLE Videos ADD COLUMN tokens TEXT DEFAULT ''", [])?;
     }
 
     // `video_type` ("short"/"standard", derived from length) never ended up wired to any shipped
@@ -244,18 +357,18 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // referencing this column until that's updated separately on that database directly — SQLite
     // refuses to drop a column any trigger still references, and that shouldn't block the rest of
     // init_db (or app startup) from succeeding while it's pending.
-    if column_exists(&conn, "videos", "video_type")? {
+    if column_exists(&conn, "Videos", "video_type")? {
         let _ = conn.execute("DROP INDEX IF EXISTS idxVideosVideoType", []);
-        let _ = conn.execute("ALTER TABLE videos DROP COLUMN video_type", []);
+        let _ = conn.execute("ALTER TABLE Videos DROP COLUMN video_type", []);
     }
 
     // Indexes backing the Library grid's sort/filter options. Without these, sorting a
     // several-thousand-row library by e.g. view count is a full table scan + temp-b-tree sort
     // on every query, even with a small LIMIT (verified via EXPLAIN QUERY PLAN). IF NOT EXISTS
     // makes repeat calls a fast no-op, so this is safe to run unconditionally.
-    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosDateAdded ON videos(date_added)", []);
-    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosPublishedAt ON videos(published_at)", []);
-    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosViewCount ON videos(view_count)", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosDateAdded ON Videos(date_added)", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosPublishedAt ON Videos(published_at)", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosViewCount ON Videos(view_count)", []);
 
     // Warp Drive taxonomy: `WDBS` indirectly ties a video to a row in `tblWDBS` (the Warp Drive
     // repository) — see db/wdbs.rs. The computed/IMMUTABLE `fkWDBS` column that directly enforces
@@ -272,8 +385,8 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // matches identifiers case-insensitively, so `WDBS` and `wdbs` already refer to the exact same
     // column (this check folds case for exactly that reason), and every query in this codebase now
     // spells it uppercase regardless of which case a given database has it under.
-    if !column_exists(&conn, "videos", "WDBS")? {
-        conn.execute("ALTER TABLE videos ADD COLUMN WDBS TEXT", [])?;
+    if !column_exists(&conn, "Videos", "WDBS")? {
+        conn.execute("ALTER TABLE Videos ADD COLUMN WDBS TEXT", [])?;
     }
 
     // tblWDBS itself: unlike fkWDBS/the validation trigger above, Kinesis now creates and owns
@@ -293,7 +406,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
             WDInfo    TEXT NOT NULL DEFAULT '',
             WDIcon    TEXT NOT NULL DEFAULT '',
             WDDefault INTEGER NOT NULL DEFAULT 0
-        )",
+        ) STRICT",
         [],
     )?;
     // Migrates a tblWDBS that predates the column shape above — either a hand-maintained
@@ -317,100 +430,100 @@ pub fn init_db(db_path: &str) -> Result<()> {
         conn.execute("ALTER TABLE tblWDBS ADD COLUMN WDIcon TEXT NOT NULL DEFAULT ''", [])?;
     }
 
-    // Create stop_words table: common words culled out of generated FTS tokens
+    // Create StopWords table: common words culled out of generated FTS tokens
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS stop_words (
+        "CREATE TABLE IF NOT EXISTS StopWords (
             culls TEXT PRIMARY KEY
-        )",
+        ) STRICT",
         [],
     )?;
 
-    let stopword_count: i64 = conn.query_row("SELECT COUNT(*) FROM stop_words", [], |row| row.get(0))?;
+    let stopword_count: i64 = conn.query_row("SELECT COUNT(*) FROM StopWords", [], |row| row.get(0))?;
     if stopword_count == 0 {
         for word in DEFAULT_STOPWORDS {
-            conn.execute("INSERT OR IGNORE INTO stop_words (culls) VALUES (?1)", params![word])?;
+            conn.execute("INSERT OR IGNORE INTO StopWords (culls) VALUES (?1)", params![word])?;
         }
     }
 
     // Create settings table
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS settings (
+        "CREATE TABLE IF NOT EXISTS Settings (
             key   TEXT PRIMARY KEY,
             value TEXT
-        )",
+        ) STRICT",
         [],
     )?;
 
     // Create glossary table
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS glossary (
+        "CREATE TABLE IF NOT EXISTS Glossary (
             term TEXT PRIMARY KEY,
             definition TEXT NOT NULL
-        )",
+        ) STRICT",
         [],
     )?;
 
     // Which Drive roots (level 1 only, e.g. ":CRYPTO") a Standard Glossary Tag is filed under. A
     // term with no rows here is simply uncategorized (shown under "All"). Quick Tags (empty
-    // definition) never have rows. Kinesis-owned, like video_wdbs_links: created on every database.
+    // definition) never have rows. Kinesis-owned, like VideoWDBSLinks: created on every database.
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS glossary_drives (
+        "CREATE TABLE IF NOT EXISTS GlossaryDrives (
             term TEXT NOT NULL,
             root TEXT NOT NULL,
             PRIMARY KEY (term, root)
-        )",
+        ) STRICT",
         [],
     )?;
 
     // Per-video notes and attachments, kept inside the database (see db/attachments.rs). Blobs are
     // content-addressed by the sha256 of the original bytes so identical files are stored once.
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS attachment_blobs (
+        "CREATE TABLE IF NOT EXISTS AttachmentBlobs (
             hash TEXT PRIMARY KEY,
             compression TEXT NOT NULL DEFAULT 'none',
             size INTEGER NOT NULL,
             stored_size INTEGER NOT NULL,
             data BLOB NOT NULL
-        )",
+        ) STRICT",
         [],
     )?;
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS video_attachments (
+        "CREATE TABLE IF NOT EXISTS VideoAttachments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             video_id TEXT NOT NULL,
             name TEXT NOT NULL,
             ext TEXT NOT NULL,
             hash TEXT NOT NULL,
             added_at TEXT NOT NULL
-        )",
+        ) STRICT",
         [],
     )?;
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_video_attachments_video ON video_attachments(video_id)", [])?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idxVideoAttachmentsVideoID ON VideoAttachments(video_id)", [])?;
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS video_notes (
+        "CREATE TABLE IF NOT EXISTS VideoNotes (
             video_id TEXT PRIMARY KEY,
             note TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        )",
+        ) STRICT",
         [],
     )?;
     // Removes a deleted video's note and attachments, then any stored file nothing points at any
     // more. Created outside the trigger block below on purpose: these tables are Kinesis's own, so
     // this is needed on a hand-maintained production schema too.
     let _ = conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_kinesis_attachments_cascade_del
-        AFTER DELETE ON videos
+        "CREATE TRIGGER IF NOT EXISTS trgVideosAfterDEL_Attachments_CascadeDelete
+        AFTER DELETE ON Videos
         BEGIN
-            DELETE FROM video_notes WHERE video_id = OLD.video_id;
-            DELETE FROM video_attachments WHERE video_id = OLD.video_id;
-            DELETE FROM attachment_blobs WHERE hash NOT IN (SELECT hash FROM video_attachments);
+            DELETE FROM VideoNotes WHERE video_id = OLD.video_id;
+            DELETE FROM VideoAttachments WHERE video_id = OLD.video_id;
+            DELETE FROM AttachmentBlobs WHERE hash NOT IN (SELECT hash FROM VideoAttachments);
         END",
         [],
     );
 
     // Create biographies table
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS biographies (
+        "CREATE TABLE IF NOT EXISTS Biographies (
             handle TEXT PRIMARY KEY,
             display_name TEXT NOT NULL DEFAULT '',
             bio TEXT NOT NULL DEFAULT '',
@@ -427,7 +540,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
             discord TEXT NOT NULL DEFAULT '',
             channel_id TEXT NOT NULL DEFAULT '',
             subscriber_count INTEGER NOT NULL DEFAULT -1
-        )",
+        ) STRICT",
         [],
     )?;
     // channel_id/subscriber_count were added after some databases already existed. Some of those
@@ -444,13 +557,13 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // (negative, since a real count never is, unlike the old 9999 which could in principle
     // coincidentally match a real one) until the (future) backend routine that keeps it
     // continually in sync takes over.
-    migrate_legacy_column(&conn, "biographies", "channel_id")?;
-    migrate_legacy_column(&conn, "biographies", "subscriber_count")?;
-    if !column_exists(&conn, "biographies", "channel_id")? {
-        conn.execute("ALTER TABLE biographies ADD COLUMN channel_id TEXT NOT NULL DEFAULT ''", [])?;
+    migrate_legacy_column(&conn, "Biographies", "channel_id")?;
+    migrate_legacy_column(&conn, "Biographies", "subscriber_count")?;
+    if !column_exists(&conn, "Biographies", "channel_id")? {
+        conn.execute("ALTER TABLE Biographies ADD COLUMN channel_id TEXT NOT NULL DEFAULT ''", [])?;
     }
-    if !column_exists(&conn, "biographies", "subscriber_count")? {
-        conn.execute("ALTER TABLE biographies ADD COLUMN subscriber_count INTEGER NOT NULL DEFAULT -1", [])?;
+    if !column_exists(&conn, "Biographies", "subscriber_count")? {
+        conn.execute("ALTER TABLE Biographies ADD COLUMN subscriber_count INTEGER NOT NULL DEFAULT -1", [])?;
     }
     // One-time normalization of existing rows still holding the old 9999 sentinel, so a database
     // that already went through the ADD COLUMN above (under the old default) doesn't keep it
@@ -458,37 +571,37 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // migratedWdbsPlaceholder below.
     let migrated_subscriber_sentinel: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM settings WHERE key = 'migratedSubscriberCountSentinel' AND value = 'true'",
+            "SELECT COUNT(*) FROM Settings WHERE key = 'migratedSubscriberCountSentinel' AND value = 'true'",
             [],
             |row| row.get(0),
         )
         .unwrap_or(0);
     if migrated_subscriber_sentinel == 0 {
-        let _ = conn.execute("UPDATE biographies SET subscriber_count = -1 WHERE subscriber_count = 9999", []);
+        let _ = conn.execute("UPDATE Biographies SET subscriber_count = -1 WHERE subscriber_count = 9999", []);
         conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES ('migratedSubscriberCountSentinel', 'true')",
+            "INSERT OR REPLACE INTO Settings (key, value) VALUES ('migratedSubscriberCountSentinel', 'true')",
             [],
         )?;
     }
 
-    // Create search_history table
+    // Create SearchHistory table
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS search_history (
+        "CREATE TABLE IF NOT EXISTS SearchHistory (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             search_query TEXT NOT NULL,
-            searched_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            searched_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(search_query)
-        )",
+        ) STRICT",
         [],
     )?;
 
-    // Create custom_prompts table
+    // Create CustomPrompts table
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS custom_prompts (
+        "CREATE TABLE IF NOT EXISTS CustomPrompts (
             handle TEXT PRIMARY KEY,
             local_prompt_text TEXT,
             cloud_prompt_text TEXT
-        )",
+        ) STRICT",
         [],
     )?;
 
@@ -501,7 +614,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // videos.WDBS are merged when building the Drive/Warp Drive tree and paging a category's
     // videos.
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS video_wdbs_links (
+        "CREATE TABLE IF NOT EXISTS VideoWDBSLinks (
             video_id TEXT NOT NULL,
             WDBS     TEXT NOT NULL,
             PRIMARY KEY (video_id, WDBS)
@@ -511,7 +624,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // Customized display names (see db/workspace.rs): the workspace's own name and the aliases for
     // Search, Library, Drive, ... A missing row means the built-in default, so the table starts empty.
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS workspace_labels (
+        "CREATE TABLE IF NOT EXISTS WorkspaceLabels (
             key   TEXT NOT NULL PRIMARY KEY,
             value TEXT NOT NULL
         ) STRICT",
@@ -520,7 +633,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // Cleans up symlink rows when their video is deleted — but only on a from-scratch database
     // without the production schema (see the trigger_exists-gated block further down, where this
     // is actually created): a hand-maintained production database now has its own equivalent
-    // (trgVideosAfterDEL_video_wdbs_links_RemoveRecords), so creating this one there too would
+    // (trgVideosAfterDEL_VideoWDBSLinks_CascadeDelete), so creating this one there too would
     // just double-run the same DELETE on every video removal for no benefit. Unconditionally
     // dropped here for any database that already has it from an earlier Kinesis version, now that
     // it's redundant wherever the production trigger exists.
@@ -530,33 +643,33 @@ pub fn init_db(db_path: &str) -> Result<()> {
 
     // Sync bookkeeping (see db/sync.rs). Deliberately side tables rather than columns on the
     // content tables: it leaves the production schema and its triggers untouched, and the mere
-    // presence of a `sync_items` row is what marks a row as owned by the sync server (so only
+    // presence of a `SyncItems` row is what marks a row as owned by the sync server (so only
     // those are ever overwritten/deleted by a sync). `seen` supports the mark-and-sweep a full
-    // resync does. `sync_policy` holds admin-enforced settings that overlay `settings` at read
+    // resync does. `SyncPolicy` holds admin-enforced settings that overlay `settings` at read
     // time (db/settings.rs) without ever being written into it, so disconnecting restores the
     // user's own values.
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS sync_items (
+        "CREATE TABLE IF NOT EXISTS SyncItems (
             kind         TEXT NOT NULL,
             item_key     TEXT NOT NULL,
             rev          INTEGER NOT NULL DEFAULT 0,
             content_hash TEXT NOT NULL DEFAULT '',
-            synced_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+            synced_at    TEXT DEFAULT CURRENT_TIMESTAMP,
             seen         INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (kind, item_key)
-        )",
+        ) STRICT",
         [],
     )?;
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS sync_policy (
+        "CREATE TABLE IF NOT EXISTS SyncPolicy (
             key    TEXT PRIMARY KEY,
             value  TEXT NOT NULL,
             locked INTEGER NOT NULL DEFAULT 1
-        )",
+        ) STRICT",
         [],
     )?;
 
-    // One-time backfill of tblWDBS rows for any videos.WDBS/video_wdbs_links assignment made
+    // One-time backfill of tblWDBS rows for any videos.WDBS/VideoWDBSLinks assignment made
     // before Kinesis started creating/owning tblWDBS itself (see the tblWDBS block above) —
     // ensure_wdbs_path_exists was a no-op on a from-scratch database back then, so such an
     // assignment could exist with no matching tblWDBS row. Left unregistered, curating an
@@ -566,7 +679,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // every launch, same pattern as migratedWdbsPlaceholder/migratedSubscriberCountSentinel above.
     let migrated_wdbs_backfill: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM settings WHERE key = 'migratedWdbsTaxonomyBackfill' AND value = 'true'",
+            "SELECT COUNT(*) FROM Settings WHERE key = 'migratedWdbsTaxonomyBackfill' AND value = 'true'",
             [],
             |row| row.get(0),
         )
@@ -574,7 +687,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     if migrated_wdbs_backfill == 0 {
         super::wdbs::backfill_missing_wdbs_paths(&conn)?;
         conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES ('migratedWdbsTaxonomyBackfill', 'true')",
+            "INSERT OR REPLACE INTO Settings (key, value) VALUES ('migratedWdbsTaxonomyBackfill', 'true')",
             [],
         )?;
     }
@@ -608,7 +721,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
 
     for (key, val) in defaults.iter() {
         conn.execute(
-            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO Settings (key, value) VALUES (?, ?)",
             params![key, val],
         )?;
     }
@@ -628,15 +741,15 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // forward and this app has no way to change that trigger itself.
     let migrated_placeholder: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM settings WHERE key = 'migratedWdbsPlaceholder' AND value = 'true'",
+            "SELECT COUNT(*) FROM Settings WHERE key = 'migratedWdbsPlaceholder' AND value = 'true'",
             [],
             |row| row.get(0),
         )
         .unwrap_or(0);
     if migrated_placeholder == 0 {
-        let _ = conn.execute("UPDATE videos SET WDBS = ':' WHERE WDBS = 'θψ'", []);
+        let _ = conn.execute("UPDATE Videos SET WDBS = ':' WHERE WDBS = 'θψ'", []);
         conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES ('migratedWdbsPlaceholder', 'true')",
+            "INSERT OR REPLACE INTO Settings (key, value) VALUES ('migratedWdbsPlaceholder', 'true')",
             [],
         )?;
     }
@@ -661,7 +774,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // tokens so a Warp Drive designator search (":UAP floating" — see db/search.rs) can match
     // against it directly via FTS5 MATCH.
     let _ = conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS ftsVideos USING fts5(title, summary, tokens, WDBS, content='videos')",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS ftsVideos USING fts5(title, summary, tokens, WDBS, content='Videos')",
         [],
     );
     if fts_missing_wdbs {
@@ -701,7 +814,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     if !trigger_exists(&conn, "trgVideosBeforeUPD_Videos_ValidateWDBS")? {
         let _ = conn.execute(
             "CREATE TRIGGER IF NOT EXISTS trg_kinesis_fts_before_del
-            BEFORE DELETE ON videos
+            BEFORE DELETE ON Videos
             BEGIN
                 INSERT INTO ftsVideos(ftsVideos, rowid, title, summary, tokens, WDBS)
                 VALUES ('delete', OLD.rowid, OLD.title, OLD.summary, OLD.tokens, OLD.WDBS);
@@ -710,19 +823,19 @@ pub fn init_db(db_path: &str) -> Result<()> {
         );
         let _ = conn.execute(
             "CREATE TRIGGER IF NOT EXISTS trg_kinesis_biography_cascade_del
-            AFTER DELETE ON videos
+            AFTER DELETE ON Videos
             BEGIN
-                DELETE FROM biographies
-                WHERE lower(biographies.handle) = lower(OLD.handle)
+                DELETE FROM Biographies
+                WHERE lower(Biographies.handle) = lower(OLD.handle)
                 AND OLD.handle IS NOT NULL
-                AND (SELECT COUNT(*) FROM videos
-                     WHERE lower(videos.handle) = lower(OLD.handle)) = 0;
+                AND (SELECT COUNT(*) FROM Videos
+                     WHERE lower(Videos.handle) = lower(OLD.handle)) = 0;
             END",
             [],
         );
         let _ = conn.execute(
             "CREATE TRIGGER IF NOT EXISTS trg_kinesis_fts_after_ins
-            AFTER INSERT ON videos
+            AFTER INSERT ON Videos
             BEGIN
                 INSERT INTO ftsVideos(rowid, title, summary, tokens, WDBS)
                 VALUES (new.rowid, new.title, new.summary, new.tokens, new.WDBS);
@@ -731,7 +844,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
         );
         let _ = conn.execute(
             "CREATE TRIGGER IF NOT EXISTS trg_kinesis_fts_after_upd
-            AFTER UPDATE ON videos
+            AFTER UPDATE ON Videos
             BEGIN
                 INSERT INTO ftsVideos(ftsVideos, rowid, title, summary, tokens, WDBS)
                 VALUES ('delete', old.rowid, old.title, old.summary, old.tokens, old.WDBS);
@@ -740,15 +853,15 @@ pub fn init_db(db_path: &str) -> Result<()> {
             END",
             [],
         );
-        // Cleans up video_wdbs_links symlink rows when their video is deleted — needed here since
-        // a from-scratch database has no production trgVideosAfterDEL_video_wdbs_links_RemoveRecords
+        // Cleans up VideoWDBSLinks symlink rows when their video is deleted — needed here since
+        // a from-scratch database has no production trgVideosAfterDEL_VideoWDBSLinks_CascadeDelete
         // of its own to do this (see the unconditional DROP further up, for when one shows up
         // later via this same database gaining the production schema).
         let _ = conn.execute(
             "CREATE TRIGGER IF NOT EXISTS trg_kinesis_wdbs_links_cascade_del
-            AFTER DELETE ON videos
+            AFTER DELETE ON Videos
             BEGIN
-                DELETE FROM video_wdbs_links WHERE video_id = OLD.video_id;
+                DELETE FROM VideoWDBSLinks WHERE video_id = OLD.video_id;
             END",
             [],
         );
@@ -765,7 +878,7 @@ pub fn vacuum_db(db_path: &str) -> Result<()> {
 
 pub fn get_history_stats(db_path: &str) -> Result<i64> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT COUNT(*) FROM search_history")?;
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM SearchHistory")?;
     let count: i64 = stmt.query_row([], |row| row.get(0))?;
     Ok(count)
 }
@@ -792,19 +905,38 @@ mod tests {
         let db_path = temp_db_path("fresh");
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
-        // StopWords/biographies' channel_id/subscriber_count: snake_case, as before.
-        assert!(table_exists(&conn, "stop_words").unwrap());
-        assert!(!table_exists(&conn, "StopWords").unwrap());
-        assert!(column_exists_exact(&conn, "biographies", "channel_id").unwrap());
-        assert!(column_exists_exact(&conn, "biographies", "subscriber_count").unwrap());
+        // Mixed-case table names of the current schema; none of the old snake_case ones.
+        for (old, new) in LEGACY_TABLE_NAMES {
+            assert!(table_exists_exact(&conn, new).unwrap(), "{new} missing");
+            assert!(!table_exists(&conn, old).unwrap(), "{old} should not exist");
+        }
+        for table in ["Videos", "Settings", "Glossary", "Biographies"] {
+            assert!(table_exists_exact(&conn, table).unwrap(), "{table} missing");
+        }
+        // Every table Kinesis creates is STRICT, like the maintained schema's.
+        let non_strict: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_list WHERE schema='main' AND type='table' AND strict=0 AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'ftsVideos%'")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(non_strict.is_empty(), "not STRICT: {non_strict:?}");
+        assert!(trigger_exists(&conn, "trgVideosAfterDEL_Attachments_CascadeDelete").unwrap());
+        let idx: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idxVideoAttachmentsVideoID'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(idx, 1);
+        assert!(column_exists_exact(&conn, "Biographies", "channel_id").unwrap());
+        assert!(column_exists_exact(&conn, "Biographies", "subscriber_count").unwrap());
         // ftsVideos/WDBS: kept under their original casing (reverted from an earlier revision
         // that renamed/lowercased these — see the comments above the rename/ADD COLUMN below).
         assert!(table_exists(&conn, "ftsVideos").unwrap());
         assert!(!table_exists(&conn, "fts_videos").unwrap());
-        assert!(column_exists_exact(&conn, "videos", "WDBS").unwrap());
-        conn.execute("INSERT INTO biographies (handle) VALUES ('fresh-handle')", []).unwrap();
+        assert!(column_exists_exact(&conn, "Videos", "WDBS").unwrap());
+        conn.execute("INSERT INTO Biographies (handle) VALUES ('fresh-handle')", []).unwrap();
         let default_subscriber_count: i64 = conn.query_row(
-            "SELECT subscriber_count FROM biographies WHERE handle = 'fresh-handle'", [], |row| row.get(0),
+            "SELECT subscriber_count FROM Biographies WHERE handle = 'fresh-handle'", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(default_subscriber_count, -1);
         drop(conn);
@@ -817,7 +949,7 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute(
-                "CREATE TABLE biographies (
+                "CREATE TABLE Biographies (
                     handle TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL DEFAULT '',
                     ChannelID TEXT NOT NULL DEFAULT '',
@@ -826,16 +958,16 @@ mod tests {
                 [],
             ).unwrap();
             conn.execute(
-                "INSERT INTO biographies (handle, ChannelID, SubscriberCount) VALUES ('someone', 'UCXXXXX', 12345)",
+                "INSERT INTO Biographies (handle, ChannelID, SubscriberCount) VALUES ('someone', 'UCXXXXX', 12345)",
                 [],
             ).unwrap();
         }
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
-        assert!(!column_exists_exact(&conn, "biographies", "ChannelID").unwrap());
-        assert!(!column_exists_exact(&conn, "biographies", "SubscriberCount").unwrap());
+        assert!(!column_exists_exact(&conn, "Biographies", "ChannelID").unwrap());
+        assert!(!column_exists_exact(&conn, "Biographies", "SubscriberCount").unwrap());
         let (channel_id, subscriber_count): (String, i64) = conn.query_row(
-            "SELECT channel_id, subscriber_count FROM biographies WHERE handle = 'someone'",
+            "SELECT channel_id, subscriber_count FROM Biographies WHERE handle = 'someone'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
@@ -854,7 +986,7 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute(
-                "CREATE TABLE biographies (
+                "CREATE TABLE Biographies (
                     handle TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL DEFAULT '',
                     ChannelID TEXT NOT NULL DEFAULT '',
@@ -865,16 +997,16 @@ mod tests {
                 [],
             ).unwrap();
             conn.execute(
-                "INSERT INTO biographies (handle, ChannelID, SubscriberCount) VALUES ('someone', 'UCREAL', 999)",
+                "INSERT INTO Biographies (handle, ChannelID, SubscriberCount) VALUES ('someone', 'UCREAL', 999)",
                 [],
             ).unwrap();
         }
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
-        assert!(!column_exists_exact(&conn, "biographies", "ChannelID").unwrap());
-        assert!(!column_exists_exact(&conn, "biographies", "SubscriberCount").unwrap());
+        assert!(!column_exists_exact(&conn, "Biographies", "ChannelID").unwrap());
+        assert!(!column_exists_exact(&conn, "Biographies", "SubscriberCount").unwrap());
         let (channel_id, subscriber_count): (String, i64) = conn.query_row(
-            "SELECT channel_id, subscriber_count FROM biographies WHERE handle = 'someone'",
+            "SELECT channel_id, subscriber_count FROM Biographies WHERE handle = 'someone'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
@@ -894,7 +1026,7 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute(
-                "CREATE TABLE biographies (
+                "CREATE TABLE Biographies (
                     handle TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL DEFAULT '',
                     Channel_Id TEXT NOT NULL DEFAULT '',
@@ -903,16 +1035,16 @@ mod tests {
                 [],
             ).unwrap();
             conn.execute(
-                "INSERT INTO biographies (handle, Channel_Id, Subscriber_Count) VALUES ('someone', 'UCOTHER', 42)",
+                "INSERT INTO Biographies (handle, Channel_Id, Subscriber_Count) VALUES ('someone', 'UCOTHER', 42)",
                 [],
             ).unwrap();
         }
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
-        assert!(!column_exists_exact(&conn, "biographies", "Channel_Id").unwrap());
-        assert!(!column_exists_exact(&conn, "biographies", "Subscriber_Count").unwrap());
+        assert!(!column_exists_exact(&conn, "Biographies", "Channel_Id").unwrap());
+        assert!(!column_exists_exact(&conn, "Biographies", "Subscriber_Count").unwrap());
         let (channel_id, subscriber_count): (String, i64) = conn.query_row(
-            "SELECT channel_id, subscriber_count FROM biographies WHERE handle = 'someone'",
+            "SELECT channel_id, subscriber_count FROM Biographies WHERE handle = 'someone'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
@@ -928,7 +1060,7 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute(
-                "CREATE TABLE biographies (
+                "CREATE TABLE Biographies (
                     handle TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL DEFAULT '',
                     channel_id TEXT NOT NULL DEFAULT '',
@@ -938,16 +1070,16 @@ mod tests {
             ).unwrap();
             // One row still genuinely unknown (the old sentinel), one with a real count that just
             // happens to differ from it — only the former should change.
-            conn.execute("INSERT INTO biographies (handle, subscriber_count) VALUES ('unknown-guy', 9999)", []).unwrap();
-            conn.execute("INSERT INTO biographies (handle, subscriber_count) VALUES ('known-guy', 500)", []).unwrap();
+            conn.execute("INSERT INTO Biographies (handle, subscriber_count) VALUES ('unknown-guy', 9999)", []).unwrap();
+            conn.execute("INSERT INTO Biographies (handle, subscriber_count) VALUES ('known-guy', 500)", []).unwrap();
         }
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
         let unknown: i64 = conn.query_row(
-            "SELECT subscriber_count FROM biographies WHERE handle = 'unknown-guy'", [], |row| row.get(0),
+            "SELECT subscriber_count FROM Biographies WHERE handle = 'unknown-guy'", [], |row| row.get(0),
         ).unwrap();
         let known: i64 = conn.query_row(
-            "SELECT subscriber_count FROM biographies WHERE handle = 'known-guy'", [], |row| row.get(0),
+            "SELECT subscriber_count FROM Biographies WHERE handle = 'known-guy'", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(unknown, -1);
         assert_eq!(known, 500);
@@ -956,20 +1088,121 @@ mod tests {
     }
 
     #[test]
-    fn legacy_stop_words_table_is_renamed_without_losing_data() {
-        let db_path = temp_db_path("legacy_stopwords");
+    fn legacy_snake_case_tables_are_renamed_without_losing_data() {
+        let db_path = temp_db_path("legacy_tables");
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute("CREATE TABLE StopWords (Culls TEXT PRIMARY KEY)", []).unwrap();
-            conn.execute("INSERT INTO StopWords (Culls) VALUES ('the')", []).unwrap();
+            conn.execute("CREATE TABLE stop_words (culls TEXT PRIMARY KEY)", []).unwrap();
+            conn.execute("INSERT INTO stop_words (culls) VALUES ('the')", []).unwrap();
+            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, handle TEXT)", []).unwrap();
+            conn.execute("INSERT INTO videos (video_id, title) VALUES ('v1', 'kept')", []).unwrap();
+            conn.execute("CREATE TABLE video_notes (video_id TEXT PRIMARY KEY, note TEXT NOT NULL, updated_at TEXT NOT NULL)", []).unwrap();
+            conn.execute("INSERT INTO video_notes VALUES ('v1', 'my note', 'now')", []).unwrap();
+            conn.execute("CREATE TABLE video_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, video_id TEXT NOT NULL, name TEXT NOT NULL, ext TEXT NOT NULL, hash TEXT NOT NULL, added_at TEXT NOT NULL)", []).unwrap();
+            conn.execute("CREATE INDEX idx_video_attachments_video ON video_attachments(video_id)", []).unwrap();
+            conn.execute("CREATE TABLE attachment_blobs (hash TEXT PRIMARY KEY, compression TEXT NOT NULL DEFAULT 'none', size INTEGER NOT NULL, stored_size INTEGER NOT NULL, data BLOB NOT NULL)", []).unwrap();
+            conn.execute(
+                "CREATE TRIGGER trg_kinesis_attachments_cascade_del AFTER DELETE ON videos BEGIN
+                    DELETE FROM video_notes WHERE video_id = OLD.video_id;
+                    DELETE FROM video_attachments WHERE video_id = OLD.video_id;
+                    DELETE FROM attachment_blobs WHERE hash NOT IN (SELECT hash FROM video_attachments);
+                END",
+                [],
+            ).unwrap();
         }
         init_db(&db_path).unwrap();
+        // A second run must be a no-op.
+        init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
-        assert!(table_exists(&conn, "stop_words").unwrap());
-        assert!(!table_exists(&conn, "StopWords").unwrap());
-        let has_the: i64 = conn.query_row("SELECT COUNT(*) FROM stop_words WHERE culls = 'the'", [], |row| row.get(0)).unwrap();
+        for (old, new) in LEGACY_TABLE_NAMES {
+            assert!(table_exists_exact(&conn, new).unwrap(), "{new} missing");
+            assert!(!table_exists(&conn, old).unwrap(), "{old} should be gone");
+        }
+        for table in CASE_ONLY_TABLE_NAMES {
+            assert!(table_exists_exact(&conn, table).unwrap(), "{table} should be respelled");
+        }
+        let kept: String = conn.query_row("SELECT title FROM Videos WHERE video_id = 'v1'", [], |row| row.get(0)).unwrap();
+        assert_eq!(kept, "kept");
+        let has_the: i64 = conn.query_row("SELECT COUNT(*) FROM StopWords WHERE culls = 'the'", [], |row| row.get(0)).unwrap();
         assert_eq!(has_the, 1);
+        let note: String = conn.query_row("SELECT note FROM VideoNotes WHERE video_id = 'v1'", [], |row| row.get(0)).unwrap();
+        assert_eq!(note, "my note");
+        // The cascade trigger now exists under its new name only, and still works.
+        assert!(!trigger_exists(&conn, "trg_kinesis_attachments_cascade_del").unwrap());
+        assert!(trigger_exists(&conn, "trgVideosAfterDEL_Attachments_CascadeDelete").unwrap());
+        conn.execute("INSERT INTO ftsVideos(ftsVideos) VALUES('rebuild')", []).unwrap(); // the stand-in video predates the index
+        conn.execute("DELETE FROM Videos WHERE video_id = 'v1'", []).unwrap();
+        let notes: i64 = conn.query_row("SELECT COUNT(*) FROM VideoNotes", [], |row| row.get(0)).unwrap();
+        assert_eq!(notes, 0);
         drop(conn);
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn old_and_new_tables_side_by_side_are_merged() {
+        // What a build that already knew the new names leaves behind on a database with the old ones:
+        // the new tables exist (empty, or seeded) next to the old, full ones.
+        let db_path = temp_db_path("merge");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, handle TEXT)", []).unwrap();
+            conn.execute("CREATE TABLE stop_words (Culls TEXT NOT NULL PRIMARY KEY)", []).unwrap();
+            conn.execute("INSERT INTO stop_words VALUES ('alpha'), ('the'), ('zeta')", []).unwrap();
+            conn.execute("CREATE TABLE StopWords (culls TEXT PRIMARY KEY)", []).unwrap();
+            conn.execute("INSERT INTO StopWords VALUES ('the'), ('extra')", []).unwrap();
+            conn.execute("CREATE TABLE search_history (id INTEGER PRIMARY KEY AUTOINCREMENT, search_query TEXT NOT NULL, searched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(search_query))", []).unwrap();
+            conn.execute("INSERT INTO search_history (search_query) VALUES ('one'), ('two')", []).unwrap();
+            conn.execute("CREATE TABLE SearchHistory (id INTEGER PRIMARY KEY AUTOINCREMENT, search_query TEXT NOT NULL, searched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(search_query))", []).unwrap();
+            conn.execute("CREATE TABLE video_wdbs_links (video_id TEXT NOT NULL, WDBS TEXT NOT NULL, PRIMARY KEY (video_id, WDBS))", []).unwrap();
+            conn.execute("INSERT INTO video_wdbs_links VALUES ('v1', ':A')", []).unwrap();
+            conn.execute("CREATE TABLE VideoWDBSLinks (video_id TEXT NOT NULL, WDBS TEXT NOT NULL, PRIMARY KEY (video_id, WDBS))", []).unwrap();
+            conn.execute(
+                "CREATE TRIGGER trgVideosAfterDEL_video_wdbs_links_RemoveRecords AFTER DELETE ON videos
+                 BEGIN DELETE FROM video_wdbs_links WHERE video_id = OLD.video_id; END",
+                [],
+            ).unwrap();
+            conn.execute("CREATE TABLE biographies (handle TEXT PRIMARY KEY)", []).unwrap();
+            conn.execute("CREATE UNIQUE INDEX idx_biographies_handle_lower ON biographies(LOWER(handle))", []).unwrap();
+        }
+        init_db(&db_path).unwrap();
+        init_db(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        for (old, _) in LEGACY_TABLE_NAMES {
+            assert!(!table_exists(&conn, old).unwrap(), "{old} should be gone");
+        }
+        let words: Vec<String> = conn.prepare("SELECT culls FROM StopWords WHERE culls IN ('alpha','the','zeta','extra') ORDER BY culls").unwrap()
+            .query_map([], |r| r.get::<_, String>(0)).unwrap().filter_map(|r| r.ok()).collect();
+        assert_eq!(words, vec!["alpha", "extra", "the", "zeta"]);
+        let searches: i64 = conn.query_row("SELECT COUNT(*) FROM SearchHistory", [], |r| r.get(0)).unwrap();
+        assert_eq!(searches, 2);
+        let links: i64 = conn.query_row("SELECT COUNT(*) FROM VideoWDBSLinks WHERE video_id='v1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(links, 1);
+        // The maintained schema's renamed trigger and index replace the old ones.
+        assert!(!trigger_exists(&conn, "trgVideosAfterDEL_video_wdbs_links_RemoveRecords").unwrap());
+        assert!(trigger_exists(&conn, "trgVideosAfterDEL_VideoWDBSLinks_CascadeDelete").unwrap());
+        let idx = |name: &str| -> i64 { conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1", [name], |r| r.get(0)).unwrap() };
+        assert_eq!((idx("idx_biographies_handle_lower"), idx("idxBiographiesHandleLower")), (0, 1));
+        // Deleting a video still works (no trigger is left pointing at a dropped table) and cascades.
+        conn.execute("INSERT INTO Videos (video_id, title, handle) VALUES ('v1', 't', '@h')", []).unwrap();
+        conn.execute("INSERT INTO ftsVideos(ftsVideos) VALUES('rebuild')", []).unwrap();
+        conn.execute("DELETE FROM Videos WHERE video_id = 'v1'", []).unwrap();
+        let links: i64 = conn.query_row("SELECT COUNT(*) FROM VideoWDBSLinks", [], |r| r.get(0)).unwrap();
+        assert_eq!(links, 0);
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn table_lookups_ignore_case_like_sqlite_does() {
+        let db_path = temp_db_path("case");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY)", []).unwrap();
+            assert!(table_exists(&conn, "Videos").unwrap());
+            assert!(table_exists(&conn, "VIDEOS").unwrap());
+            assert!(table_exists_exact(&conn, "videos").unwrap());
+            assert!(!table_exists_exact(&conn, "Videos").unwrap());
+        }
         let _ = fs::remove_file(&db_path);
     }
 
@@ -981,9 +1214,9 @@ mod tests {
         let db_path = temp_db_path("fts_videos_revert");
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
-            conn.execute("CREATE VIRTUAL TABLE fts_videos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
-            conn.execute("INSERT INTO videos (video_id, title, summary, tokens, WDBS) VALUES ('v1', 'Some Title', 'Some Summary', 'some title', ':UAP')", []).unwrap();
+            conn.execute("CREATE TABLE Videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE fts_videos USING fts5(title, summary, tokens, wdbs, content='Videos')", []).unwrap();
+            conn.execute("INSERT INTO Videos (video_id, title, summary, tokens, WDBS) VALUES ('v1', 'Some Title', 'Some Summary', 'some title', ':UAP')", []).unwrap();
             conn.execute("INSERT INTO fts_videos(rowid, title, summary, tokens, wdbs) VALUES (1, 'Some Title', 'Some Summary', 'some title', ':UAP')", []).unwrap();
         }
         init_db(&db_path).unwrap();
@@ -991,7 +1224,7 @@ mod tests {
         assert!(table_exists(&conn, "ftsVideos").unwrap());
         assert!(!table_exists(&conn, "fts_videos").unwrap());
         let matched_id: String = conn.query_row(
-            "SELECT v.video_id FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE ftsVideos MATCH 'Some'",
+            "SELECT v.video_id FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE ftsVideos MATCH 'Some'",
             [], |row| row.get(0),
         ).unwrap();
         assert_eq!(matched_id, "v1");
@@ -1009,10 +1242,10 @@ mod tests {
         let db_path = temp_db_path("fts_videos_coexist");
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
-            conn.execute("CREATE VIRTUAL TABLE fts_videos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
-            conn.execute("CREATE VIRTUAL TABLE ftsVideos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
-            conn.execute("INSERT INTO videos (video_id, title, summary, tokens, WDBS) VALUES ('v1', 'Some Title', 'Some Summary', 'some title', ':UAP')", []).unwrap();
+            conn.execute("CREATE TABLE Videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE fts_videos USING fts5(title, summary, tokens, wdbs, content='Videos')", []).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE ftsVideos USING fts5(title, summary, tokens, wdbs, content='Videos')", []).unwrap();
+            conn.execute("INSERT INTO Videos (video_id, title, summary, tokens, WDBS) VALUES ('v1', 'Some Title', 'Some Summary', 'some title', ':UAP')", []).unwrap();
             conn.execute("INSERT INTO fts_videos(rowid, title, summary, tokens, wdbs) VALUES (1, 'Some Title', 'Some Summary', 'some title', ':UAP')", []).unwrap();
             // ftsVideos deliberately left empty, mirroring the stray table's real-world state.
         }
@@ -1021,7 +1254,7 @@ mod tests {
         assert!(table_exists(&conn, "ftsVideos").unwrap());
         assert!(!table_exists(&conn, "fts_videos").unwrap());
         let matched_id: String = conn.query_row(
-            "SELECT v.video_id FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE ftsVideos MATCH 'Some'",
+            "SELECT v.video_id FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE ftsVideos MATCH 'Some'",
             [], |row| row.get(0),
         ).unwrap();
         assert_eq!(matched_id, "v1");
@@ -1038,10 +1271,10 @@ mod tests {
         let db_path = temp_db_path("fts_videos_ambiguous");
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
-            conn.execute("CREATE VIRTUAL TABLE fts_videos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
-            conn.execute("CREATE VIRTUAL TABLE ftsVideos USING fts5(title, summary, tokens, wdbs, content='videos')", []).unwrap();
-            conn.execute("INSERT INTO videos (video_id, title, summary, tokens, WDBS) VALUES ('v1', NULL, NULL, '', ':UAP')", []).unwrap();
+            conn.execute("CREATE TABLE Videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE fts_videos USING fts5(title, summary, tokens, wdbs, content='Videos')", []).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE ftsVideos USING fts5(title, summary, tokens, wdbs, content='Videos')", []).unwrap();
+            conn.execute("INSERT INTO Videos (video_id, title, summary, tokens, WDBS) VALUES ('v1', NULL, NULL, '', ':UAP')", []).unwrap();
         }
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
@@ -1059,18 +1292,18 @@ mod tests {
         let db_path = temp_db_path("wdbs_case");
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', wdbs TEXT)", []).unwrap();
-            conn.execute("INSERT INTO videos (video_id, wdbs) VALUES ('v1', ':UAP')", []).unwrap();
+            conn.execute("CREATE TABLE Videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', wdbs TEXT)", []).unwrap();
+            conn.execute("INSERT INTO Videos (video_id, wdbs) VALUES ('v1', ':UAP')", []).unwrap();
         }
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
-        let wdbs_ish_columns: Vec<String> = conn.prepare("PRAGMA table_info(videos)").unwrap()
+        let wdbs_ish_columns: Vec<String> = conn.prepare("PRAGMA table_info(Videos)").unwrap()
             .query_map([], |row| row.get::<_, String>(1)).unwrap()
             .filter_map(|r| r.ok())
             .filter(|n| n.eq_ignore_ascii_case("wdbs"))
             .collect();
         assert_eq!(wdbs_ish_columns.len(), 1, "expected exactly one wdbs-ish column, got {:?}", wdbs_ish_columns);
-        let value: String = conn.query_row("SELECT WDBS FROM videos WHERE video_id = 'v1'", [], |row| row.get(0)).unwrap();
+        let value: String = conn.query_row("SELECT WDBS FROM Videos WHERE video_id = 'v1'", [], |row| row.get(0)).unwrap();
         assert_eq!(value, ":UAP");
         drop(conn);
         let _ = fs::remove_file(&db_path);
@@ -1087,8 +1320,8 @@ mod tests {
         let db_path = temp_db_path("wdbs_backfill");
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
-            conn.execute("INSERT INTO videos (video_id, WDBS) VALUES ('v1', 'θψUAP_GERB')", []).unwrap();
+            conn.execute("CREATE TABLE Videos (video_id TEXT PRIMARY KEY, title TEXT, summary TEXT, tokens TEXT DEFAULT '', WDBS TEXT)", []).unwrap();
+            conn.execute("INSERT INTO Videos (video_id, WDBS) VALUES ('v1', 'θψUAP_GERB')", []).unwrap();
         }
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();

@@ -155,7 +155,7 @@ pub async fn summarize_all_videos(app: tauri::AppHandle) -> Result<i32, String> 
     let videos_without_summary: Vec<(String, String, Option<String>)> = {
         let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-            "SELECT video_id, transcript, handle, summary FROM videos WHERE transcript IS NOT NULL AND transcript != ''"
+            "SELECT video_id, transcript, handle, summary FROM Videos WHERE transcript IS NOT NULL AND transcript != ''"
         ).map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         let mut result = Vec::new();

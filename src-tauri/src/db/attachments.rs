@@ -1,7 +1,7 @@
 //! Per-video notes and attachments, stored inside the database.
 //!
-//! Files are content-addressed: `attachment_blobs` holds each distinct file once, keyed by the
-//! sha256 of its original bytes, and `video_attachments` points videos at blobs. That keeps identical
+//! Files are content-addressed: `AttachmentBlobs` holds each distinct file once, keyed by the
+//! sha256 of its original bytes, and `VideoAttachments` points videos at blobs. That keeps identical
 //! files from being stored twice, lets every read check its bytes against the hash, and gives a future
 //! sync a natural unit to ship. Compressible types are deflated, but only when that is smaller, and
 //! only after decompressing the result proves it gives back exactly the original bytes.
@@ -120,14 +120,14 @@ fn decode(compression: &str, data: Vec<u8>) -> std::result::Result<Vec<u8>, Stri
 
 fn video_exists(conn: &Connection, video_id: &str) -> Result<bool> {
     Ok(conn
-        .query_row("SELECT 1 FROM videos WHERE video_id = ?1", params![video_id], |_| Ok(()))
+        .query_row("SELECT 1 FROM Videos WHERE video_id = ?1", params![video_id], |_| Ok(()))
         .optional()?
         .is_some())
 }
 
 fn attachment_count(conn: &Connection, video_id: &str) -> Result<usize> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM video_attachments WHERE video_id = ?1",
+        "SELECT COUNT(*) FROM VideoAttachments WHERE video_id = ?1",
         params![video_id],
         |r| r.get(0),
     )?;
@@ -160,12 +160,12 @@ pub fn add_attachment(db_path: &str, video_id: &str, file_name: &str, bytes: Vec
         return Err(limit_message());
     }
     tx.execute(
-        "INSERT OR IGNORE INTO attachment_blobs (hash, compression, size, stored_size, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT OR IGNORE INTO AttachmentBlobs (hash, compression, size, stored_size, data) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![hash, compression, size, stored_size, data],
     )
     .map_err(db_err)?;
     tx.execute(
-        "INSERT INTO video_attachments (video_id, name, ext, hash, added_at) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+        "INSERT INTO VideoAttachments (video_id, name, ext, hash, added_at) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
         params![video_id, name, ext, hash],
     )
     .map_err(db_err)?;
@@ -199,7 +199,7 @@ pub fn add_attachment_from_path(db_path: &str, video_id: &str, path: &std::path:
 fn load_info(conn: &Connection, id: i64) -> Result<Option<AttachmentInfo>> {
     conn.query_row(
         "SELECT a.id, a.name, a.ext, b.size, b.stored_size, a.added_at
-           FROM video_attachments a JOIN attachment_blobs b ON b.hash = a.hash WHERE a.id = ?1",
+           FROM VideoAttachments a JOIN AttachmentBlobs b ON b.hash = a.hash WHERE a.id = ?1",
         params![id],
         row_to_info,
     )
@@ -221,7 +221,7 @@ pub fn list_attachments(db_path: &str, video_id: &str) -> Result<Vec<AttachmentI
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT a.id, a.name, a.ext, b.size, b.stored_size, a.added_at
-           FROM video_attachments a JOIN attachment_blobs b ON b.hash = a.hash
+           FROM VideoAttachments a JOIN AttachmentBlobs b ON b.hash = a.hash
           WHERE a.video_id = ?1 ORDER BY a.id",
     )?;
     let rows = stmt.query_map(params![video_id], row_to_info)?;
@@ -231,9 +231,9 @@ pub fn list_attachments(db_path: &str, video_id: &str) -> Result<Vec<AttachmentI
 /// Removes one attachment, and its stored bytes too once no other video uses them.
 pub fn remove_attachment(db_path: &str, id: i64) -> Result<()> {
     let conn = Connection::open(db_path)?;
-    conn.execute("DELETE FROM video_attachments WHERE id = ?1", params![id])?;
+    conn.execute("DELETE FROM VideoAttachments WHERE id = ?1", params![id])?;
     conn.execute(
-        "DELETE FROM attachment_blobs WHERE hash NOT IN (SELECT hash FROM video_attachments)",
+        "DELETE FROM AttachmentBlobs WHERE hash NOT IN (SELECT hash FROM VideoAttachments)",
         [],
     )?;
     Ok(())
@@ -245,7 +245,7 @@ pub fn read_attachment(db_path: &str, id: i64) -> std::result::Result<(String, V
     let row: Option<(String, String, String, Vec<u8>)> = conn
         .query_row(
             "SELECT a.name, a.hash, b.compression, b.data
-               FROM video_attachments a JOIN attachment_blobs b ON b.hash = a.hash WHERE a.id = ?1",
+               FROM VideoAttachments a JOIN AttachmentBlobs b ON b.hash = a.hash WHERE a.id = ?1",
             params![id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -262,7 +262,7 @@ pub fn read_attachment(db_path: &str, id: i64) -> std::result::Result<(String, V
 pub fn get_note(db_path: &str, video_id: &str) -> Result<String> {
     let conn = Connection::open(db_path)?;
     Ok(conn
-        .query_row("SELECT note FROM video_notes WHERE video_id = ?1", params![video_id], |r| r.get(0))
+        .query_row("SELECT note FROM VideoNotes WHERE video_id = ?1", params![video_id], |r| r.get(0))
         .optional()?
         .unwrap_or_default())
 }
@@ -274,10 +274,10 @@ pub fn set_note(db_path: &str, video_id: &str, note: &str) -> std::result::Resul
         return Err("Save the video to the library before adding a note to it.".to_string());
     }
     if note.trim().is_empty() {
-        conn.execute("DELETE FROM video_notes WHERE video_id = ?1", params![video_id]).map_err(db_err)?;
+        conn.execute("DELETE FROM VideoNotes WHERE video_id = ?1", params![video_id]).map_err(db_err)?;
     } else {
         conn.execute(
-            "INSERT INTO video_notes (video_id, note, updated_at) VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            "INSERT INTO VideoNotes (video_id, note, updated_at) VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ON CONFLICT(video_id) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at",
             params![video_id, note],
         )
@@ -304,7 +304,7 @@ mod tests {
     }
 
     fn blob_count(db: &str) -> i64 {
-        Connection::open(db).unwrap().query_row("SELECT COUNT(*) FROM attachment_blobs", [], |r| r.get(0)).unwrap()
+        Connection::open(db).unwrap().query_row("SELECT COUNT(*) FROM AttachmentBlobs", [], |r| r.get(0)).unwrap()
     }
 
     /// Bytes that don't compress: a simple xorshift stream.
@@ -357,7 +357,7 @@ mod tests {
         video(&db, "v1");
         let info = add_attachment(&db, "v1", "a.txt", b"hello hello hello hello".repeat(50)).unwrap();
         let conn = Connection::open(&db).unwrap();
-        conn.execute("UPDATE attachment_blobs SET compression = 'none', data = x'00112233'", []).unwrap();
+        conn.execute("UPDATE AttachmentBlobs SET compression = 'none', data = x'00112233'", []).unwrap();
         let err = read_attachment(&db, info.id).unwrap_err();
         assert!(err.contains("integrity"), "{err}");
         let _ = std::fs::remove_file(&db);

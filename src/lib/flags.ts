@@ -1,4 +1,4 @@
-// Feature flags: rows in the `settings` table that a DB owner sets to shape the app for their users
+// Feature flags: rows in the `Settings` table that a DB owner sets to shape the app for their users
 // (hide a tab, turn off editing, ...), either by editing the database or through a sync server's
 // policy. The defaults below MUST match `FEATURE_FLAGS` in crates/kinesis-sync-proto/src/settings.rs
 // (a Rust test compares the two), and docs/customizing.md describes each flag.

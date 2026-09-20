@@ -2,6 +2,7 @@ import { Database, Settings } from "lucide-react";
 import { type DbDetails } from "../../api";
 import { useFlags } from "../../hooks/useFlags";
 import { useWorkspace } from "../../hooks/useWorkspace";
+import { settingsSecondaryBtn } from "./buttons";
 
 interface Props {
     dbDetails: DbDetails;
@@ -26,9 +27,9 @@ export function DatabaseTab({ dbDetails, onOpen, onChangeLocation, loading }: Pr
     const rows: { label: string; value: string; detail?: string; wide?: boolean }[] = [
         { label: 'Videos Stored', value: String(dbDetails.video_count) },
         { label: 'Channels', value: String(dbDetails.channel_count) },
-        ...(flags.showDrive ? [{ label: `${labels.aliasDriveName}s`, value: String(dbDetails.drive_count) }] : []),
-        ...(flags.showGlossary ? [{ label: `${labels.aliasGlossary} Tags`, value: String(dbDetails.glossary_count) }] : []),
-        ...(flags.showGlossary && flags.showQuickTags ? [{ label: 'Quick Tags', value: String(dbDetails.quick_tag_count) }] : []),
+        ...(flags.showDrive ? [{ label: 'Drive Nodes', value: String(dbDetails.drive_count) }] : []),
+        ...(flags.showGlossary ? [{ label: 'Terms', value: String(dbDetails.glossary_count) }] : []),
+        ...(flags.showGlossary && flags.showQuickTags ? [{ label: 'Tags', value: String(dbDetails.quick_tag_count) }] : []),
         ...(flags.showBiography ? [{ label: labels.aliasBiography, value: String(dbDetails.biography_count) }] : []),
         ...(flags.showAttachments ? [{
             label: 'Attachments',
@@ -66,9 +67,9 @@ export function DatabaseTab({ dbDetails, onOpen, onChangeLocation, loading }: Pr
                         <button
                             onClick={onOpen}
                             disabled={loading}
-                            className="flex-1 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-2.5 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer mt-1 disabled:opacity-50"
+                            className={`flex-1 ${settingsSecondaryBtn} mt-1`}
                         >
-                            <Database className="w-4 h-4" />
+                            <Database className="w-3.5 h-3.5" />
                             Open DB Location
                         </button>
                         )}
@@ -76,9 +77,9 @@ export function DatabaseTab({ dbDetails, onOpen, onChangeLocation, loading }: Pr
                         <button
                             onClick={onChangeLocation}
                             disabled={loading}
-                            className="flex-1 bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] text-white px-4 py-2.5 rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer mt-1 disabled:opacity-50"
+                            className={`flex-1 ${settingsSecondaryBtn} mt-1`}
                         >
-                            <Settings className="w-4 h-4" />
+                            <Settings className="w-3.5 h-3.5" />
                             Change DB Path
                         </button>
                         )}

@@ -143,12 +143,12 @@ sqlite3 "$SRC" ".backup '$TMP'"         # a consistent snapshot, safe even if Ki
 
 sqlite3 "$TMP" <<'SQL'
 -- Nothing private goes to the server.
-DELETE FROM settings WHERE key IN ('api_key','venice_api_key','pixabay_api_key','obsidianExportPath');
-DELETE FROM settings WHERE key LIKE 'sync_%';
-DELETE FROM search_history;
+DELETE FROM Settings WHERE key IN ('api_key','venice_api_key','pixabay_api_key','obsidianExportPath');
+DELETE FROM Settings WHERE key LIKE 'sync_%';
+DELETE FROM SearchHistory;
 -- Settings every user will be held to (each must also be listed in config.toml [policy] enforced).
-INSERT OR REPLACE INTO settings (key, value) VALUES ('showSummarizeVenice', 'false');
-INSERT OR REPLACE INTO settings (key, value) VALUES ('allowDeletionLibrary', 'false');
+INSERT OR REPLACE INTO Settings (key, value) VALUES ('showSummarizeVenice', 'false');
+INSERT OR REPLACE INTO Settings (key, value) VALUES ('allowDeletionLibrary', 'false');
 SQL
 
 rsync "$TMP" "$HOST:$DEST/master.db.new"
@@ -168,7 +168,7 @@ changed on their next sync. You can publish as often as you like.
 ### Enforcing settings
 
 `[policy] enforced` in `config.toml` lists the settings every user must follow; the **values** come
-from the `settings` table of the database you publish (the `INSERT` lines above). Users see those
+from the `Settings` table of the database you publish (the `INSERT` lines above). Users see those
 controls greyed out. Values are `'true'` / `'false'` for on/off flags.
 
 Common ones: `showSummarizeVenice`, `showSummarizeOllama`, `showSynthesizeVenice`,
@@ -343,6 +343,6 @@ or meter them individually.
 - [ ] Tokens are long and random, one per person or team.
 - [ ] `providers.env` is `chmod 600` and owned by the service user.
 - [ ] Your publish script strips `api_key`, `venice_api_key`, `pixabay_api_key`, `sync_*` and
-      `search_history` from the copy it uploads.
+      `SearchHistory` from the copy it uploads.
 - [ ] No Cloudflare Access login in front of `/api/`, and a WAF skip rule if bot protection blocks the app.
 - [ ] You know who holds each token and can revoke it.

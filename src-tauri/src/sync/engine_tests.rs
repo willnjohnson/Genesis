@@ -160,12 +160,12 @@ async fn syncs_pages_then_deltas_then_recovers_from_a_pruned_cursor() {
     assert!(r.full);
     assert!(r.pages >= 3, "5 items at 2 per page: {r:?}");
     assert_eq!(r.upserted, 5);
-    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM glossary"), 5);
+    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM Glossary"), 5);
     assert_eq!(status(&db_path, &state).unwrap().cursor, 5);
     assert_eq!(r.policy_applied, 1);
     assert_eq!(r.policy_dropped, 1, "the api key entry must be refused");
     assert_eq!(db::get_setting(&db_path, "showBiography").unwrap().as_deref(), Some("false"));
-    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM sync_policy WHERE key='venice_api_key'"), 0);
+    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM SyncPolicy WHERE key='venice_api_key'"), 0);
     let st = status(&db_path, &state).unwrap();
     assert_eq!(st.server_name, "Mock Server");
     assert_eq!(st.license.providers, vec!["venice".to_string()]);
@@ -175,7 +175,7 @@ async fn syncs_pages_then_deltas_then_recovers_from_a_pruned_cursor() {
     // A local row the server has never heard of.
     Connection::open(&db_path)
         .unwrap()
-        .execute("INSERT INTO glossary (term, definition) VALUES ('mine', 'local')", [])
+        .execute("INSERT INTO Glossary (term, definition) VALUES ('mine', 'local')", [])
         .unwrap();
 
     // Delta: one edit, one delete, one addition.
@@ -189,9 +189,9 @@ async fn syncs_pages_then_deltas_then_recovers_from_a_pruned_cursor() {
     assert!(!r.full, "an up-to-date cursor should sync incrementally");
     assert_eq!(r.upserted, 2);
     assert_eq!(r.deleted, 1);
-    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM glossary WHERE term='term2'"), 0);
-    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM glossary WHERE definition='edited'"), 1);
-    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM glossary WHERE term='mine'"), 1);
+    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM Glossary WHERE term='term2'"), 0);
+    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM Glossary WHERE definition='edited'"), 1);
+    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM Glossary WHERE term='mine'"), 1);
 
     // Nothing new: a no-op sync.
     let r = run_core(&db_path, &state, false, |_| {}).await.unwrap();
@@ -206,8 +206,8 @@ async fn syncs_pages_then_deltas_then_recovers_from_a_pruned_cursor() {
     }
     let r = run_core(&db_path, &state, false, |_| {}).await.unwrap();
     assert!(r.full, "410 must trigger a snapshot");
-    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM glossary WHERE term='term3'"), 0);
-    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM glossary WHERE term='mine'"), 1);
+    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM Glossary WHERE term='term3'"), 0);
+    assert_eq!(count(&db_path, "SELECT COUNT(*) FROM Glossary WHERE term='mine'"), 1);
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -243,7 +243,7 @@ fn disconnect_forgets_the_server_and_restores_local_settings() {
     db::set_setting(&db_path, "showDrive", "true").unwrap();
     Connection::open(&db_path)
         .unwrap()
-        .execute("INSERT INTO sync_policy (key, value, locked) VALUES ('showDrive', 'false', 1)", [])
+        .execute("INSERT INTO SyncPolicy (key, value, locked) VALUES ('showDrive', 'false', 1)", [])
         .unwrap();
     assert_eq!(db::get_setting(&db_path, "showDrive").unwrap().as_deref(), Some("false"));
 

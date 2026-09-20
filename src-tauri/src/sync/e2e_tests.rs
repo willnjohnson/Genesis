@@ -73,20 +73,20 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
         m.execute("INSERT OR IGNORE INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon, WDDefault) VALUES (':UAP-GERB', 2, 'GERB', 'Gerb Alias', 'star', 0)", []).unwrap();
         for i in 1..=4 {
             m.execute(
-                "INSERT INTO videos (video_id, title, author, handle, length_seconds, transcript, view_count, published_at, tags, WDBS)
+                "INSERT INTO Videos (video_id, title, author, handle, length_seconds, transcript, view_count, published_at, tags, WDBS)
                  VALUES (?1, ?2, 'Author', '@auth', 120, ?3, 1000, '2024-05-06', 'a,b', 'θψUAP_GERB')",
                 rusqlite::params![format!("vid{i}"), format!("Video {i}"), format!("transcript number {i} about saucers")],
             )
             .unwrap();
         }
-        m.execute("INSERT INTO video_wdbs_links (video_id, wdbs) VALUES ('vid1', 'θψCRYPTO')", []).unwrap();
-        m.execute("INSERT INTO glossary (term, definition) VALUES ('saucer', 'a flying disc')", []).unwrap();
-        m.execute("INSERT INTO glossary_drives (term, root) VALUES ('saucer', ':UAP')", []).unwrap();
-        m.execute("INSERT OR REPLACE INTO biographies (handle, display_name, bio, subscriber_count) VALUES ('@auth', 'Author', 'Bio text', 4200)", []).unwrap();
-        m.execute("INSERT INTO custom_prompts (handle, local_prompt_text, cloud_prompt_text) VALUES ('@auth', 'local p', 'cloud p')", []).unwrap();
-        m.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('showBiography', 'false')", []).unwrap();
-        m.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('plugin_summarize_enabled', 'true')", []).unwrap();
-        m.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('venice_api_key', 'MASTER-SECRET')", []).unwrap();
+        m.execute("INSERT INTO VideoWDBSLinks (video_id, wdbs) VALUES ('vid1', 'θψCRYPTO')", []).unwrap();
+        m.execute("INSERT INTO Glossary (term, definition) VALUES ('saucer', 'a flying disc')", []).unwrap();
+        m.execute("INSERT INTO GlossaryDrives (term, root) VALUES ('saucer', ':UAP')", []).unwrap();
+        m.execute("INSERT OR REPLACE INTO Biographies (handle, display_name, bio, subscriber_count) VALUES ('@auth', 'Author', 'Bio text', 4200)", []).unwrap();
+        m.execute("INSERT INTO CustomPrompts (handle, local_prompt_text, cloud_prompt_text) VALUES ('@auth', 'local p', 'cloud p')", []).unwrap();
+        m.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('showBiography', 'false')", []).unwrap();
+        m.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('plugin_summarize_enabled', 'true')", []).unwrap();
+        m.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('venice_api_key', 'MASTER-SECRET')", []).unwrap();
     }
     let (url, server) = start_server(&dir, &master).await;
     scan_once(&server).unwrap();
@@ -94,10 +94,10 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
     // ── A user with their own data connects.
     {
         let c = Connection::open(&client).unwrap();
-        c.execute("INSERT INTO videos (video_id, title, transcript) VALUES ('mine', 'My own video', 'my words')", []).unwrap();
-        c.execute("INSERT INTO glossary (term, definition) VALUES ('mine-term', 'local')", []).unwrap();
-        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('showBiography', 'true')", []).unwrap();
-        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('venice_api_key', 'USERS-OWN-KEY')", []).unwrap();
+        c.execute("INSERT INTO Videos (video_id, title, transcript) VALUES ('mine', 'My own video', 'my words')", []).unwrap();
+        c.execute("INSERT INTO Glossary (term, definition) VALUES ('mine-term', 'local')", []).unwrap();
+        c.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('showBiography', 'true')", []).unwrap();
+        c.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('venice_api_key', 'USERS-OWN-KEY')", []).unwrap();
     }
     db::set_setting(&client, KEY_URL, &url).unwrap();
     db::set_setting(&client, KEY_TOKEN, TOKEN).unwrap();
@@ -109,31 +109,31 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
     assert!(r.pages >= 3, "page_max 3 with 9+ items must paginate: {r:?}");
 
     // Content arrived, verbatim.
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM videos WHERE video_id LIKE 'vid%'"), 4);
-    assert_eq!(q(&client, "SELECT transcript FROM videos WHERE video_id='vid3'").as_deref(), Some("transcript number 3 about saucers"));
-    assert_eq!(q(&client, "SELECT WDBS FROM videos WHERE video_id='vid2'").as_deref(), Some("θψUAP_GERB"));
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Videos WHERE video_id LIKE 'vid%'"), 4);
+    assert_eq!(q(&client, "SELECT transcript FROM Videos WHERE video_id='vid3'").as_deref(), Some("transcript number 3 about saucers"));
+    assert_eq!(q(&client, "SELECT WDBS FROM Videos WHERE video_id='vid2'").as_deref(), Some("θψUAP_GERB"));
     assert_eq!(q(&client, "SELECT WDInfo FROM tblWDBS WHERE WDBS=':UAP-GERB'").as_deref(), Some("Gerb Alias"));
     assert_eq!(q(&client, "SELECT WDIcon FROM tblWDBS WHERE WDBS=':UAP-GERB'").as_deref(), Some("star"));
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM video_wdbs_links WHERE video_id='vid1'"), 1);
-    assert_eq!(q(&client, "SELECT definition FROM glossary WHERE term='saucer'").as_deref(), Some("a flying disc"));
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM VideoWDBSLinks WHERE video_id='vid1'"), 1);
+    assert_eq!(q(&client, "SELECT definition FROM Glossary WHERE term='saucer'").as_deref(), Some("a flying disc"));
     // The term's top-level drive assignment came with it.
-    assert_eq!(q(&client, "SELECT group_concat(root) FROM glossary_drives WHERE term='saucer'").as_deref(), Some(":UAP"));
-    assert_eq!(n(&client, "SELECT subscriber_count FROM biographies WHERE handle='@auth'"), 4200);
-    assert_eq!(q(&client, "SELECT cloud_prompt_text FROM custom_prompts WHERE handle='@auth'").as_deref(), Some("cloud p"));
+    assert_eq!(q(&client, "SELECT group_concat(root) FROM GlossaryDrives WHERE term='saucer'").as_deref(), Some(":UAP"));
+    assert_eq!(n(&client, "SELECT subscriber_count FROM Biographies WHERE handle='@auth'"), 4200);
+    assert_eq!(q(&client, "SELECT cloud_prompt_text FROM CustomPrompts WHERE handle='@auth'").as_deref(), Some("cloud p"));
     // Derived data was rebuilt locally, so search works on synced videos.
-    assert!(q(&client, "SELECT tokens FROM videos WHERE video_id='vid1'").unwrap_or_default().contains("saucers"));
+    assert!(q(&client, "SELECT tokens FROM Videos WHERE video_id='vid1'").unwrap_or_default().contains("saucers"));
     assert!(n(&client, "SELECT COUNT(*) FROM ftsVideos WHERE ftsVideos MATCH 'saucers'") >= 4);
 
     // The user's own rows are untouched.
-    assert_eq!(q(&client, "SELECT title FROM videos WHERE video_id='mine'").as_deref(), Some("My own video"));
-    assert_eq!(q(&client, "SELECT definition FROM glossary WHERE term='mine-term'").as_deref(), Some("local"));
+    assert_eq!(q(&client, "SELECT title FROM Videos WHERE video_id='mine'").as_deref(), Some("My own video"));
+    assert_eq!(q(&client, "SELECT definition FROM Glossary WHERE term='mine-term'").as_deref(), Some("local"));
 
     // Policy: enforced over the user's own value, without overwriting it; secrets never travel.
     assert_eq!(db::get_setting(&client, "showBiography").unwrap().as_deref(), Some("false"));
-    assert_eq!(q(&client, "SELECT value FROM settings WHERE key='showBiography'").as_deref(), Some("true"));
+    assert_eq!(q(&client, "SELECT value FROM Settings WHERE key='showBiography'").as_deref(), Some("true"));
     assert!(db::set_setting(&client, "showBiography", "true").is_err(), "a locked setting rejects local edits");
     assert_eq!(db::get_setting(&client, "venice_api_key").unwrap().as_deref(), Some("USERS-OWN-KEY"));
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM sync_policy"), 2);
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM SyncPolicy"), 2);
 
     // License advertised (and only what the token is licensed for).
     let st = status(&client, &state).unwrap();
@@ -144,24 +144,24 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
     // ── The admin edits, deletes and adds; the client picks up exactly that.
     {
         let m = Connection::open(&master).unwrap();
-        m.execute("UPDATE videos SET title = 'Video 1 (revised)' WHERE video_id = 'vid1'", []).unwrap();
-        m.execute("DELETE FROM videos WHERE video_id = 'vid4'", []).unwrap();
-        m.execute("INSERT INTO glossary (term, definition) VALUES ('orb', 'a sphere')", []).unwrap();
+        m.execute("UPDATE Videos SET title = 'Video 1 (revised)' WHERE video_id = 'vid1'", []).unwrap();
+        m.execute("DELETE FROM Videos WHERE video_id = 'vid4'", []).unwrap();
+        m.execute("INSERT INTO Glossary (term, definition) VALUES ('orb', 'a sphere')", []).unwrap();
         // The admin refiles a term: only the assignment changes, and the client must follow.
-        m.execute("DELETE FROM glossary_drives WHERE term = 'saucer'", []).unwrap();
-        m.execute("INSERT INTO glossary_drives (term, root) VALUES ('saucer', ':FIN'), ('saucer', ':CRYPTO')", []).unwrap();
-        m.execute("UPDATE settings SET value = 'true' WHERE key = 'showBiography'", []).unwrap();
+        m.execute("DELETE FROM GlossaryDrives WHERE term = 'saucer'", []).unwrap();
+        m.execute("INSERT INTO GlossaryDrives (term, root) VALUES ('saucer', ':FIN'), ('saucer', ':CRYPTO')", []).unwrap();
+        m.execute("UPDATE Settings SET value = 'true' WHERE key = 'showBiography'", []).unwrap();
     }
     scan_once(&server).unwrap();
     let r = run_core(&client, &state, false, |_| {}).await.unwrap();
     assert!(!r.full, "an up-to-date client syncs incrementally");
     assert_eq!(r.error_count, 0, "{:?}", r.errors);
-    assert_eq!(q(&client, "SELECT title FROM videos WHERE video_id='vid1'").as_deref(), Some("Video 1 (revised)"));
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM videos WHERE video_id='vid4'"), 0);
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM videos WHERE video_id='mine'"), 1, "the user's video survives the sync");
-    assert_eq!(q(&client, "SELECT definition FROM glossary WHERE term='orb'").as_deref(), Some("a sphere"));
+    assert_eq!(q(&client, "SELECT title FROM Videos WHERE video_id='vid1'").as_deref(), Some("Video 1 (revised)"));
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Videos WHERE video_id='vid4'"), 0);
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Videos WHERE video_id='mine'"), 1, "the user's video survives the sync");
+    assert_eq!(q(&client, "SELECT definition FROM Glossary WHERE term='orb'").as_deref(), Some("a sphere"));
     assert_eq!(
-        q(&client, "SELECT group_concat(root) FROM (SELECT root FROM glossary_drives WHERE term='saucer' ORDER BY root)").as_deref(),
+        q(&client, "SELECT group_concat(root) FROM (SELECT root FROM GlossaryDrives WHERE term='saucer' ORDER BY root)").as_deref(),
         Some(":CRYPTO,:FIN"),
         "a change that only touches drive assignments still syncs"
     );
@@ -174,9 +174,9 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
     // ── Disconnecting with "remove" takes the server's rows and policy away, and only those.
     let stats = disconnect(&client, false).unwrap();
     assert!(stats.deleted >= 8, "{stats:?}");
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM videos WHERE video_id LIKE 'vid%'"), 0);
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM videos WHERE video_id='mine'"), 1);
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM glossary WHERE term='mine-term'"), 1);
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Videos WHERE video_id LIKE 'vid%'"), 0);
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Videos WHERE video_id='mine'"), 1);
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Glossary WHERE term='mine-term'"), 1);
     assert_eq!(db::get_setting(&client, "showBiography").unwrap().as_deref(), Some("true"));
     assert!(load_config(&client).is_none());
 
@@ -193,7 +193,7 @@ async fn the_client_recovers_when_the_server_forgets_its_history() {
     {
         let m = Connection::open(&master).unwrap();
         for i in 0..6 {
-            m.execute("INSERT INTO glossary (term, definition) VALUES (?1, 'd')", rusqlite::params![format!("t{i}")]).unwrap();
+            m.execute("INSERT INTO Glossary (term, definition) VALUES (?1, 'd')", rusqlite::params![format!("t{i}")]).unwrap();
         }
     }
     let (url, server) = start_server(&dir, &master).await;
@@ -202,7 +202,7 @@ async fn the_client_recovers_when_the_server_forgets_its_history() {
     db::set_setting(&client, KEY_TOKEN, TOKEN).unwrap();
     let state = SyncState::default();
     run_core(&client, &state, false, |_| {}).await.unwrap();
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM glossary WHERE term LIKE 't%'"), 6);
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Glossary WHERE term LIKE 't%'"), 6);
 
     // Rebuild the server's state from scratch: its revision numbers no longer relate to the
     // client's cursor (6), and it has no memory of what was deleted meanwhile. Two new rows make
@@ -211,8 +211,8 @@ async fn the_client_recovers_when_the_server_forgets_its_history() {
     // and silently keep t0 and miss u0. Only the epoch tells it the history is a different one.
     {
         let m = Connection::open(&master).unwrap();
-        m.execute("DELETE FROM glossary WHERE term = 't0'", []).unwrap();
-        m.execute("INSERT INTO glossary (term, definition) VALUES ('u0', 'd'), ('u1', 'd')", []).unwrap();
+        m.execute("DELETE FROM Glossary WHERE term = 't0'", []).unwrap();
+        m.execute("INSERT INTO Glossary (term, definition) VALUES ('u0', 'd'), ('u1', 'd')", []).unwrap();
     }
     std::fs::remove_file(dir.join("state.db")).unwrap();
     let _ = std::fs::remove_file(dir.join("state.db-wal"));
@@ -225,9 +225,9 @@ async fn the_client_recovers_when_the_server_forgets_its_history() {
 
     let r = run_core(&client, &state, false, |_| {}).await.unwrap();
     assert!(r.full, "a new epoch must trigger a snapshot even though the cursor is below the new head");
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM glossary WHERE term='t0'"), 0, "the sweep removed what the new snapshot lacks");
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM glossary WHERE term IN ('u0', 'u1')"), 2, "and nothing new was skipped");
-    assert_eq!(n(&client, "SELECT COUNT(*) FROM glossary WHERE term LIKE 't%'"), 5);
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Glossary WHERE term='t0'"), 0, "the sweep removed what the new snapshot lacks");
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Glossary WHERE term IN ('u0', 'u1')"), 2, "and nothing new was skipped");
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Glossary WHERE term LIKE 't%'"), 5);
     assert_eq!(status(&client, &state).unwrap().cursor, 7);
 
     // Steady state again: the same epoch means an ordinary incremental sync.

@@ -161,7 +161,7 @@ export function ThemeTab({ settings, onUpdate }: Props) {
                         onClick={handleImportClick}
                         disabled={themesLocked}
                         title={themesLocked ? LOCKED_TITLE : undefined}
-                        className="flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-[#404040] text-sm font-semibold text-[#aaaaaa] hover:text-white hover:border-[#505050] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default"
+                        className="flex items-center gap-2 px-4 py-2 rounded-lg border border-dashed border-[#404040] text-[11px] font-semibold text-[#aaaaaa] hover:text-white hover:border-[#505050] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default"
                     >
                         <Upload className="w-4 h-4" />
                         Import Theme
@@ -169,7 +169,7 @@ export function ThemeTab({ settings, onUpdate }: Props) {
                     <button
                         onClick={handleCopyTemplate}
                         title="Copy a Solarized-based JSON template to the clipboard to use as a starting point"
-                        className="flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-[#404040] text-sm font-semibold text-[#aaaaaa] hover:text-white hover:border-[#505050] transition-colors cursor-pointer"
+                        className="flex items-center gap-2 px-4 py-2 rounded-lg border border-dashed border-[#404040] text-[11px] font-semibold text-[#aaaaaa] hover:text-white hover:border-[#505050] transition-colors cursor-pointer"
                     >
                         {copied ? <Check className="w-4 h-4 text-[var(--k-success)]" /> : <Copy className="w-4 h-4" />}
                         {copied ? 'Copied!' : 'Copy Template'}

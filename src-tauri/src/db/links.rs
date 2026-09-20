@@ -171,11 +171,11 @@ fn apply_edits(text: &str, edits: &[LinkEdit]) -> Option<String> {
 
 /// The places link text can live: (table, column). Notes on videos count too.
 const TEXT_COLUMNS: &[(&str, &str)] = &[
-    ("videos", "summary"),
-    ("videos", "transcript"),
-    ("biographies", "bio"),
-    ("glossary", "definition"),
-    ("video_notes", "note"),
+    ("Videos", "summary"),
+    ("Videos", "transcript"),
+    ("Biographies", "bio"),
+    ("Glossary", "definition"),
+    ("VideoNotes", "note"),
 ];
 
 /// Applies `edits` to every stored text that contains an internal link, and returns how many texts
@@ -290,8 +290,8 @@ mod tests {
         save_video(&db, "v1", "One", "A", 60, "see [Halving](kinesis://glossary/Halving) in the talk", 1, "2026-01-01T00:00:00Z", "@a", None).unwrap();
         save_video(&db, "v2", "Two", "B", 60, "words", 1, "2026-01-01T00:00:00Z", "@b", None).unwrap();
         let conn = Connection::open(&db).unwrap();
-        conn.execute("UPDATE videos SET summary = ?1 WHERE video_id = 'v2'", params!["Refers to [One](kinesis://video/v1) and [Orb](kinesis://glossary/Orb)."]).unwrap();
-        conn.execute("INSERT INTO biographies (handle, display_name, bio) VALUES ('@b', 'B', 'Friend of [One](kinesis://video/v1).')", []).unwrap();
+        conn.execute("UPDATE Videos SET summary = ?1 WHERE video_id = 'v2'", params!["Refers to [One](kinesis://video/v1) and [Orb](kinesis://glossary/Orb)."]).unwrap();
+        conn.execute("INSERT INTO Biographies (handle, display_name, bio) VALUES ('@b', 'B', 'Friend of [One](kinesis://video/v1).')", []).unwrap();
         drop(conn);
         save_glossary_term(&db, None, "Halving", "Cuts [One](kinesis://video/v1) rewards", &[]).unwrap();
         save_glossary_term(&db, None, "Orb", "A sphere", &[]).unwrap();
@@ -300,15 +300,15 @@ mod tests {
 
         let conn = Connection::open(&db).unwrap();
         let text = |sql: &str| -> String { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(text("SELECT summary FROM videos WHERE video_id='v2'"), "Refers to One and [Orb](kinesis://glossary/Orb).");
-        assert_eq!(text("SELECT bio FROM biographies WHERE handle='@b'"), "Friend of One.");
-        assert_eq!(text("SELECT definition FROM glossary WHERE term='Halving'"), "Cuts One rewards");
+        assert_eq!(text("SELECT summary FROM Videos WHERE video_id='v2'"), "Refers to One and [Orb](kinesis://glossary/Orb).");
+        assert_eq!(text("SELECT bio FROM Biographies WHERE handle='@b'"), "Friend of One.");
+        assert_eq!(text("SELECT definition FROM Glossary WHERE term='Halving'"), "Cuts One rewards");
         drop(conn);
 
         delete_glossary_term(&db, "Orb").unwrap();
         let conn = Connection::open(&db).unwrap();
         assert_eq!(
-            conn.query_row::<String, _, _>("SELECT summary FROM videos WHERE video_id='v2'", [], |r| r.get(0)).unwrap(),
+            conn.query_row::<String, _, _>("SELECT summary FROM Videos WHERE video_id='v2'", [], |r| r.get(0)).unwrap(),
             "Refers to One and Orb."
         );
         let _ = std::fs::remove_file(&db);
@@ -320,11 +320,11 @@ mod tests {
         save_video(&db, "v1", "One", "A", 60, "words", 1, "2026-01-01T00:00:00Z", "@ann", None).unwrap();
         save_video(&db, "v2", "Two", "B", 60, "see [Ann](kinesis://bio/ann) here", 1, "2026-01-01T00:00:00Z", "@bob", None).unwrap();
         let conn = Connection::open(&db).unwrap();
-        conn.execute("INSERT INTO biographies (handle, display_name, bio) VALUES ('@ann', 'Ann', 'bio')", []).unwrap();
+        conn.execute("INSERT INTO Biographies (handle, display_name, bio) VALUES ('@ann', 'Ann', 'bio')", []).unwrap();
         drop(conn);
         delete_video(&db, "v1").unwrap();
         let conn = Connection::open(&db).unwrap();
-        let transcript: String = conn.query_row("SELECT transcript FROM videos WHERE video_id='v2'", [], |r| r.get(0)).unwrap();
+        let transcript: String = conn.query_row("SELECT transcript FROM Videos WHERE video_id='v2'", [], |r| r.get(0)).unwrap();
         assert_eq!(transcript, "see Ann here", "the biography went with its last video, so links to it are dropped");
         let _ = std::fs::remove_file(&db);
     }
@@ -333,7 +333,7 @@ mod tests {
     fn a_biography_is_found_with_or_without_the_at_sign() {
         let db = temp_db("biolookup");
         let conn = Connection::open(&db).unwrap();
-        conn.execute("INSERT INTO biographies (handle, display_name, bio) VALUES ('@2KrazyKetos', 'Krazy', 'bio')", []).unwrap();
+        conn.execute("INSERT INTO Biographies (handle, display_name, bio) VALUES ('@2KrazyKetos', 'Krazy', 'bio')", []).unwrap();
         drop(conn);
         for handle in ["@2KrazyKetos", "2KrazyKetos", "2krazyketos", " @2KRAZYKETOS "] {
             assert!(crate::db::get_biography_by_handle(&db, handle).unwrap().is_some(), "{handle:?}");
@@ -349,7 +349,7 @@ mod tests {
         save_glossary_term(&db, None, "Other", "See [Halving](kinesis://glossary/Halving)", &[]).unwrap();
         save_glossary_term(&db, Some("Halving"), "Bitcoin Halving", "Cuts rewards", &[]).unwrap();
         let conn = Connection::open(&db).unwrap();
-        let def: String = conn.query_row("SELECT definition FROM glossary WHERE term='Other'", [], |r| r.get(0)).unwrap();
+        let def: String = conn.query_row("SELECT definition FROM Glossary WHERE term='Other'", [], |r| r.get(0)).unwrap();
         assert_eq!(def, "See [Halving](kinesis://glossary/Bitcoin%20Halving)");
         let _ = std::fs::remove_file(&db);
     }

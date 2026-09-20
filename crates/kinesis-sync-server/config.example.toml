@@ -31,7 +31,7 @@ proxy_rate_limit_per_minute = 60
 # Allow clients with no token. They get content and settings, never a license.
 allow_anonymous = false
 
-# Settings every client must follow. Values come from the `settings` table of master_db, so set
+# Settings every client must follow. Values come from the `Settings` table of master_db, so set
 # them there (most flags have no UI toggle; edit the table directly). Only keys on the sync
 # allowlist are accepted: API keys, paths and migration flags are refused at startup.
 [policy]

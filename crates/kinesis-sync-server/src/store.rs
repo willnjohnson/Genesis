@@ -247,16 +247,16 @@ pub(crate) mod tests {
     pub fn make_master(path: &Path) -> Connection {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS videos (video_id TEXT PRIMARY KEY, title TEXT, author TEXT, handle TEXT, length_seconds INTEGER,
+            "CREATE TABLE IF NOT EXISTS Videos (video_id TEXT PRIMARY KEY, title TEXT, author TEXT, handle TEXT, length_seconds INTEGER,
                 transcript TEXT, summary TEXT, view_count INTEGER, published_at TEXT, tags TEXT, WDBS TEXT);
              CREATE TABLE IF NOT EXISTS tblWDBS (WDBS TEXT PRIMARY KEY, lev INTEGER, WDID TEXT, WDInfo TEXT, WDIcon TEXT, WDDefault INTEGER);
-             CREATE TABLE IF NOT EXISTS video_wdbs_links (video_id TEXT NOT NULL, wdbs TEXT NOT NULL, PRIMARY KEY (video_id, wdbs));
-             CREATE TABLE IF NOT EXISTS glossary (term TEXT PRIMARY KEY, definition TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS biographies (handle TEXT PRIMARY KEY, display_name TEXT, bio TEXT, wikipedia TEXT, website TEXT,
+             CREATE TABLE IF NOT EXISTS VideoWDBSLinks (video_id TEXT NOT NULL, wdbs TEXT NOT NULL, PRIMARY KEY (video_id, wdbs));
+             CREATE TABLE IF NOT EXISTS Glossary (term TEXT PRIMARY KEY, definition TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS Biographies (handle TEXT PRIMARY KEY, display_name TEXT, bio TEXT, wikipedia TEXT, website TEXT,
                 twitter TEXT, instagram TEXT, facebook TEXT, threads TEXT, youtube TEXT, tiktok TEXT, twitch TEXT, reddit TEXT,
                 discord TEXT, channel_id TEXT, subscriber_count INTEGER);
-             CREATE TABLE IF NOT EXISTS custom_prompts (handle TEXT PRIMARY KEY, local_prompt_text TEXT, cloud_prompt_text TEXT);
-             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);",
+             CREATE TABLE IF NOT EXISTS CustomPrompts (handle TEXT PRIMARY KEY, local_prompt_text TEXT, cloud_prompt_text TEXT);
+             CREATE TABLE IF NOT EXISTS Settings (key TEXT PRIMARY KEY, value TEXT);",
         )
         .unwrap();
         conn
@@ -291,14 +291,14 @@ pub(crate) mod tests {
     #[test]
     fn first_scan_assigns_revisions_and_unchanged_rescans_do_nothing() {
         let (store, master, dir) = fixture("scan");
-        master.execute("INSERT INTO glossary VALUES ('a', 'one'), ('b', 'two')", []).unwrap();
-        master.execute("INSERT INTO videos (video_id, title) VALUES ('v1', 'T')", []).unwrap();
+        master.execute("INSERT INTO Glossary VALUES ('a', 'one'), ('b', 'two')", []).unwrap();
+        master.execute("INSERT INTO Videos (video_id, title) VALUES ('v1', 'T')", []).unwrap();
 
         let stats = store.scan(&master, 1000, false).unwrap();
         assert_eq!(stats, ScanStats { changed: 3, removed: 0, head: 3 });
         assert_eq!(store.scan(&master, 1000, false).unwrap(), ScanStats { changed: 0, removed: 0, head: 3 }, "no change, no new revisions");
 
-        master.execute("UPDATE glossary SET definition = 'ONE' WHERE term = 'a'", []).unwrap();
+        master.execute("UPDATE Glossary SET definition = 'ONE' WHERE term = 'a'", []).unwrap();
         let stats = store.scan(&master, 1000, false).unwrap();
         assert_eq!((stats.changed, stats.head), (1, 4));
         let p = page(&store, 3, 10, false);
@@ -311,7 +311,7 @@ pub(crate) mod tests {
     fn pages_are_ordered_and_the_last_page_reports_head() {
         let (store, master, dir) = fixture("paging");
         for n in 1..=5 {
-            master.execute("INSERT INTO glossary VALUES (?1, 'd')", params![format!("t{n}")]).unwrap();
+            master.execute("INSERT INTO Glossary VALUES (?1, 'd')", params![format!("t{n}")]).unwrap();
         }
         store.scan(&master, 1000, false).unwrap();
 
@@ -327,9 +327,9 @@ pub(crate) mod tests {
     #[test]
     fn removals_become_tombstones_that_snapshots_omit() {
         let (store, master, dir) = fixture("tomb");
-        master.execute("INSERT INTO glossary VALUES ('a', '1'), ('b', '2')", []).unwrap();
+        master.execute("INSERT INTO Glossary VALUES ('a', '1'), ('b', '2')", []).unwrap();
         store.scan(&master, 1000, false).unwrap();
-        master.execute("DELETE FROM glossary WHERE term = 'a'", []).unwrap();
+        master.execute("DELETE FROM Glossary WHERE term = 'a'", []).unwrap();
         let stats = store.scan(&master, 1000, false).unwrap();
         assert_eq!((stats.removed, stats.head), (1, 3));
 
@@ -337,7 +337,7 @@ pub(crate) mod tests {
         assert_eq!(ids(&page(&store, 0, 10, true)), vec!["glossary:b"], "a snapshot only lists what exists");
 
         // Re-adding the row revives it under a fresh revision.
-        master.execute("INSERT INTO glossary VALUES ('a', '1')", []).unwrap();
+        master.execute("INSERT INTO Glossary VALUES ('a', '1')", []).unwrap();
         store.scan(&master, 1000, false).unwrap();
         assert_eq!(ids(&page(&store, 3, 10, false)), vec!["glossary:a"]);
         let _ = std::fs::remove_dir_all(dir);
@@ -346,17 +346,17 @@ pub(crate) mod tests {
     #[test]
     fn old_tombstones_are_pruned_and_stale_clients_must_resync() {
         let (store, master, dir) = fixture("retention");
-        master.execute("INSERT INTO glossary VALUES ('a', '1'), ('b', '2'), ('c', '3')", []).unwrap();
+        master.execute("INSERT INTO Glossary VALUES ('a', '1'), ('b', '2'), ('c', '3')", []).unwrap();
         store.scan(&master, 4, false).unwrap(); // head 3
-        master.execute("DELETE FROM glossary WHERE term = 'a'", []).unwrap();
+        master.execute("DELETE FROM Glossary WHERE term = 'a'", []).unwrap();
         store.scan(&master, 4, false).unwrap(); // tombstone at rev 4, head 4
         for n in 0..3 {
-            master.execute("INSERT INTO glossary VALUES (?1, 'x')", params![format!("n{n}")]).unwrap();
+            master.execute("INSERT INTO Glossary VALUES (?1, 'x')", params![format!("n{n}")]).unwrap();
         }
         let stats = store.scan(&master, 4, false).unwrap(); // head 7, cutoff 3... tombstone at 4 kept
         assert_eq!(stats.head, 7);
         for n in 3..6 {
-            master.execute("INSERT INTO glossary VALUES (?1, 'x')", params![format!("n{n}")]).unwrap();
+            master.execute("INSERT INTO Glossary VALUES (?1, 'x')", params![format!("n{n}")]).unwrap();
         }
         store.scan(&master, 4, false).unwrap(); // head 10, cutoff 6: the tombstone at 4 is pruned
         let (head, retention) = store.revisions().unwrap();
@@ -379,7 +379,7 @@ pub(crate) mod tests {
 
         // Scans (which change revisions) don't change the epoch.
         let master = make_master(&dir.join("master.db"));
-        master.execute("INSERT INTO glossary VALUES ('a', '1')", []).unwrap();
+        master.execute("INSERT INTO Glossary VALUES ('a', '1')", []).unwrap();
         let store = Store::open(&path).unwrap();
         store.scan(&master, 1000, false).unwrap();
         assert_eq!(store.epoch().unwrap(), first);
@@ -397,10 +397,10 @@ pub(crate) mod tests {
     fn a_scan_that_would_wipe_the_catalogue_is_refused() {
         let (store, master, dir) = fixture("mass");
         for n in 0..30 {
-            master.execute("INSERT INTO glossary VALUES (?1, 'd')", params![format!("t{n}")]).unwrap();
+            master.execute("INSERT INTO Glossary VALUES (?1, 'd')", params![format!("t{n}")]).unwrap();
         }
         store.scan(&master, 1000, false).unwrap();
-        master.execute("DELETE FROM glossary", []).unwrap(); // e.g. master_db now points at an empty database
+        master.execute("DELETE FROM Glossary", []).unwrap(); // e.g. master_db now points at an empty database
 
         let err = store.scan(&master, 1000, false).unwrap_err();
         assert!(err.contains("refusing to remove 30 of 30"), "{err}");

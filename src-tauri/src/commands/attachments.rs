@@ -18,7 +18,7 @@ fn require_edit(db_path: &str) -> Result<(), String> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VideoAttachments {
+pub struct video_attachments {
     pub note: String,
     pub attachments: Vec<AttachmentInfo>,
 }
@@ -33,11 +33,11 @@ pub struct AddOutcome {
 }
 
 #[command]
-pub async fn get_video_attachments(app: AppHandle, video_id: String) -> Result<VideoAttachments, String> {
+pub async fn get_video_attachments(app: AppHandle, video_id: String) -> Result<video_attachments, String> {
     let db_path = get_db_path(&app);
     let note = attachments::get_note(&db_path, &video_id).map_err(|e| e.to_string())?;
     let attachments = attachments::list_attachments(&db_path, &video_id).map_err(|e| e.to_string())?;
-    Ok(VideoAttachments { note, attachments })
+    Ok(video_attachments { note, attachments })
 }
 
 #[command]

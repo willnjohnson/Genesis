@@ -1,13 +1,12 @@
 import { X, Settings, Key, HardDrive, Layers, Monitor, History, Cpu, Palette, FileDown, RefreshCw } from "lucide-react";
 import { useState, useEffect } from "react";
-import { BRAND } from '../branding';
 import {
     getApiKey, getKeyStatus, getDbDetails, getDisplaySettings, setDisplaySettings,
     getSearchHistory, clearHistoryBeforeDate, deleteHistoryEntry, clearAllHistory,
     getSetting, setSetting, openDbLocation, selectFolder, setDbPath,
     type DbDetails, type DisplaySettings, type HistoryEntry, type KeyStatus
 } from "../api";
-import { ApiKeyTab } from "./settings/ApiKeyTab";
+import { ApiKeyTab, type ApiSection } from "./settings/ApiKeyTab";
 import { DatabaseTab } from "./settings/DatabaseTab";
 import { WorkspaceTab } from "./settings/WorkspaceTab";
 import { DisplayTab } from "./settings/DisplayTab";
@@ -82,6 +81,8 @@ export function SettingsModal({
     // Bumped after a sync so the values below (key status, plugin flags, display settings, which a
     // server may have changed) are re-read from the database.
     const [reloadTick, setReloadTick] = useState(0);
+    // Which page of the API Key tab is showing; Plugins can send you straight to one.
+    const [apiSection, setApiSection] = useState<ApiSection>('youtube');
 
     useEffect(() => {
         if (!isOpen) return;
@@ -110,6 +111,12 @@ export function SettingsModal({
 
     if (!isOpen) return null;
 
+    // Venice AI and Pixabay get an API Key page only while a plugin that can use them is on (and its part
+    // of the plugin hasn't been turned off by a DB owner).
+    const pluginOn = (id: string) => plugins.find(p => p.id === id)?.enabled ?? false;
+    const showVeniceKey = (pluginOn('summarize') && showSummarizeVenice) || (pluginOn('photosynthesis') && showSynthesizeVenice);
+    const showPixabayKey = pluginOn('photosynthesis') && showSynthesizePixabay;
+
     const handleUpdateDisplay = async (updates: Partial<DisplaySettings>) => {
         const newSettings = { ...displaySettings, ...updates };
         setDisplaySettingsState(newSettings);
@@ -128,8 +135,7 @@ export function SettingsModal({
         try {
             const folder = await selectFolder();
             if (folder) {
-                const newPath = await setDbPath(folder);
-                localStorage.setItem(BRAND.storageKey, newPath);
+                await setDbPath(folder);
                 setDbDetails(await getDbDetails());
             }
         } catch (e: any) {
@@ -206,6 +212,10 @@ export function SettingsModal({
 
                         {!loading && activeTab === 'api' && (
                             <ApiKeyTab
+                                section={apiSection}
+                                onSectionChange={setApiSection}
+                                showVenice={showVeniceKey}
+                                showPixabay={showPixabayKey}
                                 hasKey={hasApiKey}
                                 licensedBy={keyStatus?.youtube.licensed ? keyStatus.server_name || 'your sync server' : null}
                                 // The app-wide "has API access" flag stays true when a license covers a removed own key.
@@ -279,6 +289,7 @@ export function SettingsModal({
                                 loading={loading}
                                 showSummarizeOllama={showSummarizeOllama}
                                 showSummarizeVenice={showSummarizeVenice}
+                                onOpenVeniceSettings={flags.tabVisible.api ? () => { setApiSection('venice'); setActiveTab('api'); } : undefined}
                             />
                         )}
                     </div>

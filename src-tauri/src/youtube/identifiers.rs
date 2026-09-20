@@ -70,9 +70,12 @@ pub async fn extract_channel_id(url_or_handle: &str) -> Result<Option<String>, S
     Ok(None)
 }
 
+/// A channel's regular videos (no Shorts, no live streams) as a playlist id: "UULF" plus the channel
+/// id without its "UC". This is the playlist YouTube itself lists a channel's Videos tab from; the
+/// older "all uploads" one ("UU") now answers anonymous requests with a server error.
 pub fn channel_id_to_uploads_playlist(channel_id: &str) -> String {
     if channel_id.starts_with("UC") {
-        return format!("UU{}", &channel_id[2..]);
+        return format!("UULF{}", &channel_id[2..]);
     }
     channel_id.to_string()
 }

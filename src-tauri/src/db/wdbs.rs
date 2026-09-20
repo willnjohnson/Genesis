@@ -53,11 +53,11 @@ pub(crate) fn ensure_wdbs_path_exists_with_conn(conn: &Connection, display_path:
 }
 
 /// One-time backfill (see schema.rs's migratedWdbsTaxonomyBackfill) for tblWDBS rows that a
-/// videos.WDBS/video_wdbs_links assignment never got registered for. Before Kinesis started
+/// videos.WDBS/VideoWDBSLinks assignment never got registered for. Before Kinesis started
 /// creating and owning tblWDBS itself (see schema.rs's tblWDBS block), ensure_wdbs_path_exists
 /// was a no-op on a from-scratch database — the table didn't exist yet — so a designator could
 /// get set on a video without ever gaining a matching tblWDBS row. get_wdbs_tree still shows such
-/// a node fine (it's built straight from videos.WDBS/video_wdbs_links, independent of tblWDBS),
+/// a node fine (it's built straight from videos.WDBS/VideoWDBSLinks, independent of tblWDBS),
 /// which is what makes this easy to miss: set_wdbs_alias/set_wdbs_icon are UPDATE-only against
 /// tblWDBS (see their own docs), so curating an alias/icon on one of these unregistered nodes
 /// silently no-ops — the UPDATE matches zero rows, no error, nothing ever persists.
@@ -69,9 +69,9 @@ pub(crate) fn backfill_missing_wdbs_paths(conn: &Connection) -> Result<()> {
     let mut storage_paths: HashSet<String> = HashSet::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT WDBS FROM videos WHERE WDBS IS NOT NULL AND WDBS != ''
+            "SELECT WDBS FROM Videos WHERE WDBS IS NOT NULL AND WDBS != ''
              UNION
-             SELECT wdbs FROM video_wdbs_links",
+             SELECT wdbs FROM VideoWDBSLinks",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         for row in rows.filter_map(|r| r.ok()) {
@@ -141,7 +141,7 @@ pub fn set_wdbs_icon(db_path: &str, storage_path: &str, icon: &str) -> Result<()
 /// storage-encoded prefix (e.g. "θψUAP_GERB") that `list_videos_by_wdbs` matches against; `count`
 /// is the number of *distinct* videos at this node and everywhere beneath it (a video reachable
 /// via two different paths under the same node — e.g. its canonical WDBS plus a symlink, see
-/// video_wdbs_links — is still only counted once), so it always matches what selecting the node
+/// VideoWDBSLinks — is still only counted once), so it always matches what selecting the node
 /// in the tree will show. There is deliberately no "Universe"/unassigned node here — that's what
 /// the Library/Portal grid is already for.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -233,7 +233,7 @@ pub(crate) fn is_unassigned_sentinel(wdbs: &str) -> bool {
 }
 
 /// Builds the full Warp Drive taxonomy tree from every (video, WDBS) assignment actually in use
-/// — both each video's canonical `videos.WDBS` and any symlinks in `video_wdbs_links`. The
+/// — both each video's canonical `videos.WDBS` and any symlinks in `VideoWDBSLinks`. The
 /// distinct-assignment list is taxonomy-sized, not video-count-sized, so it's cheap to pull in
 /// one shot and build the whole tree in memory rather than doing per-level round trips.
 pub fn get_wdbs_tree(db_path: &str) -> Result<Vec<WdbsNode>> {
@@ -257,9 +257,9 @@ pub fn get_wdbs_tree(db_path: &str) -> Result<Vec<WdbsNode>> {
     }
 
     let mut stmt = conn.prepare(
-        "SELECT video_id, WDBS FROM videos WHERE WDBS IS NOT NULL AND WDBS != ''
+        "SELECT video_id, WDBS FROM Videos WHERE WDBS IS NOT NULL AND WDBS != ''
          UNION
-         SELECT video_id, wdbs FROM video_wdbs_links",
+         SELECT video_id, wdbs FROM VideoWDBSLinks",
     )?;
     let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
 
@@ -291,7 +291,7 @@ pub fn get_wdbs_tree(db_path: &str) -> Result<Vec<WdbsNode>> {
 }
 
 /// Pages videos belonging to one Warp Drive category: everything whose canonical WDBS, or any
-/// symlink (video_wdbs_links), is exactly `wdbs_prefix` or nested beneath it, optionally narrowed
+/// symlink (VideoWDBSLinks), is exactly `wdbs_prefix` or nested beneath it, optionally narrowed
 /// further by a free-text `query` (searched via the same FTS5 index — and the same tokenizer,
 /// see build_fts_query — as the Library/Portal grid's own search, just scoped to this category
 /// instead of the whole library — see App.tsx's Drive panel toggle) and by `filter_kind`
@@ -323,9 +323,9 @@ pub fn list_videos_by_wdbs(
     // search below are both applied against the outer `videos` row instead, once IN (...) has
     // narrowed it down to this category's members.
     let matching_ids_sql = "
-        SELECT video_id FROM videos WHERE WDBS = ?1 OR WDBS GLOB ?1 || '_*'
+        SELECT video_id FROM Videos WHERE WDBS = ?1 OR WDBS GLOB ?1 || '_*'
         UNION
-        SELECT video_id FROM video_wdbs_links WHERE wdbs = ?1 OR wdbs GLOB ?1 || '_*'
+        SELECT video_id FROM VideoWDBSLinks WHERE wdbs = ?1 OR wdbs GLOB ?1 || '_*'
     ";
 
     let mut videos = Vec::new();
@@ -336,13 +336,13 @@ pub fn list_videos_by_wdbs(
         // membership + filter_kind.
         let where_sql = format!("v.video_id IN ({matching_ids_sql}) AND {filter_where}");
         total = conn.query_row(
-            &format!("SELECT COUNT(*) FROM videos AS v WHERE {where_sql}"),
+            &format!("SELECT COUNT(*) FROM Videos AS v WHERE {where_sql}"),
             params![wdbs_prefix],
             |row| row.get(0),
         )?;
 
         let sql = format!(
-            "SELECT {columns} FROM videos AS v WHERE {where_sql} ORDER BY {order} LIMIT ?2 OFFSET ?3"
+            "SELECT {columns} FROM Videos AS v WHERE {where_sql} ORDER BY {order} LIMIT ?2 OFFSET ?3"
         );
         let mut stmt = conn.prepare(&sql)?;
         let iter = stmt.query_map(params![wdbs_prefix, limit, offset], |row| video_row(row, false))?;
@@ -354,12 +354,12 @@ pub fn list_videos_by_wdbs(
             "v.video_id IN ({matching_ids_sql}) AND ftsVideos MATCH ?2 AND {filter_where}"
         );
         let count_sql = format!(
-            "SELECT COUNT(*) FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql}"
+            "SELECT COUNT(*) FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql}"
         );
         total = conn.query_row(&count_sql, params![wdbs_prefix, fts_query], |row| row.get(0))?;
 
         let sql = format!(
-            "SELECT {columns} FROM videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql} ORDER BY {order} LIMIT ?3 OFFSET ?4"
+            "SELECT {columns} FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql} ORDER BY {order} LIMIT ?3 OFFSET ?4"
         );
         let mut stmt = conn.prepare(&sql)?;
         let iter = stmt.query_map(params![wdbs_prefix, fts_query, limit, offset], |row| video_row(row, false))?;
@@ -377,9 +377,9 @@ pub fn list_videos_by_wdbs(
 pub fn list_all_wdbs_paths(db_path: &str) -> Result<Vec<String>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT WDBS FROM videos WHERE WDBS IS NOT NULL AND WDBS != ''
+        "SELECT WDBS FROM Videos WHERE WDBS IS NOT NULL AND WDBS != ''
          UNION
-         SELECT wdbs FROM video_wdbs_links
+         SELECT wdbs FROM VideoWDBSLinks
          ORDER BY 1",
     )?;
     let paths = stmt
@@ -395,7 +395,7 @@ pub fn list_all_wdbs_paths(db_path: &str) -> Result<Vec<String>> {
 pub fn get_video_wdbs_primary(db_path: &str, video_id: &str) -> Result<Option<String>> {
     let conn = Connection::open(db_path)?;
     conn.query_row(
-        "SELECT WDBS FROM videos WHERE video_id = ?1",
+        "SELECT WDBS FROM Videos WHERE video_id = ?1",
         params![video_id],
         |row| row.get::<_, Option<String>>(0),
     )
@@ -404,7 +404,7 @@ pub fn get_video_wdbs_primary(db_path: &str, video_id: &str) -> Result<Option<St
 /// A video's symlinked (non-canonical) Warp Drives, in storage encoding.
 pub fn get_video_wdbs_links(db_path: &str, video_id: &str) -> Result<Vec<String>> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT wdbs FROM video_wdbs_links WHERE video_id = ?1 ORDER BY wdbs")?;
+    let mut stmt = conn.prepare("SELECT wdbs FROM VideoWDBSLinks WHERE video_id = ?1 ORDER BY wdbs")?;
     let links = stmt
         .query_map(params![video_id], |row| row.get(0))?
         .filter_map(|r| r.ok())
@@ -417,7 +417,7 @@ pub fn get_video_wdbs_links(db_path: &str, video_id: &str) -> Result<Vec<String>
 pub fn add_video_wdbs_link(db_path: &str, video_id: &str, encoded_wdbs: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "INSERT OR IGNORE INTO video_wdbs_links (video_id, wdbs) VALUES (?1, ?2)",
+        "INSERT OR IGNORE INTO VideoWDBSLinks (video_id, wdbs) VALUES (?1, ?2)",
         params![video_id, encoded_wdbs],
     )?;
     Ok(())
@@ -426,7 +426,7 @@ pub fn add_video_wdbs_link(db_path: &str, video_id: &str, encoded_wdbs: &str) ->
 pub fn remove_video_wdbs_link(db_path: &str, video_id: &str, encoded_wdbs: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
-        "DELETE FROM video_wdbs_links WHERE video_id = ?1 AND wdbs = ?2",
+        "DELETE FROM VideoWDBSLinks WHERE video_id = ?1 AND wdbs = ?2",
         params![video_id, encoded_wdbs],
     )?;
     Ok(())
@@ -437,14 +437,14 @@ pub fn remove_video_wdbs_link(db_path: &str, video_id: &str, encoded_wdbs: &str)
 /// additional alongside a canonical Warp Drive, not on its own.
 pub fn clear_video_wdbs_links(db_path: &str, video_id: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
-    conn.execute("DELETE FROM video_wdbs_links WHERE video_id = ?1", params![video_id])?;
+    conn.execute("DELETE FROM VideoWDBSLinks WHERE video_id = ?1", params![video_id])?;
     Ok(())
 }
 
 /// One top-level Drive (level 1), as the Glossary's drive dropdown and assignment picker list them.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WdbsRoot {
-    /// Display path, e.g. ":CRYPTO" — what glossary_drives stores.
+    /// Display path, e.g. ":CRYPTO" — what GlossaryDrives stores.
     pub path: String,
     /// The bare name shown in the UI ("CRYPTO").
     pub segment: String,
@@ -477,8 +477,8 @@ pub fn get_wdbs_roots(db_path: &str) -> Result<Vec<WdbsRoot>> {
             roots.entry(path.clone()).or_insert(WdbsRoot { path, segment, alias });
         }
     }
-    if table_exists(&conn, "glossary_drives")? {
-        let mut stmt = conn.prepare("SELECT DISTINCT root FROM glossary_drives")?;
+    if table_exists(&conn, "GlossaryDrives")? {
+        let mut stmt = conn.prepare("SELECT DISTINCT root FROM GlossaryDrives")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         for path in rows.filter_map(|r| r.ok()) {
             let segment = path.trim_start_matches(':').to_string();
@@ -496,7 +496,7 @@ pub fn get_wdbs_roots(db_path: &str) -> Result<Vec<WdbsRoot>> {
 /// category a video is linked into, alongside its canonical one.
 pub fn get_all_video_wdbs_links(db_path: &str) -> Result<Vec<(String, String)>> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT video_id, wdbs FROM video_wdbs_links")?;
+    let mut stmt = conn.prepare("SELECT video_id, wdbs FROM VideoWDBSLinks")?;
     let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
     let mut out = Vec::new();
     for r in rows {
@@ -554,11 +554,11 @@ pub fn get_handle_drives(db_path: &str, handle: &str) -> Result<Vec<HandleDrive>
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT wdbs, COUNT(DISTINCT video_id) FROM (
-             SELECT v.WDBS AS wdbs, v.video_id AS video_id FROM videos v
+             SELECT v.WDBS AS wdbs, v.video_id AS video_id FROM Videos v
               WHERE LOWER(LTRIM(v.handle, '@')) = ?1 AND v.WDBS IS NOT NULL AND v.WDBS != ''
              UNION
-             SELECT l.wdbs, l.video_id FROM video_wdbs_links l
-               JOIN videos v ON v.video_id = l.video_id
+             SELECT l.wdbs, l.video_id FROM VideoWDBSLinks l
+               JOIN Videos v ON v.video_id = l.video_id
               WHERE LOWER(LTRIM(v.handle, '@')) = ?1
          )
          WHERE wdbs != '' GROUP BY wdbs",

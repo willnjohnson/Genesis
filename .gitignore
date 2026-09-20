@@ -24,6 +24,8 @@ dist-ssr
 *.sw?
 .env
 .env.local
+.claude/*
+.kilo/*
 secrets.json
 */yt.key
 

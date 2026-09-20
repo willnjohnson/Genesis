@@ -11,6 +11,7 @@ pub mod export;
 pub mod sync;
 pub mod attachments;
 pub mod links;
+pub mod tokens;
 pub mod workspace;
 
 pub use schema::*;
@@ -24,3 +25,6 @@ pub use custom_prompts::*;
 pub use wdbs::*;
 pub use export::*;
 pub use workspace::*;
+
+#[cfg(test)]
+mod production_tests;

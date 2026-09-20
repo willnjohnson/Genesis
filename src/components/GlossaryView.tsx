@@ -97,7 +97,7 @@ function DrivePicker({ roots, selected, onChange }: { roots: WdbsRoot[], selecte
     );
 }
 
-export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'library') => void, allowModification?: boolean, onChange?: () => void }) {
+export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'term' | 'library') => void, allowModification?: boolean, onChange?: () => void }) {
     const { labels } = useWorkspace();
     const glossaryLower = labels.aliasGlossary.toLowerCase();
     const [terms, setTerms] = useState<GlossaryTerm[]>([]);
@@ -250,11 +250,11 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                     <select
                         value={view}
                         onChange={e => setView(e.target.value)}
-                        aria-label={`Show ${glossaryLower} tags: all Standard, all Quick, or by ${labels.aliasDriveName}`}
+                        aria-label={`Show ${glossaryLower} entries: all terms, all tags, or by ${labels.aliasDriveName}`}
                         className="px-3 py-1.5 bg-[#272727] hover:bg-[#3f3f3f] text-white rounded-md transition-colors text-[11px] font-semibold cursor-pointer outline-none"
                     >
-                        <option value="">All Standard {labels.aliasGlossary} Tags</option>
-                        {flags.showQuickTags && <option value={QUICK_VIEW}>All Quick Tags</option>}
+                        <option value="">All Terms</option>
+                        {flags.showQuickTags && <option value={QUICK_VIEW}>All Tags</option>}
                         {flags.glossaryDriveFilterVisible && roots.map(r => (
                             <option key={r.path} value={r.path} title={r.alias ?? undefined}>{r.segment}</option>
                         ))}
@@ -265,7 +265,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                             onClick={openAddModal}
                             className="flex items-center gap-1.5 px-2 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-md transition-colors text-[11px] font-semibold cursor-pointer"
                         >
-                            <Plus className="w-4 h-4" /> Add Term
+                            <Plus className="w-4 h-4" /> Add {showGlossaryTags ? 'Term' : 'Tag'}
                         </button>
                     )}
                 </div>
@@ -281,13 +281,13 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                     <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                         {showGlossaryTags && driveFilter && !searchQuery.trim() ? (
                             <>
-                                <p className="text-xl font-bold text-white mb-2">No {glossaryLower} tags in {nameOfRoot(roots, driveFilter)}</p>
-                                <p className="text-md">Edit a tag and pick this {labels.aliasDriveName.toLowerCase()} to file it here.</p>
+                                <p className="text-xl font-bold text-white mb-2">No terms in {nameOfRoot(roots, driveFilter)}</p>
+                                <p className="text-md">Edit a term and pick this {labels.aliasDriveName.toLowerCase()} to file it here.</p>
                             </>
                         ) : (
                             <>
-                                <p className="text-xl font-bold text-white mb-2">No {showGlossaryTags ? `${glossaryLower} tags` : "quick tags"} found</p>
-                                <p className="text-md">No {showGlossaryTags ? `${glossaryLower} tags` : "quick tags"} match your search.</p>
+                                <p className="text-xl font-bold text-white mb-2">No {showGlossaryTags ? "terms" : "tags"} found</p>
+                                <p className="text-md">No {showGlossaryTags ? "terms" : "tags"} match your search.</p>
                             </>
                         )}
                     </div>
@@ -352,7 +352,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                         <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
                             <div className="flex items-center gap-2 text-gray-200">
                                 <Plus className="w-4 h-4" />
-                                <h2 className="text-lg font-bold">Add {showGlossaryTags ? `${labels.aliasGlossary} Tag` : "Quick Tag"}</h2>
+                                <h2 className="text-lg font-bold">Add {showGlossaryTags ? "Term" : "Tag"}</h2>
                             </div>
                             <button type="button" onClick={() => setShowAddModal(false)} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
                                 <X className="w-5 h-5" />
@@ -362,7 +362,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                         {/* Content */}
                         <div className="p-6 space-y-6">
                              <div>
-                                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Term Name</label>
+                                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">{showGlossaryTags ? "Term" : "Tag"} Name</label>
                                  <input
                                      type="text"
                                      autoFocus
@@ -409,7 +409,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                                 type="submit"
                                 className="px-6 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white transition-all text-sm font-bold cursor-pointer"
                             >
-                                Save Term
+                                Save {showGlossaryTags ? "Term" : "Tag"}
                             </button>
                         </div>
                     </form>
@@ -431,7 +431,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                         <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
                             <div className="flex items-center gap-2 text-gray-200">
                                 <Pencil className="w-4 h-4" />
-                                <h2 className="text-lg font-bold">Edit {showGlossaryTags ? `${labels.aliasGlossary} Tag` : "Quick Tag"}</h2>
+                                <h2 className="text-lg font-bold">Edit {showGlossaryTags ? "Term" : "Tag"}</h2>
                             </div>
                             <button type="button" onClick={() => setTermToEdit(null)} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
                                 <X className="w-5 h-5" />
@@ -441,7 +441,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                         {/* Content */}
                         <div className="p-6 space-y-6">
                              <div>
-                                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Term Name</label>
+                                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">{showGlossaryTags ? "Term" : "Tag"} Name</label>
                                  <input
                                      type="text"
                                      required
