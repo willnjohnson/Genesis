@@ -12,9 +12,19 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 
+/// Files per video. Links have their own limit (`MAX_LINKS`) and don't count here.
 pub const MAX_ATTACHMENTS: usize = 5;
 /// A file must be smaller than this (128 MiB).
 pub const MAX_ATTACHMENT_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Web links per video, separate from the files.
+pub const MAX_LINKS: usize = 10;
+/// A link is stored as an attachment of this type whose bytes are its address and whose name is the
+/// title the user gave it. That way it travels with everything attachments already do (the delete
+/// cascade, Kinpak) without a table of its own. No file can have this type: it isn't in
+/// `ALLOWED_EXTENSIONS`.
+pub const LINK_EXT: &str = "url";
+const URL_MAX_CHARS: usize = 2048;
 
 pub const ALLOWED_EXTENSIONS: &[&str] = &[
     "pdf", "txt", "md", "docx", "csv", "xlsx", "pptx", "html", "json", "xml", "png", "jpeg", "jpg", "webp", "gif", "svg",
@@ -125,10 +135,20 @@ fn video_exists(conn: &Connection, video_id: &str) -> Result<bool> {
         .is_some())
 }
 
+/// How many files (not links) the video has.
 fn attachment_count(conn: &Connection, video_id: &str) -> Result<usize> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM VideoAttachments WHERE video_id = ?1",
-        params![video_id],
+        "SELECT COUNT(*) FROM VideoAttachments WHERE video_id = ?1 AND ext != ?2",
+        params![video_id, LINK_EXT],
+        |r| r.get(0),
+    )?;
+    Ok(n as usize)
+}
+
+fn link_count(conn: &Connection, video_id: &str) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM VideoAttachments WHERE video_id = ?1 AND ext = ?2",
+        params![video_id, LINK_EXT],
         |r| r.get(0),
     )?;
     Ok(n as usize)
@@ -136,6 +156,70 @@ fn attachment_count(conn: &Connection, video_id: &str) -> Result<usize> {
 
 fn limit_message() -> String {
     format!("A video can have at most {MAX_ATTACHMENTS} attachments. Remove one to add another.")
+}
+
+fn link_limit_message() -> String {
+    format!("A video can have at most {MAX_LINKS} links. Remove one to add another.")
+}
+
+/// Checks a web address the user typed and returns it ready to store: http or https only (nothing that
+/// runs script or opens a local file), no spaces, a real host, and no `user@` in front of it (a
+/// common way to make one site look like another). A missing scheme is taken to be https.
+pub fn normalize_link(raw: &str) -> std::result::Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Enter a web address.".to_string());
+    }
+    if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("A web address can't contain spaces.".to_string());
+    }
+    if trimmed.chars().count() > URL_MAX_CHARS {
+        return Err(format!("That web address is too long (the limit is {URL_MAX_CHARS} characters)."));
+    }
+    let url = match trimmed.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") => trimmed.to_string(),
+        Some(_) => return Err("Only http and https links can be added.".to_string()),
+        None => {
+            // "javascript:alert(1)", "mailto:a@b.com": a scheme with no "//". A colon followed by digits
+            // is a port ("localhost:3000"), which is fine.
+            let head = trimmed.split(['/', '?', '#']).next().unwrap_or(trimmed);
+            if let Some((before, after)) = head.split_once(':') {
+                if !before.is_empty() && before.chars().all(|c| c.is_ascii_alphabetic()) && !after.chars().all(|c| c.is_ascii_digit()) {
+                    return Err("Only http and https links can be added.".to_string());
+                }
+            }
+            format!("https://{trimmed}")
+        }
+    };
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or("");
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return Err("Web addresses with a user name in front of the site (user@site) aren't accepted.".to_string());
+    }
+    // A port is fine ("localhost:3000"); anything else after a colon (as in "javascript:alert(1)") is not.
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.len() <= 5 && port.chars().all(|c| c.is_ascii_digit()) => host,
+        Some(_) => return Err("That doesn't look like a web address.".to_string()),
+        None => authority,
+    };
+    if host.is_empty() || host.starts_with('.') || !host.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-') {
+        return Err("That doesn't look like a web address.".to_string());
+    }
+    Ok(url)
+}
+
+/// The site part of a normalized address, for a default title: "https://www.example.com/a?b" -> "www.example.com".
+fn link_host(url: &str) -> String {
+    let after = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = after.split(['/', '?', '#']).next().unwrap_or(after);
+    authority.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map(|(h, _)| h).unwrap_or(authority).to_string()
+}
+
+/// A link's title as the user typed it: control characters removed, a sane length. Unlike a file name,
+/// it keeps slashes ("Intro / Part 1").
+fn clean_title(raw: &str) -> String {
+    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+    cleaned.trim().chars().take(NAME_MAX_CHARS).collect()
 }
 
 /// Adds one file (given as bytes) to a saved video.
@@ -194,6 +278,75 @@ pub fn add_attachment_from_path(db_path: &str, video_id: &str, path: &std::path:
     }
     let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read \"{name}\": {e}"))?;
     add_attachment(db_path, video_id, &name, bytes)
+}
+
+/// Adds a web link to a saved video, shown under `title` (the site's name if the title is blank). The
+/// address is checked by `normalize_link`.
+pub fn add_link(db_path: &str, video_id: &str, title: &str, url: &str) -> std::result::Result<AttachmentInfo, String> {
+    let url = normalize_link(url)?;
+    let title = match clean_title(title) {
+        t if t.is_empty() => link_host(&url),
+        t => t,
+    };
+    let bytes = url.into_bytes();
+    let hash = sha256_hex(&bytes);
+    let size = bytes.len() as i64;
+
+    let mut conn = Connection::open(db_path).map_err(db_err)?;
+    conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(db_err)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+    if !video_exists(&tx, video_id).map_err(db_err)? {
+        return Err("Save the video to the library before adding links to it.".to_string());
+    }
+    if link_count(&tx, video_id).map_err(db_err)? >= MAX_LINKS {
+        return Err(link_limit_message());
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO AttachmentBlobs (hash, compression, size, stored_size, data) VALUES (?1, 'none', ?2, ?2, ?3)",
+        params![hash, size, bytes],
+    )
+    .map_err(db_err)?;
+    tx.execute(
+        "INSERT INTO VideoAttachments (video_id, name, ext, hash, added_at) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+        params![video_id, title, LINK_EXT, hash],
+    )
+    .map_err(db_err)?;
+    let id = tx.last_insert_rowid();
+    let info = load_info(&tx, id).map_err(db_err)?.ok_or_else(|| "The link could not be read back.".to_string())?;
+    tx.commit().map_err(db_err)?;
+    Ok(info)
+}
+
+fn is_link(conn: &Connection, id: i64) -> Result<Option<bool>> {
+    conn.query_row("SELECT ext FROM VideoAttachments WHERE id = ?1", params![id], |r| r.get::<_, String>(0))
+        .optional()
+        .map(|ext| ext.map(|e| e == LINK_EXT))
+}
+
+/// Refuses a link where a file is expected (opening or saving it as a file). A link has no file to
+/// write out, and its title is not a file name.
+pub fn ensure_file(db_path: &str, id: i64) -> std::result::Result<(), String> {
+    let conn = Connection::open(db_path).map_err(db_err)?;
+    match is_link(&conn, id).map_err(db_err)? {
+        Some(true) => Err("That's a web link, not a file.".to_string()),
+        _ => Ok(()),
+    }
+}
+
+/// A link's address, checked against its hash and checked again as a web address (the stored value
+/// could have come in from a Kinpak, so it isn't trusted just for being in the database).
+pub fn read_link(db_path: &str, id: i64) -> std::result::Result<String, String> {
+    {
+        let conn = Connection::open(db_path).map_err(db_err)?;
+        match is_link(&conn, id).map_err(db_err)? {
+            Some(true) => {}
+            Some(false) => return Err("That attachment isn't a link.".to_string()),
+            None => return Err("That link no longer exists.".to_string()),
+        }
+    }
+    let (_, bytes) = read_attachment(db_path, id)?;
+    let text = String::from_utf8(bytes).map_err(|_| "That link is damaged.".to_string())?;
+    normalize_link(&text).map_err(|_| "That link isn't a valid web address, so it was not opened.".to_string())
 }
 
 fn load_info(conn: &Connection, id: i64) -> Result<Option<AttachmentInfo>> {
@@ -462,6 +615,103 @@ mod tests {
         assert_eq!(get_note(&db, "v1").unwrap(), "second\nline two");
         set_note(&db, "v1", "   \n ").unwrap();
         assert_eq!(get_note(&db, "v1").unwrap(), "");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn only_plain_http_and_https_addresses_are_accepted() {
+        // Accepted, with a missing scheme taken to be https and the rest left alone.
+        assert_eq!(normalize_link("https://example.com/a?b=1#c").unwrap(), "https://example.com/a?b=1#c");
+        assert_eq!(normalize_link("  HTTP://Example.com  ").unwrap(), "HTTP://Example.com");
+        assert_eq!(normalize_link("example.com/page").unwrap(), "https://example.com/page");
+        assert_eq!(normalize_link("localhost:3000/x").unwrap(), "https://localhost:3000/x");
+        // Refused: other schemes, script, files, look-alike tricks, spaces, nothing.
+        for bad in [
+            "javascript:alert(1)", "file:///C:/Windows/system.ini", "ftp://example.com", "mailto:a@b.com", "data:text/html,hi",
+            "https://google.com@evil.example", "https://exa mple.com", "https://", "http://.example.com", "https://[::1]/",
+            "https://example.com:port/", "", "   ",
+        ] {
+            assert!(normalize_link(bad).is_err(), "{bad:?} should be refused");
+        }
+        assert!(normalize_link(&format!("https://example.com/{}", "a".repeat(URL_MAX_CHARS))).is_err());
+    }
+
+    #[test]
+    fn a_link_is_shown_under_its_title_and_read_back_as_the_address() {
+        let db = temp_db("link");
+        video(&db, "v1");
+        let info = add_link(&db, "v1", "  Intro / Part 1  ", "example.com/intro").unwrap();
+        // Titled as the user wrote it (slashes and all), typed as a link, not a file.
+        assert_eq!((info.name.as_str(), info.ext.as_str()), ("Intro / Part 1", "url"));
+        assert_eq!(read_link(&db, info.id).unwrap(), "https://example.com/intro");
+        // A blank title falls back to the site.
+        let untitled = add_link(&db, "v1", "  ", "https://www.example.org:8080/a?b").unwrap();
+        assert_eq!(untitled.name, "www.example.org");
+        assert_eq!(list_attachments(&db, "v1").unwrap().len(), 2);
+        // Bad addresses are refused with a reason, and unsaved videos can't hold links.
+        assert!(add_link(&db, "v1", "x", "javascript:alert(1)").unwrap_err().contains("http"));
+        assert!(add_link(&db, "ghost", "x", "https://example.com").unwrap_err().contains("Save the video"));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn links_have_their_own_limit_and_do_not_use_up_the_files() {
+        let db = temp_db("linklimit");
+        video(&db, "v1");
+        for i in 0..MAX_LINKS {
+            add_link(&db, "v1", &format!("Link {i}"), &format!("https://example.com/{i}")).unwrap();
+        }
+        assert!(add_link(&db, "v1", "one too many", "https://example.com/x").unwrap_err().contains("at most 10 links"));
+        // Ten links leave all five file slots free, and five files leave the links as they were.
+        for i in 0..MAX_ATTACHMENTS {
+            add_attachment(&db, "v1", &format!("f{i}.txt"), format!("file {i}").into_bytes()).unwrap();
+        }
+        assert!(add_attachment(&db, "v1", "sixth.txt", b"x".to_vec()).unwrap_err().contains("at most 5"));
+        assert_eq!(list_attachments(&db, "v1").unwrap().len(), MAX_LINKS + MAX_ATTACHMENTS);
+        // Removing a link frees a link slot only.
+        let first = list_attachments(&db, "v1").unwrap().into_iter().find(|a| a.ext == "url").unwrap();
+        remove_attachment(&db, first.id).unwrap();
+        add_link(&db, "v1", "replacement", "https://example.com/new").unwrap();
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn a_link_is_never_treated_as_a_file_and_a_file_never_as_a_link() {
+        let db = temp_db("linkfile");
+        video(&db, "v1");
+        let link = add_link(&db, "v1", "Docs", "https://example.com/docs").unwrap();
+        let file = add_attachment(&db, "v1", "notes.txt", b"hello".to_vec()).unwrap();
+        assert!(ensure_file(&db, link.id).unwrap_err().contains("web link"));
+        assert!(ensure_file(&db, file.id).is_ok());
+        assert!(read_link(&db, file.id).unwrap_err().contains("isn't a link"));
+        assert!(read_link(&db, 9999).unwrap_err().contains("no longer exists"));
+        // A file can't be given the link type by naming it "something.url".
+        assert!(add_attachment(&db, "v1", "shortcut.url", b"[InternetShortcut]".to_vec()).unwrap_err().contains("supported"));
+        // A stored address that isn't a web address (say, from a doctored Kinpak) is not handed back to be opened.
+        let bad = "javascript:alert(1)".as_bytes();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE AttachmentBlobs SET data = ?1, size = ?2, stored_size = ?2, hash = ?3 WHERE hash = (SELECT hash FROM VideoAttachments WHERE id = ?4)",
+            params![bad, bad.len() as i64, sha256_hex(bad), link.id],
+        )
+        .unwrap();
+        conn.execute("UPDATE VideoAttachments SET hash = ?1 WHERE id = ?2", params![sha256_hex(bad), link.id]).unwrap();
+        assert!(read_link(&db, link.id).unwrap_err().contains("valid web address"));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn identical_addresses_share_one_stored_copy_and_go_with_the_video() {
+        let db = temp_db("linkshare");
+        video(&db, "v1");
+        video(&db, "v2");
+        add_link(&db, "v1", "A", "https://example.com/same").unwrap();
+        add_link(&db, "v2", "B", "https://example.com/same").unwrap();
+        assert_eq!(blob_count(&db), 1);
+        delete_video(&db, "v1").unwrap();
+        assert!(list_attachments(&db, "v1").unwrap().is_empty());
+        assert_eq!(list_attachments(&db, "v2").unwrap().len(), 1);
+        assert_eq!(blob_count(&db), 1, "still used by v2");
         let _ = std::fs::remove_file(&db);
     }
 

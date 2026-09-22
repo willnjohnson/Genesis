@@ -13,9 +13,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use kinesis_sync_proto::{
-    content_hash, is_syncable_setting, link_key, split_link_key, validate_key, BiographyData,
-    CustomPromptData, GlossaryData, Item, Kind, Policy, Tombstone, VideoData, VideoLinkData,
-    WdbsData, MAX_ITEM_BYTES,
+    content_hash, is_syncable_setting, link_key, sequence_key, split_link_key, split_sequence_key,
+    validate_key, BiographyData, CustomPromptData, GlossaryData, Item, Kind, Policy, SequenceData,
+    Tombstone, VideoData, VideoLinkData, WdbsData, MAX_ITEM_BYTES,
 };
 use rusqlite::types::Value as Sql;
 use rusqlite::{params, Connection, OptionalExtension, Result};
@@ -367,6 +367,29 @@ fn apply_custom_prompt(conn: &Connection, item: &Item) -> R<bool> {
     Ok(true)
 }
 
+/// A video's place in one Drive's sequence. Applied after `Kind::Video` (see `APPLY_ORDER`), but
+/// not made to depend on the video already existing here, the same way `apply_video_link` doesn't:
+/// neither table has a foreign key to `Videos`, and an orphaned row is harmless (it simply never
+/// shows up in a query that joins against `Videos`, and the cascade trigger cleans it up if the
+/// video is later created and then deleted).
+fn apply_drive_sequence(conn: &Connection, item: &Item) -> R<bool> {
+    let d: SequenceData = parse(item)?;
+    if item.key != sequence_key(&d.drive, &d.video_id) || split_sequence_key(&item.key).is_none() {
+        return Err("sequence key does not match its payload".into());
+    }
+    // Canonicalizes the drive's spelling the same way a local edit would (see db/sequences.rs);
+    // the wire key itself is left as sent, since that's what ownership tracking and future
+    // tombstones are keyed by.
+    let drive = super::sequences::normalize_drive(&d.drive).map_err(db)?;
+    conn.execute(
+        "INSERT INTO DriveSequence (drive, video_id, position) VALUES (?1, ?2, ?3)
+         ON CONFLICT(drive, video_id) DO UPDATE SET position = excluded.position",
+        params![drive, d.video_id, d.position],
+    )
+    .map_err(db)?;
+    Ok(true)
+}
+
 enum Outcome {
     Applied,
     Unchanged,
@@ -401,6 +424,7 @@ fn apply_item(conn: &Connection, item: &Item, force: bool, track: bool, max_item
         Kind::Wdbs => apply_wdbs(conn, item)?,
         Kind::Video => apply_video(conn, item)?,
         Kind::VideoLink => apply_video_link(conn, item)?,
+        Kind::DriveSequence => apply_drive_sequence(conn, item)?,
         Kind::Glossary => apply_glossary(conn, item)?,
         Kind::Biography => apply_biography(conn, item)?,
         Kind::CustomPrompt => apply_custom_prompt(conn, item)?,
@@ -460,10 +484,19 @@ fn apply_delete(conn: &Connection, t: &Tombstone) -> R<DeleteOutcome> {
         }
         Kind::Video => {
             conn.execute("DELETE FROM Videos WHERE video_id = ?1", params![t.key]).map_err(db)?;
-            // Link rows go with the video (trigger); their ownership rows would otherwise dangle.
+            // Link and sequence-membership rows go with the video (triggers); their ownership rows
+            // would otherwise dangle. video_link is keyed "video_id|wdbs" (video_id is the prefix);
+            // drive_sequence is keyed "drive|video_id" (video_id is the suffix), so the two need
+            // opposite substr comparisons.
             conn.execute(
                 "DELETE FROM SyncItems WHERE kind = 'video_link'
                  AND substr(item_key, 1, length(?1) + 1) = ?1 || '|'",
+                params![t.key],
+            )
+            .map_err(db)?;
+            conn.execute(
+                "DELETE FROM SyncItems WHERE kind = 'drive_sequence'
+                 AND substr(item_key, -(length(?1) + 1)) = '|' || ?1",
                 params![t.key],
             )
             .map_err(db)?;
@@ -479,9 +512,20 @@ fn apply_delete(conn: &Connection, t: &Tombstone) -> R<DeleteOutcome> {
             }
             DeleteOutcome::Deleted
         }
+        Kind::DriveSequence => {
+            if let Some((drive, video_id)) = split_sequence_key(&t.key) {
+                conn.execute(
+                    "DELETE FROM DriveSequence WHERE drive = ?1 AND video_id = ?2",
+                    params![drive, video_id],
+                )
+                .map_err(db)?;
+            }
+            DeleteOutcome::Deleted
+        }
         Kind::Glossary => {
+            // Drives lives on the same row now (see db/glossary.rs), so this one delete is
+            // everything — no second table to clean up alongside it any more.
             conn.execute("DELETE FROM Glossary WHERE term = ?1", params![t.key]).map_err(db)?;
-            conn.execute("DELETE FROM GlossaryDrives WHERE term = ?1", params![t.key]).map_err(db)?;
             DeleteOutcome::Deleted
         }
         Kind::Biography => {
@@ -800,8 +844,12 @@ mod tests {
     }
 
     fn drives_of(conn: &Connection, term: &str) -> Vec<String> {
-        let mut stmt = conn.prepare("SELECT root FROM GlossaryDrives WHERE term = ?1 ORDER BY root").unwrap();
-        stmt.query_map([term], |r| r.get::<_, String>(0)).unwrap().filter_map(|r| r.ok()).collect()
+        let raw: String = conn
+            .query_row("SELECT drives FROM Glossary WHERE term = ?1", [term], |r| r.get(0))
+            .unwrap_or_default();
+        let mut roots: Vec<String> = raw.split('\n').filter(|r| !r.is_empty()).map(str::to_string).collect();
+        roots.sort();
+        roots
     }
 
     #[test]
@@ -841,7 +889,6 @@ mod tests {
         assert_eq!(stats.upserted, 0);
         assert_eq!(stats.errors.len(), 1, "{:?}", stats.errors);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term = 'Bad'"), 0, "the term itself was rolled back too");
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM GlossaryDrives"), 0);
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -863,7 +910,7 @@ mod tests {
         assert_eq!(drives_of(&conn, "Std"), vec![":CRYPTO"]);
 
         apply_page(&mut conn, &[], &[tomb("glossary", "Std")], false).unwrap();
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM GlossaryDrives"), 0, "no orphaned assignments");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term = 'Std'"), 0, "no orphaned row left behind");
         let _ = std::fs::remove_file(&db_path);
     }
 

@@ -264,19 +264,17 @@ pub async fn fetch_saved_videos(
     offset: Option<i64>,
     include_content: Option<bool>,
 ) -> Result<VideoResponse, String> {
+    // No init_db here: opening a workspace already runs it (workspaces::activate), and re-running
+    // the schema checks before every page made each sort/filter click slower.
     let db_path = get_db_path(&app);
-    db::init_db(&db_path).map_err(|e| e.to_string())?;
     let limit = limit.unwrap_or(DEFAULT_LIBRARY_PAGE_SIZE).clamp(1, MAX_LIBRARY_PAGE_SIZE);
     let offset = offset.unwrap_or(0).max(0);
-    let (videos, total_count) = db::list_videos(
-        &db_path,
-        filter_kind.as_deref(),
-        sort_field.as_deref(),
-        sort_order.as_deref(),
-        limit,
-        offset,
-        include_content.unwrap_or(false),
-    )
+    let include_content = include_content.unwrap_or(false);
+    let (videos, total_count) = tokio::task::spawn_blocking(move || {
+        db::list_videos(&db_path, filter_kind.as_deref(), sort_field.as_deref(), sort_order.as_deref(), limit, offset, include_content)
+    })
+    .await
+    .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
     Ok(VideoResponse { videos, continuation: None, total_count: Some(total_count) })
 }
@@ -291,20 +289,28 @@ pub async fn search_library(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<VideoResponse, String> {
+    // No init_db here either, for the same reason as fetch_saved_videos.
     let db_path = get_db_path(&app);
-    db::init_db(&db_path).map_err(|e| e.to_string())?;
     let limit = limit.unwrap_or(DEFAULT_LIBRARY_PAGE_SIZE).clamp(1, MAX_LIBRARY_PAGE_SIZE);
     let offset = offset.unwrap_or(0).max(0);
-    let (videos, total_count) = db::search_library_videos(
-        &db_path,
-        &query,
-        filter_kind.as_deref(),
-        sort_field.as_deref(),
-        sort_order.as_deref(),
-        limit,
-        offset,
-    )
+    let (videos, total_count) = tokio::task::spawn_blocking(move || {
+        db::search_library_videos(&db_path, &query, filter_kind.as_deref(), sort_field.as_deref(), sort_order.as_deref(), limit, offset)
+    })
+    .await
+    .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
+    Ok(VideoResponse { videos, continuation: None, total_count: Some(total_count) })
+}
+
+/// A Quick Tag's newest videos and how many carry it, for the Glossary's tag preview.
+#[command]
+pub async fn get_tag_videos_preview(app: tauri::AppHandle, tag: String, limit: Option<i64>) -> Result<VideoResponse, String> {
+    let db_path = get_db_path(&app);
+    let limit = limit.unwrap_or(12).clamp(1, MAX_LIBRARY_PAGE_SIZE);
+    let (videos, total_count) = tokio::task::spawn_blocking(move || db::tag_videos_preview(&db_path, &tag, limit))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     Ok(VideoResponse { videos, continuation: None, total_count: Some(total_count) })
 }
 

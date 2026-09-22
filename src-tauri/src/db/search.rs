@@ -321,6 +321,51 @@ pub fn search_library_videos(
     Ok((videos, total))
 }
 
+/// A Quick Tag's videos for the Glossary's preview: the `limit` newest carrying it, and how many
+/// carry it in all. Matching is the same exact, case-insensitive comparison as `tag_search:"..."`.
+///
+/// Kept off the transcripts on purpose: `tags` and `published_at` both sit after the (large)
+/// transcript column, so reading them off the table walks its overflow pages for every video. The
+/// two scans below read them from idxVideosTags / idxVideosPublishedAt instead, and only the rows
+/// actually shown are read from the table. It also skips the Glossary lookup the general search
+/// does per video, since the caller already knows the entry is a Quick Tag.
+pub fn tag_videos_preview(db_path: &str, tag: &str, limit: i64) -> Result<(Vec<Video>, i64)> {
+    let conn = Connection::open(db_path)?;
+
+    let mut matched: HashSet<i64> = HashSet::new();
+    let mut stmt = conn.prepare(TAG_MATCH_ROWIDS_SQL)?;
+    for id in stmt.query_map([tag], |row| row.get::<_, i64>(0))? {
+        matched.insert(id?);
+    }
+    let total = matched.len() as i64;
+    if matched.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+
+    // Newest first, in the Library's own date order, stopping once `limit` matches are found.
+    let mut newest: Vec<i64> = Vec::new();
+    let mut stmt = conn.prepare("SELECT rowid FROM Videos ORDER BY published_at DESC, rowid DESC")?;
+    let mut rows = stmt.query([])?;
+    while (newest.len() as i64) < limit {
+        let Some(row) = rows.next()? else { break };
+        let id: i64 = row.get(0)?;
+        if matched.contains(&id) {
+            newest.push(id);
+        }
+    }
+
+    let mut stmt = conn.prepare(&format!("SELECT {} FROM Videos AS v WHERE v.rowid = ?1", video_columns_sql("v.")))?;
+    let mut videos = Vec::with_capacity(newest.len());
+    for id in newest {
+        videos.push(stmt.query_row([id], |row| video_row(row, false))?);
+    }
+    Ok((videos, total))
+}
+
+// Reads only `tags`, so SQLite can answer it from idxVideosTags alone (see the plan test below).
+const TAG_MATCH_ROWIDS_SQL: &str =
+    "SELECT rowid FROM Videos WHERE instr(',' || lower(tags) || ',', ',' || lower(?1) || ',') > 0";
+
 // Rebuilds videos.tokens for one video from its transcript: splits into words, strips
 // punctuation, lowercases, dedupes, and drops common stop words, producing a compact
 // space-separated term list for the FTS5 `tokens` column (bm25 weight 1.0).
@@ -689,6 +734,54 @@ mod similar_videos_tests {
         assert!(ids("term_search:Halfway").is_empty());
         // Both facets together narrow to videos with both kinds.
         assert_eq!(ids("term_search:Halving tag_search:Halfway"), vec!["vidC"]);
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn tag_preview_returns_the_newest_matches_and_the_full_count() {
+        let db_path = temp_db_path();
+        db::init_db(&db_path).unwrap();
+        for (id, published) in [("vidA", "2026-01-01"), ("vidB", "2026-01-02"), ("vidC", "2026-01-03"), ("vidD", "2026-01-04")] {
+            db::save_video(&db_path, id, id, "X", 60, "t", 1, published, "@a", None).unwrap();
+        }
+        db::save_tags(&db_path, "vidA", "Halfway").unwrap();
+        db::save_tags(&db_path, "vidB", "Halving").unwrap();
+        db::save_tags(&db_path, "vidC", "Halving,Halfway").unwrap();
+        db::save_tags(&db_path, "vidD", "Halfway,Other").unwrap();
+
+        let (videos, total) = db::tag_videos_preview(&db_path, "Halfway", 2).unwrap();
+        assert_eq!(total, 3, "count covers every match, not just the page");
+        assert_eq!(videos.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), vec!["vidD", "vidC"]);
+        // Exact and case-insensitive: a substring of another tag doesn't match.
+        assert_eq!(db::tag_videos_preview(&db_path, "halfway", 10).unwrap().1, 3);
+        assert_eq!(db::tag_videos_preview(&db_path, "Half", 10).unwrap().1, 0);
+        // A tag nothing carries.
+        let (none, zero) = db::tag_videos_preview(&db_path, "Nope", 10).unwrap();
+        assert!(none.is_empty() && zero == 0);
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn tag_preview_scans_are_answered_from_indexes_not_the_table() {
+        let db_path = temp_db_path();
+        db::init_db(&db_path).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let plan = |sql: &str| -> String {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let rows: Vec<String> = stmt
+                .query_map(["x"], |r| r.get::<_, String>(3)).unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            rows.join(" | ")
+        };
+        let match_plan = plan(super::TAG_MATCH_ROWIDS_SQL);
+        assert!(match_plan.contains("COVERING INDEX"), "tag match should not read the table: {match_plan}");
+        let order_plan = {
+            let mut stmt = conn.prepare("EXPLAIN QUERY PLAN SELECT rowid FROM Videos ORDER BY published_at DESC, rowid DESC").unwrap();
+            let rows: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(3)).unwrap().map(|r| r.unwrap()).collect();
+            rows.join(" | ")
+        };
+        assert!(order_plan.contains("COVERING INDEX") && !order_plan.contains("TEMP B-TREE"), "date walk should follow the index: {order_plan}");
         std::fs::remove_file(&db_path).ok();
     }
 }

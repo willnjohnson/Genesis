@@ -1,13 +1,14 @@
-import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, ClipboardPaste, Copy, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, BookA, ListVideo, Paperclip, Monitor, Cloud } from 'lucide-react';
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, ClipboardPaste, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, BookA, ListVideo, Paperclip, Monitor, Cloud } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { PixelLoader } from './PixelLoader';
-import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, getWdbsAliases, type Video } from '../api';
+import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, getGlossaryDriveLinks, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, getWdbsAliases, getVideoById, getVideoAttachments, type Video } from '../api';
 import { saveImageAs } from '../lib/save-image-as';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
 import { useFindReplace } from './sidebar/useFindReplace';
 import { FindReplacePanel } from './sidebar/FindReplacePanel';
 import { PhotosynthesisPanel } from './sidebar/PhotosynthesisPanel';
 import { VideoTagsPanel } from './sidebar/VideoTagsPanel';
+import { SequenceDock } from './sidebar/SequenceDock';
 import { SimilarVideosPanel } from './sidebar/SimilarVideosPanel';
 import { AttachmentsPanel } from './sidebar/AttachmentsPanel';
 import ReactMarkdown from 'react-markdown';
@@ -76,6 +77,9 @@ interface Props {
     // Makes the video's Drive and "Also in" tags clickable: closes this panel and shows that Drive in
     // the Library/Portal. `path` is the storage form, `label` the name the tree shows for it.
     onSelectDrive?: (path: string, label: string) => void;
+    // The Drive picked in the Library's Drive panel (storage form), if any. The sequence bar follows
+    // that Drive's sequence when it holds the video being shown.
+    driveContext?: string | null;
     // Swaps the Sidebar to show a different video in place (used by the Similar Videos tab) —
     // same callback App.tsx already passes to VideoList/BiographyModal for this purpose.
     onVideoSelect?: (video: Video) => void;
@@ -90,7 +94,7 @@ interface Props {
  * directly, since the two panes are asymmetric (only the summary pane supports image hover-to-
  * delete) rather than a clean shared abstraction.
  */
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, onTranscriptChange, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, onVideoSelect }: Props) {
+export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, onTranscriptChange, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, driveContext, onVideoSelect }: Props) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
@@ -116,6 +120,8 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [hasCustomPrompt, setHasCustomPrompt] = useState(false);
     const [promptTab, setPromptTab] = useState<'local' | 'cloud'>('local');
     const [glossaryTerms, setGlossaryTerms] = useState<GlossaryTerm[]>([]);
+    // (term, drive root) pairs: which terms are filed under which top-level Drive.
+    const [glossaryDriveLinks, setGlossaryDriveLinks] = useState<[string, string][]>([]);
     const [selectedTerm, setSelectedTerm] = useState<GlossaryTerm | null>(null);
     const [isEditingTranscript, setIsEditingTranscript] = useState(false);
     const [isEditingSummary, setIsEditingSummary] = useState(false);
@@ -139,6 +145,14 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     // tags' tooltips. Only Drives that have one are in here.
     const [wdbsAliases, setWdbsAliases] = useState<Record<string, string>>({});
     const [leftTab, setLeftTab] = useState<LeftTab>('terms');
+    // The Drive whose sequence the bar under the video follows from one video to the next (set by
+    // choosing one in the bar's dropdown or by moving with First / Previous / Next). Cleared when the
+    // Library's Drive selection changes, so picking a different Drive there is followed.
+    const [activeSeqDrive, setActiveSeqDrive] = useState<string | null>(null);
+    useEffect(() => { setActiveSeqDrive(null); }, [driveContext]);
+    const openSequenceVideo = useCallback((id: string) => {
+        getVideoById(id).then(v => { if (v) onVideoSelect?.(v); }).catch(() => {});
+    }, [onVideoSelect]);
     // Feature flags a DB owner sets (see lib/flags.ts): parts of this panel can be hidden or made read-only.
     const { flags } = useFlags();
     const { labels } = useWorkspace();
@@ -151,6 +165,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [similarVideos, setSimilarVideos] = useState<Video[]>([]);
     const [loadingSimilar, setLoadingSimilar] = useState(false);
     const fetchedSimilarForRef = useRef<string | null>(null);
+    // For the badge on the Attachments tab. Fetched eagerly (not lazily, like Similar Videos above)
+    // since the whole point is to show a cue without the user opening the tab first; kept in sync
+    // afterwards by AttachmentsPanel's onCountChange as files/links are added or removed.
+    const [attachmentCount, setAttachmentCount] = useState(0);
     // The video's actual canonical WDBS, looked up from the database rather than trusted from the
     // `wdbs` prop — a video opened from Search carries a freshly-fetched YouTube `Video` object
     // that never has `wdbs` set, even when that video is already saved locally with one (see
@@ -166,6 +184,25 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const summaryEditRef = useRef<HTMLTextAreaElement>(null);
     const transcriptBackdropRef = useRef<HTMLDivElement>(null);
     const summaryBackdropRef = useRef<HTMLDivElement>(null);
+
+    // How much "Back to Transcript" says, by how much room the transcript/summary header row has:
+    // full label, then "Back", then just the arrow — and the same tiering for whichever of
+    // Summarize/AI Summary or Find & Replace is showing instead, since they occupy the same spot
+    // and are exactly as prone to running out of room. Same ResizeObserver approach as the sequence
+    // bar's Previous/Next labels (SequenceDock.tsx) — this row's width depends on the draggable
+    // divider (splitPercent) as well as the window, so a fixed breakpoint can't drive it.
+    const transcriptHeaderRef = useRef<HTMLDivElement>(null);
+    const [headerActionMode, setHeaderActionMode] = useState<'full' | 'short' | 'icon'>('full');
+    useEffect(() => {
+        const el = transcriptHeaderRef.current;
+        if (!el) return;
+        const observer = new ResizeObserver(([entry]) => {
+            const width = entry.contentRect.width;
+            setHeaderActionMode(width >= 260 ? 'full' : width >= 190 ? 'short' : 'icon');
+        });
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, []);
 
     const {
         findText, setFindText,
@@ -335,6 +372,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             getGlossaryTerms().then(terms => {
                 setGlossaryTerms(terms.map(t => ({ term: t[0], definition: t[1] })));
             }).catch(console.error);
+            getGlossaryDriveLinks().then(setGlossaryDriveLinks).catch(() => setGlossaryDriveLinks([]));
         } else {
             document.body.style.overflow = 'auto';
         }
@@ -342,6 +380,21 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             document.body.style.overflow = 'auto';
         };
     }, [isOpen]);
+
+    // The top-level Drives this video is in (its own plus any "Also in" ones), e.g. ":UAP". Terms
+    // filed under one of them are offered first when adding a term (see VideoTagsPanel).
+    const videoDriveRoots = useMemo(() => {
+        const roots = new Set<string>();
+        for (const p of [primaryWdbs, ...wdbsLinks]) {
+            const display = decodeWdbs(p);
+            if (display) roots.add(':' + display.slice(1).split('-')[0]);
+        }
+        return [...roots];
+    }, [primaryWdbs, wdbsLinks]);
+    const driveTerms = useMemo(() => {
+        const rootsLower = new Set(videoDriveRoots.map(r => r.toLowerCase()));
+        return new Set(glossaryDriveLinks.filter(([, root]) => rootsLower.has(root.toLowerCase())).map(([term]) => term));
+    }, [videoDriveRoots, glossaryDriveLinks]);
 
     useEffect(() => {
         if (!isOpen) {
@@ -540,6 +593,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     // Error sentinels are always short, app-generated strings (see App.tsx), so gate the
     // substring match on length too — otherwise a real transcript that happens to mention
     // "No transcript" in its actual spoken content would false-positive here.
+    // Which side the Action Bar's copy button acts on: whatever's actually being read right now,
+    // not always the transcript — see that button below for why this replaced the summary view's
+    // own separate "Copy Summary" link (they used to disagree about which one you'd get).
+    const viewingSummary = showSummary && !!summary;
     const isTranscriptInvalid = !transcript ||
         // The message App shows when the fetch failed always starts like this, however long the reason.
         transcript.startsWith("Failed to load transcript:") ||
@@ -581,6 +638,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         setLeftTab('terms');
         setSimilarVideos([]);
         fetchedSimilarForRef.current = null;
+        setAttachmentCount(0);
+        if (videoId && existsInDb && flags.showAttachments) {
+            getVideoAttachments(videoId).then(data => setAttachmentCount(data.attachments.length)).catch(() => {});
+        }
         if (videoId && existsInDb) {
             getVideoWdbsLinks(videoId).then(setWdbsLinks).catch(() => setWdbsLinks([]));
             // The `wdbs` prop is only ever populated for a video opened from Library/Portal, whose
@@ -595,7 +656,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         } else {
             setWdbsLinks([]);
         }
-    }, [videoId, wdbs, existsInDb]);
+    }, [videoId, wdbs, existsInDb, flags.showAttachments]);
 
     useEffect(() => {
         const paths = [primaryWdbs, ...wdbsLinks].filter((p): p is string => !!p && !!decodeWdbs(p));
@@ -674,6 +735,160 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             setWdbsLinks(prev => prev.includes(encoded) ? prev : [...prev, encoded]);
         }
     }, [videoId, onWdbsChanged]);
+
+    // What the pencil in the sequence bar opens: the video's home Drive and its "Also in" links (the
+    // "Also in" links let it additionally show up under other Drives (see components/WdbsTreePanel.tsx)
+    // without touching its home). Viewing and choosing between them is the bar's Drive dropdown.
+    //
+    // Styled to match the Glossary's Add Term modal (labeled fields, rounded-xl bg-[#121212] inputs,
+    // px-4 py-3 text-sm) rather than the compact popover this used to be — it lives in a full modal
+    // now (SequenceDock.tsx), so it should read like one, not like a cramped anchored dropdown.
+    const driveFieldClass = "flex-1 min-w-0 bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm font-mono focus:outline-none focus:border-red-600 transition-all placeholder-gray-600 disabled:opacity-50";
+    const driveIconButtonClass = "p-2.5 rounded-lg hover:bg-[#272727] transition-colors cursor-pointer disabled:opacity-50 shrink-0";
+    const driveActionButtonClass = "flex items-center gap-1.5 shrink-0 text-xs font-bold text-gray-300 hover:text-white bg-[#272727] hover:bg-[#3f3f3f] px-3 py-2.5 rounded-lg transition-colors cursor-pointer";
+    const driveEditor = (
+        <div className="space-y-6">
+            <datalist id="wdbs-suggestions">
+                {wdbsSuggestions.map(s => <option key={s} value={s} />)}
+            </datalist>
+
+            <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Primary {labels.aliasDriveLink}</label>
+                {isEditingWdbs ? (
+                    <div className="flex items-center gap-2">
+                        <input
+                            type="text"
+                            autoFocus
+                            list="wdbs-suggestions"
+                            value={wdbsInput}
+                            onChange={(e) => handleWdbsInputChange(e, setWdbsInput)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleSaveWdbs();
+                                if (e.key === 'Escape') { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(primaryWdbs)); setWdbsError(null); }
+                            }}
+                            placeholder=":CS-ML-REINF"
+                            disabled={savingWdbs}
+                            className={driveFieldClass}
+                        />
+                        <button onClick={handleSaveWdbs} disabled={savingWdbs} title="Save" className={`${driveIconButtonClass} text-green-500`}>
+                            <Check className="w-4 h-4" />
+                        </button>
+                        <button
+                            onClick={() => { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(primaryWdbs)); setWdbsError(null); }}
+                            disabled={savingWdbs}
+                            title="Cancel"
+                            className={`${driveIconButtonClass} text-gray-400 hover:text-white`}
+                        >
+                            <X className="w-4 h-4" />
+                        </button>
+                    </div>
+                ) : (
+                    <div className="flex items-center gap-3">
+                        <div className="flex-1 min-w-0 bg-[#121212] border border-[#333] rounded-xl px-4 py-3">
+                            <span
+                                className="block text-white font-mono text-sm truncate"
+                                title={hasPrimaryWdbs ? (wdbsAliases[primaryWdbs!] ?? decodeWdbs(primaryWdbs)) : undefined}
+                            >
+                                {decodeWdbs(primaryWdbs) || "N/A"}
+                            </span>
+                        </div>
+                        {allowEditWDBS && (
+                            <button onClick={() => setIsEditingWdbs(true)} className={driveActionButtonClass}>
+                                <Pencil className="w-3.5 h-3.5" /> Edit
+                            </button>
+                        )}
+                    </div>
+                )}
+                {wdbsError && (
+                    <div className="mt-2 text-xs text-red-400 bg-red-900/20 border border-red-500/30 rounded-lg px-3 py-2">
+                        {wdbsError}
+                    </div>
+                )}
+            </div>
+
+            <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Also In</label>
+                {/* No links possible until a Primary Drive is set — explained rather than just left blank. */}
+                {!hasPrimaryWdbs ? (
+                    <p className="text-xs text-[#666666] italic">Set a Primary {labels.aliasDriveLink} first to link this video into others too.</p>
+                ) : (
+                    <div className="space-y-3">
+                        {/* Compact chips — this is a list of what's already linked, not something that
+                            needs the input fields' full size. */}
+                        {(wdbsLinks.length > 0 || (allowEditWDBS && !isAddingLink)) && (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                                {wdbsLinks.map(link => (
+                                    <span
+                                        key={link}
+                                        className="flex items-center gap-1.5 bg-[#1a1a1a] border border-[#333] rounded-md pl-2.5 pr-1.5 py-1 text-xs text-white font-mono"
+                                        title={wdbsAliases[link] ?? decodeWdbs(link)}
+                                    >
+                                        {decodeWdbs(link)}
+                                        {allowEditWDBS && (
+                                            <button
+                                                onClick={() => handleRemoveLink(link)}
+                                                title={`Remove ${labels.aliasDriveSymlink.toLowerCase()}`}
+                                                className="text-gray-500 hover:text-red-400 transition-colors cursor-pointer"
+                                            >
+                                                <X className="w-3 h-3" />
+                                            </button>
+                                        )}
+                                    </span>
+                                ))}
+                                {allowEditWDBS && !isAddingLink && (
+                                    // Sized like the chips beside it (same padding/text size), not the bigger
+                                    // field-row buttons — it's another item in this same list of tags.
+                                    <button
+                                        onClick={() => setIsAddingLink(true)}
+                                        className="flex items-center gap-1 bg-[#1a1a1a] border border-[#333] hover:border-[#444] rounded-md pl-2 pr-2.5 py-1 text-xs text-gray-400 hover:text-white font-mono transition-colors cursor-pointer"
+                                    >
+                                        <Plus className="w-3 h-3" /> {labels.aliasDriveSymlink}
+                                    </button>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Its own full-width row, not squeezed in next to the chips: a Drive path can be
+                            long, and typing it should stay readable rather than scrolling inside a narrow box. */}
+                        {allowEditWDBS && isAddingLink && (
+                            <div className="flex items-center gap-2">
+                                <input
+                                    type="text"
+                                    autoFocus
+                                    list="wdbs-suggestions"
+                                    value={linkInput}
+                                    onChange={(e) => handleWdbsInputChange(e, setLinkInput)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') handleAddLink();
+                                        if (e.key === 'Escape') { setIsAddingLink(false); setLinkInput(''); setLinkError(null); }
+                                    }}
+                                    placeholder=":CS-ML-REINF"
+                                    disabled={savingLink}
+                                    className={driveFieldClass}
+                                />
+                                <button onClick={handleAddLink} disabled={savingLink || !linkInput.trim()} title={`Add ${labels.aliasDriveSymlink.toLowerCase()}`} className={`${driveIconButtonClass} text-green-500`}>
+                                    <Check className="w-4 h-4" />
+                                </button>
+                                <button
+                                    onClick={() => { setIsAddingLink(false); setLinkInput(''); setLinkError(null); }}
+                                    disabled={savingLink}
+                                    title="Cancel"
+                                    className={`${driveIconButtonClass} text-gray-400 hover:text-white`}
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                )}
+                {linkError && (
+                    <div className="mt-2 text-xs text-red-400 bg-red-900/20 border border-red-500/30 rounded-lg px-3 py-2">
+                        {linkError}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
 
     return (
         <>
@@ -755,7 +970,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                     onUploadError={handleUploadError}
                                 />
                             ) : (
-                                <div className="flex-1 overflow-y-auto p-6 flex flex-col custom-scrollbar">
+                                <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col custom-scrollbar">
                                     {videoId && isOpen ? (
                                         <>
                                             {flags.showVideoPlayer && (
@@ -794,204 +1009,59 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                 </button>
                                             )}
 
-                                            {existsInDb && flags.showDrive && (
-                                                <>
-                                                <datalist id="wdbs-suggestions">
-                                                    {wdbsSuggestions.map(s => <option key={s} value={s} />)}
-                                                </datalist>
-                                                <div className="mt-3 flex items-center gap-2 text-xs">
-                                                    <span className="text-[#666666] uppercase font-bold tracking-wider text-[10px] shrink-0">{labels.aliasDriveLink}:</span>
-                                                    {isEditingWdbs ? (
-                                                        <>
-                                                            <input
-                                                                type="text"
-                                                                autoFocus
-                                                                list="wdbs-suggestions"
-                                                                value={wdbsInput}
-                                                                onChange={(e) => handleWdbsInputChange(e, setWdbsInput)}
-                                                                onKeyDown={(e) => {
-                                                                    if (e.key === 'Enter') handleSaveWdbs();
-                                                                    if (e.key === 'Escape') { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(primaryWdbs)); setWdbsError(null); }
-                                                                }}
-                                                                placeholder=":UAP-GERB-VVV"
-                                                                disabled={savingWdbs}
-                                                                className="flex-1 min-w-0 bg-[#1a1a1a] border border-[#333] focus:border-red-600/50 outline-none rounded-md px-2 py-1 text-[11px] text-white placeholder-[#555] font-mono transition-colors disabled:opacity-50"
-                                                            />
-                                                            <button
-                                                                onClick={handleSaveWdbs}
-                                                                disabled={savingWdbs}
-                                                                title="Save"
-                                                                className="text-green-500 hover:text-green-400 transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
-                                                            >
-                                                                <Check className="w-3.5 h-3.5" />
-                                                            </button>
-                                                            <button
-                                                                onClick={() => { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(primaryWdbs)); setWdbsError(null); }}
-                                                                disabled={savingWdbs}
-                                                                title="Cancel"
-                                                                className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
-                                                            >
-                                                                <X className="w-3.5 h-3.5" />
-                                                            </button>
-                                                        </>
-                                                    ) : (
-                                                        <>
-                                                            {onSelectDrive && hasPrimaryWdbs ? (
-                                                                <button
-                                                                    onClick={() => onSelectDrive(primaryWdbs!, driveSegmentLabel(decodeWdbs(primaryWdbs)))}
-                                                                    title={wdbsAliases[primaryWdbs!] ?? decodeWdbs(primaryWdbs)}
-                                                                    className="text-[#aaaaaa] hover:text-white hover:underline underline-offset-2 font-mono truncate transition-colors cursor-pointer text-left"
-                                                                >
-                                                                    {decodeWdbs(primaryWdbs)}
-                                                                </button>
-                                                            ) : (
-                                                                <span className="text-[#aaaaaa] font-mono truncate" title={hasPrimaryWdbs ? (wdbsAliases[primaryWdbs!] ?? decodeWdbs(primaryWdbs)) : undefined}>{decodeWdbs(primaryWdbs) || "N/A"}</span>
-                                                            )}
-                                                            {allowEditWDBS && (
-                                                                <button
-                                                                    onClick={() => setIsEditingWdbs(true)}
-                                                                    title={`Edit ${labels.aliasDriveLink}`}
-                                                                    className="text-gray-500 hover:text-blue-400 transition-colors cursor-pointer p-1 shrink-0"
-                                                                >
-                                                                    <Pencil className="w-3.5 h-3.5" />
-                                                                </button>
-                                                            )}
-                                                        </>
-                                                    )}
-                                                </div>
-                                                {wdbsError && (
-                                                    <div className="mt-1.5 text-[10px] text-red-400 bg-red-900/20 border border-red-500/30 rounded-md px-2 py-1.5">
-                                                        {wdbsError}
-                                                    </div>
-                                                )}
-
-                                                {/* Symbolic links: lets a video additionally show up under OTHER Warp
-                                                    Drive categories (see components/WdbsTreePanel.tsx) without touching
-                                                    its canonical one above. Hidden entirely until a canonical WDBS
-                                                    is actually assigned — there's nothing to be "also in" without one. */}
-                                                {hasPrimaryWdbs && (allowEditWDBS || wdbsLinks.length > 0) && (
-                                                    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
-                                                        <span className="text-[#666666] uppercase font-bold tracking-wider text-[10px] shrink-0">Also in:</span>
-                                                        {wdbsLinks.map(link => (
-                                                            <span
-                                                                key={link}
-                                                                className="flex items-center gap-1 bg-[#1a1a1a] border border-[#333] rounded-md pl-2 pr-1 py-0.5 text-[11px] text-[#aaaaaa] font-mono"
-                                                            >
-                                                                {onSelectDrive ? (
-                                                                    <button
-                                                                        onClick={() => onSelectDrive(link, driveSegmentLabel(decodeWdbs(link)))}
-                                                                        title={wdbsAliases[link] ?? decodeWdbs(link)}
-                                                                        className="hover:text-white hover:underline underline-offset-2 transition-colors cursor-pointer"
-                                                                    >
-                                                                        {decodeWdbs(link)}
-                                                                    </button>
-                                                                ) : (
-                                                                    <span title={wdbsAliases[link] ?? decodeWdbs(link)}>{decodeWdbs(link)}</span>
-                                                                )}
-                                                                {allowEditWDBS && (
-                                                                    <button
-                                                                        onClick={() => handleRemoveLink(link)}
-                                                                        title={`Remove ${labels.aliasDriveSymlink.toLowerCase()}`}
-                                                                        className="text-gray-500 hover:text-red-400 transition-colors cursor-pointer p-0.5"
-                                                                    >
-                                                                        <X className="w-3 h-3" />
-                                                                    </button>
-                                                                )}
-                                                            </span>
-                                                        ))}
-                                                        {allowEditWDBS && (isAddingLink ? (
-                                                            <>
-                                                                <input
-                                                                    type="text"
-                                                                    autoFocus
-                                                                    list="wdbs-suggestions"
-                                                                    value={linkInput}
-                                                                    onChange={(e) => handleWdbsInputChange(e, setLinkInput)}
-                                                                    onKeyDown={(e) => {
-                                                                        if (e.key === 'Enter') handleAddLink();
-                                                                        if (e.key === 'Escape') { setIsAddingLink(false); setLinkInput(''); setLinkError(null); }
-                                                                    }}
-                                                                    placeholder=":MWD-INS-RES"
-                                                                    disabled={savingLink}
-                                                                    className="min-w-0 w-32 bg-[#1a1a1a] border border-[#333] focus:border-red-600/50 outline-none rounded-md px-2 py-1 text-[11px] text-white placeholder-[#555] font-mono transition-colors disabled:opacity-50"
-                                                                />
-                                                                <button
-                                                                    onClick={handleAddLink}
-                                                                    disabled={savingLink || !linkInput.trim()}
-                                                                    title={`Add ${labels.aliasDriveSymlink.toLowerCase()}`}
-                                                                    className="text-green-500 hover:text-green-400 transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
-                                                                >
-                                                                    <Check className="w-3.5 h-3.5" />
-                                                                </button>
-                                                                <button
-                                                                    onClick={() => { setIsAddingLink(false); setLinkInput(''); setLinkError(null); }}
-                                                                    disabled={savingLink}
-                                                                    title="Cancel"
-                                                                    className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1 disabled:opacity-50 shrink-0"
-                                                                >
-                                                                    <X className="w-3.5 h-3.5" />
-                                                                </button>
-                                                            </>
-                                                        ) : (
-                                                            <button
-                                                                onClick={() => setIsAddingLink(true)}
-                                                                title={`${labels.aliasDriveSymlink} to another ${labels.aliasDriveLink}`}
-                                                                className="flex items-center gap-1 text-gray-500 hover:text-blue-400 transition-colors cursor-pointer px-1.5 py-0.5 rounded-md border border-dashed border-[#333] hover:border-blue-400/50 text-[11px]"
-                                                            >
-                                                                <Plus className="w-3 h-3" />
-                                                                {labels.aliasDriveSymlink}
-                                                            </button>
-                                                        ))}
-                                                    </div>
-                                                )}
-                                                {linkError && (
-                                                    <div className="mt-1.5 text-[10px] text-red-400 bg-red-900/20 border border-red-500/30 rounded-md px-2 py-1.5">
-                                                        {linkError}
-                                                    </div>
-                                                )}
-                                                </>
-                                            )}
-
                                             {existsInDb && availableLeftTabs.length > 0 && (
                                                 <div className="mt-6 p-4 bg-white/5 rounded-xl border border-white/5">
+                                                    {/* No overflow-hidden here or on the row below: each label truncates to an
+                                                        ellipsis on its own (min-w-0 + truncate), so the row itself never needs to
+                                                        clip anything, and this card is free to grow to fit whatever tab is active
+                                                        below (Terms/Tags/Similar/Attachments) and push the pane's own scroll. */}
                                                     <div className="flex items-center gap-4 mb-3">
                                                         {showTermsTab && (
                                                         <button
                                                             onClick={() => setLeftTab('terms')}
-                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'terms' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                            title="Terms"
+                                                            className={`flex items-center gap-1.5 min-w-0 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'terms' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                         >
-                                                            <BookA className="w-3.5 h-3.5" />
-                                                            Terms
+                                                            <BookA className="w-3.5 h-3.5 shrink-0" />
+                                                            <span className="truncate">Terms</span>
                                                             {activeLeftTab === 'terms' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                         </button>
                                                         )}
                                                         {showTagsTab && (
                                                         <button
                                                             onClick={() => setLeftTab('tags')}
-                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'tags' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                            title="Tags"
+                                                            className={`flex items-center gap-1.5 min-w-0 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'tags' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                         >
-                                                            <Tags className="w-3.5 h-3.5" />
-                                                            Tags
+                                                            <Tags className="w-3.5 h-3.5 shrink-0" />
+                                                            <span className="truncate">Tags</span>
                                                             {activeLeftTab === 'tags' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                         </button>
                                                         )}
                                                         {flags.showSimilarVideos && (
                                                         <button
                                                             onClick={() => setLeftTab('similar')}
-                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'similar' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                            title="Similar Videos"
+                                                            className={`flex items-center gap-1.5 min-w-0 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'similar' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                         >
-                                                            <ListVideo className="w-3.5 h-3.5" />
-                                                            Similar Videos
+                                                            <ListVideo className="w-3.5 h-3.5 shrink-0" />
+                                                            <span className="truncate">Similar Videos</span>
                                                             {activeLeftTab === 'similar' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                         </button>
                                                         )}
                                                         {flags.showAttachments && (
                                                         <button
                                                             onClick={() => setLeftTab('attachments')}
-                                                            className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'attachments' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                            title="Attachments"
+                                                            className={`flex items-center gap-1.5 min-w-0 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'attachments' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                         >
-                                                            <Paperclip className="w-3.5 h-3.5" />
-                                                            Attachments
+                                                            <Paperclip className="w-3.5 h-3.5 shrink-0" />
+                                                            <span className="truncate">Attachments</span>
+                                                            {attachmentCount > 0 && (
+                                                                <span className="shrink-0 inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-[#3f3f3f] text-white text-[9px] font-bold leading-none normal-case tracking-normal">
+                                                                    {attachmentCount}
+                                                                </span>
+                                                            )}
                                                             {activeLeftTab === 'attachments' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                         </button>
                                                         )}
@@ -1001,7 +1071,9 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                             kind={activeLeftTab}
                                                             videoTags={videoTags}
                                                             glossaryTerms={glossaryTerms}
-                                                            canEdit={flags.allowEditTags}
+                                                            priorityTerms={activeLeftTab === 'terms' ? driveTerms : undefined}
+                                                            priorityLabel={videoDriveRoots.join(', ')}
+                                                            canEdit={flags.allowEditTermsAndTags}
                                                             onAddTag={onAddTag}
                                                             onRemoveTag={onRemoveTag}
                                                             onSelectTerm={setSelectedTerm}
@@ -1011,6 +1083,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                             key={videoId}
                                                             videoId={videoId}
                                                             canEdit={flags.editAttachments}
+                                                            onCountChange={setAttachmentCount}
                                                         />
                                                     ) : (
                                                         <SimilarVideosPanel
@@ -1029,6 +1102,31 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                     )}
                                 </div>
                             )}
+
+                            {/* Pinned under the scrolling pane: the video's Drives and the First / Previous / Next of
+                                the one being followed. Shown for any saved video, even one with no sequence yet. */}
+                            {videoId && isOpen && existsInDb && flags.showDrive && !(pluginPhotosynthesisEnabled && showSummary && isEditingSummary) && (
+                                <SequenceDock
+                                    videoId={videoId}
+                                    videoTitle={title}
+                                    warp={primaryWdbs}
+                                    wefts={wdbsLinks}
+                                    aliases={wdbsAliases}
+                                    showSequences={flags.showSequences}
+                                    canEditSequences={flags.allowEditSequences}
+                                    // Narrows canEditSequences further; never exceeds it (see SequenceDock's prop doc).
+                                    canAddVideos={flags.allowEditSequences && flags.allowEditVideosInSequenceList}
+                                    // Narrows allowEditWDBS further, the same way, so a DB owner who's opted into
+                                    // WDBS editing can still hide just the pencil (and Bulk Assign Mode) with this.
+                                    canEditDrives={allowEditWDBS && flags.allowEditDriveLinking}
+                                    driveContext={driveContext ? decodeWdbs(driveContext).toUpperCase() || null : null}
+                                    activeDrive={activeSeqDrive}
+                                    setActiveDrive={setActiveSeqDrive}
+                                    onOpenVideo={openSequenceVideo}
+                                    onSelectDrive={onSelectDrive}
+                                    driveEditor={driveEditor}
+                                />
+                            )}
                         </div>
 
                         {/* Draggable Divider */}
@@ -1043,12 +1141,15 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                         {/* Transcript Side */}
                         <div
                             style={{ width: `${100 - splitPercent}%` }}
-                            className="p-8 text-[#aaaaaa] text-sm leading-relaxed font-sans selection:bg-[#3f3f3f] flex flex-col overflow-hidden"
+                            className="p-4 text-[#aaaaaa] text-sm leading-relaxed font-sans selection:bg-[#3f3f3f] flex flex-col overflow-hidden"
                         >
-                            <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar flex flex-col">
+                            <div className="flex-1 min-h-0 overflow-y-auto pr-2 custom-scrollbar flex flex-col">
                                 {/* Header with Summarize button */}
-                                <div className="flex justify-between items-center mb-4">
-                                    <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#aaaaaa]">
+                                <div ref={transcriptHeaderRef} className="flex justify-between items-center mb-4 gap-2">
+                                    {/* min-w-0 + truncate rather than shrink-0: this is what frees the room that keeps the
+                                        Edit pencil from landing behind the pane's own scrollbar once the row is tight,
+                                        instead of the buttons to its right being the only thing that can give. */}
+                                    <span className="min-w-0 truncate text-[10px] font-bold uppercase tracking-[0.2em] text-[#aaaaaa]" title={showSummary ? 'AI Summary' : undefined}>
                                         {showSummary ? (
                                             <>
                                                 <Sparkles className="w-3 h-3 inline" /> AI Summary
@@ -1057,17 +1158,18 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             "Transcript"
                                         )}
                                     </span>
-                                    <div className="flex items-center gap-2">
+                                    <div className="flex items-center gap-2 min-w-0">
                                         {!showPromptEditor && (
                                             <>
                                                 {showSummary ? (
                                                     (
                                                         <button
                                                             onClick={handleBackToTranscript}
-                                                            className="flex items-center gap-1.5 px-3 py-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors text-[10px] font-bold uppercase tracking-wider cursor-pointer"
+                                                            title="Back to Transcript"
+                                                            className="flex items-center gap-1.5 px-3 py-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors text-[10px] font-bold uppercase tracking-wider whitespace-nowrap cursor-pointer"
                                                         >
                                                             <ArrowLeft className="w-3 h-3" />
-                                                            Back to Transcript
+                                                            {headerActionMode === 'full' ? 'Back to Transcript' : headerActionMode === 'short' ? 'Back' : null}
                                                         </button>
                                                     )
                                                 ) : (
@@ -1076,28 +1178,28 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                             onClick={handleSummarize}
                                                             disabled={loadingSummary || loading || isTranscriptInvalid || checkingSummary}
                                                             title={hasExistingSummary ? "View AI Summary from database" : `Generate AI summary with ${summarizeProvider === 'cloud' ? 'Venice' : 'Ollama'}`}
-                                                            className="summarize-btn flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg hover:from-purple-500 hover:to-blue-500 transition-all text-[10px] font-bold uppercase tracking-wider disabled:opacity-30 disabled:cursor-default cursor-pointer"
+                                                            className="summarize-btn flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg hover:from-purple-500 hover:to-blue-500 transition-all text-[10px] font-bold uppercase tracking-wider whitespace-nowrap disabled:opacity-30 disabled:cursor-default cursor-pointer"
                                                         >
                                                             {checkingSummary ? (
                                                                 <>
-                                                                    <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                                                    <svg className="w-3 h-3 animate-spin shrink-0" viewBox="0 0 24 24" fill="none">
                                                                         <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" opacity="0.2" />
                                                                         <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                                                                     </svg>
-                                                                    Checking...
+                                                                    {headerActionMode !== 'icon' && 'Checking...'}
                                                                 </>
                                                             ) : loadingSummary ? (
                                                                 <>
-                                                                    <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                                                    <svg className="w-3 h-3 animate-spin shrink-0" viewBox="0 0 24 24" fill="none">
                                                                         <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" opacity="0.2" />
                                                                         <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                                                                     </svg>
-                                                                    Generating...
+                                                                    {headerActionMode !== 'icon' && 'Generating...'}
                                                                 </>
                                                             ) : (
                                                                 <>
-                                                                    <Sparkles className="w-3 h-3" />
-                                                                    {hasExistingSummary ? "AI Summary" : "Summarize"}
+                                                                    <Sparkles className="w-3 h-3 shrink-0" />
+                                                                    {headerActionMode !== 'icon' && (hasExistingSummary ? "AI Summary" : "Summarize")}
                                                                 </>
                                                             )}
                                                         </button>
@@ -1106,10 +1208,11 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                 {(isEditingTranscript || isEditingSummary) && (
                                                     <button
                                                         onClick={() => setShowFindReplace(!showFindReplace)}
-                                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all text-[10px] font-bold uppercase tracking-wider cursor-pointer ${showFindReplace ? 'bg-blue-600 text-white' : 'bg-[#272727] text-[#aaaaaa] hover:text-white hover:bg-[#3f3f3f]'}`}
+                                                        title={showFindReplace ? 'Close Find' : 'Find & Replace'}
+                                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all text-[10px] font-bold uppercase tracking-wider whitespace-nowrap cursor-pointer ${showFindReplace ? 'bg-blue-600 text-white' : 'bg-[#272727] text-[#aaaaaa] hover:text-white hover:bg-[#3f3f3f]'}`}
                                                     >
-                                                        <Search className="w-3 h-3" />
-                                                        {showFindReplace ? 'Close Find' : 'Find & Replace'}
+                                                        <Search className="w-3 h-3 shrink-0" />
+                                                        {headerActionMode !== 'icon' && (showFindReplace ? 'Close Find' : 'Find & Replace')}
                                                     </button>
                                                 )}
                                                 {!showSummary && !isEditingTranscript && pluginPhotosynthesisEnabled && !hideTranscriptEditButton && flags.allowEditTranscript && (
@@ -1119,7 +1222,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                             setIsEditingSummary(false);
                                                             setEditedTranscript(transcript);
                                                         }}
-                                                        className="p-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors cursor-pointer"
+                                                        className="shrink-0 p-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors cursor-pointer"
                                                         title="Edit Transcript"
                                                     >
                                                         <Pencil className="w-3 h-3" />
@@ -1275,14 +1378,9 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                 </div>
                                             ) : (
                                                 <>
-                                                    <button
-                                                        onClick={handleCopySummary}
-                                                        className="self-start flex items-center gap-1.5 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-red-600 hover:text-red-300 transition-colors cursor-pointer"
-                                                        title="Copy AI Summary to clipboard"
-                                                    >
-                                                        {summaryCopied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                                                        {summaryCopied ? "Copied" : "Copy Summary"}
-                                                    </button>
+                                                    {/* No separate "Copy Summary" link here any more: the Action Bar's copy
+                                                        button below already does this while the Summary is showing, so
+                                                        there's one copy control per view, not two disagreeing ones. */}
                                                     <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none">
                                                         <ReactMarkdown
                                                             remarkPlugins={[remarkGfm, remarkHighlight]}
@@ -1506,12 +1604,19 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                             {!isEditingTranscript && !isEditingSummary && (
                                 <div className="mt-2 space-y-3 pt-3 border-t border-white/5">
                                      {/* Custom Prompt Editor */}
-                                    {showCustomPrompt && pluginSummarizeEnabled && (
+                                    {/* !flags.workspaceReadOnly: Read-only hides this outright rather than just disabling
+                                        it — there's no view-only rendering of a custom prompt, showing it always means
+                                        being able to edit it. showCustomPrompt itself isn't in READ_ONLY_OVERRIDE_KEYS
+                                        (it already has its own dedicated toggle in PluginsTab; this checks it directly). */}
+                                    {showCustomPrompt && !flags.workspaceReadOnly && pluginSummarizeEnabled && (
                                         <div className="p-3 bg-white/5 rounded-xl border border-white/5 relative z-20">
-                                            <div className="flex items-center justify-between">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#888888]">Custom Prompt</span>
-                                                    <div className="group/hint relative flex items-center">
+                                            <div className="flex items-center justify-between gap-2">
+                                                {/* min-w-0 so the label (below) can actually shrink to an ellipsis instead of
+                                                    pushing Show/Hide — an interactive control — off the edge or behind the
+                                                    scrollbar. The hint icon keeps shrink-0: it's a fixed-size glyph, not text. */}
+                                                <div className="flex items-center gap-2 min-w-0">
+                                                    <span className="min-w-0 truncate text-[10px] font-bold uppercase tracking-[0.2em] text-[#888888]" title="Custom Prompt">Custom Prompt</span>
+                                                    <div className="group/hint relative flex items-center shrink-0">
                                                         <Lightbulb className="w-3.5 h-3.5 text-[#666666] hover:text-orange-400 transition-colors cursor-help" />
                                                         <div className="absolute bottom-full left-0 mb-3 w-80 bg-[#1a1a1a] border border-[#333] rounded-xl p-4 opacity-0 translate-y-2 pointer-events-none group-hover/hint:opacity-100 group-hover/hint:translate-y-0 transition-all duration-200 z-[100] shadow-2xl">
                                                             <h4 className="text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-3 border-b border-[#333] pb-2 flex items-center gap-2">
@@ -1551,12 +1656,17 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                 {(isLibrary || hasCustomPrompt) ? (
                                                     <button
                                                         onClick={() => setShowPromptEditor(!showPromptEditor)}
-                                                        className="text-[#666666] hover:text-white transition-colors cursor-pointer text-[9px] uppercase font-bold"
+                                                        className="shrink-0 whitespace-nowrap text-[#666666] hover:text-white transition-colors cursor-pointer text-[9px] uppercase font-bold"
                                                     >
                                                         {showPromptEditor ? 'Hide' : 'Show'}
                                                     </button>
                                                 ) : (
-                                                    <span className="text-[9px] text-[#666666] uppercase font-bold">(Save to {labels.aliasLibrary} to Edit)</span>
+                                                    // Truncated rather than wrapped or shrunk-with-the-row: it's explanatory, not an
+                                                    // action label, and its length varies with the workspace's Library alias — the
+                                                    // "Custom Prompt" label to its left is the important, fixed-length part to protect.
+                                                    <span className="min-w-0 truncate text-[9px] text-[#666666] uppercase font-bold" title={`Save to ${labels.aliasLibrary} to Edit`}>
+                                                        (Save to {labels.aliasLibrary} to Edit)
+                                                    </span>
                                                 )}
                                             </div>
                                         </div>
@@ -1564,12 +1674,15 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
 
                                     {/* Action Bar */}
                                     <div className="flex gap-2">
+                                        {/* One copy button, following whichever side is actually showing (see
+                                            viewingSummary) — not a fixed "Copy Transcript" regardless of view. */}
                                         <button
-                                            onClick={handleCopy}
-                                            disabled={loading || isTranscriptInvalid}
-                                            className={`flex-1 py-1.5 rounded-lg border border-[#383838] bg-[#222222] text-white transition-all text-xs font-semibold disabled:opacity-20 ${loading || isTranscriptInvalid ? 'cursor-default' : 'hover:bg-[#3f3f3f] cursor-pointer'}`}
+                                            onClick={viewingSummary ? handleCopySummary : handleCopy}
+                                            disabled={viewingSummary ? false : (loading || isTranscriptInvalid)}
+                                            title={viewingSummary ? "Copy AI Summary to clipboard" : "Copy Transcript to clipboard"}
+                                            className={`flex-1 min-w-0 truncate px-2 py-1.5 rounded-lg border border-[#383838] bg-[#222222] text-white transition-all text-xs font-semibold disabled:opacity-20 ${!viewingSummary && (loading || isTranscriptInvalid) ? 'cursor-default' : 'hover:bg-[#3f3f3f] cursor-pointer'}`}
                                         >
-                                            {copied ? "Copied" : "Copy Transcript"}
+                                            {(viewingSummary ? summaryCopied : copied) ? "Copied" : (viewingSummary ? "Copy Summary" : "Copy Transcript")}
                                         </button>
 
                                         {existsInDb && onDelete && allowDeletion ? (
@@ -1577,20 +1690,20 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                 onClick={onDelete}
                                                 disabled={loading || isTranscriptInvalid || checkingDb}
                                                 title={isTranscriptInvalid ? "No transcript to delete" : `Delete from ${labels.aliasLibrary}`}
-                                                className={`flex-1 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
+                                                className={`flex-1 min-w-0 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                                             >
-                                                <Trash2 className="w-3.5 h-3.5" />
-                                                Delete
+                                                <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                                                <span className="truncate">Delete</span>
                                             </button>
                                         ) : !existsInDb && flags.allowSaveToLibrary ? (
                                             <button
                                                 onClick={handleOnSave}
                                                 disabled={loading || isTranscriptInvalid || checkingDb}
                                                 title={isTranscriptInvalid ? "No transcript to save" : `Save to ${labels.aliasLibrary}`}
-                                                className={`flex-1 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
+                                                className={`flex-1 min-w-0 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${loading || isTranscriptInvalid || checkingDb ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
                                             >
-                                                <Save className="w-3.5 h-3.5" />
-                                                Save
+                                                <Save className="w-3.5 h-3.5 shrink-0" />
+                                                <span className="truncate">Save</span>
                                             </button>
                                         ) : null}
                                     </div>

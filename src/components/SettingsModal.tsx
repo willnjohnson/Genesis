@@ -59,13 +59,14 @@ export function SettingsModal({
 }: Props) {
     const { flags } = useFlags();
     // Tabs a DB owner has hidden are left out (see lib/flags.ts for how they depend on each other).
-    const visibleTabs = TAB_CONFIG.filter(t => flags.tabVisible[t.id]);
+    // Sync is still in development, so it only shows in dev mode, never in a built app.
+    const visibleTabs = TAB_CONFIG.filter(t => flags.tabVisible[t.id] && (import.meta.env.DEV || t.id !== 'sync'));
     const [activeTab, setActiveTab] = useState<Tab>('api');
     // If the tab on screen is hidden (a flag changed, or the first tab was never available), move
     // to the first one that is.
     useEffect(() => {
-        if (!flags.tabVisible[activeTab] && visibleTabs.length > 0) setActiveTab(visibleTabs[0].id);
-    }, [flags.tabVisible, activeTab, visibleTabs]);
+        if (!visibleTabs.some(t => t.id === activeTab) && visibleTabs.length > 0) setActiveTab(visibleTabs[0].id);
+    }, [activeTab, visibleTabs]);
     const [hasApiKey, setHasApiKey] = useState(false);
     const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
     const [dbDetails, setDbDetails] = useState<DbDetails | null>(null);
@@ -204,8 +205,13 @@ export function SettingsModal({
                         ))}
                     </div>
 
-                    {/* Content */}
-                    <div className="flex-1 p-8 overflow-y-auto bg-[#0f0f0f]">
+                    {/* Content. min-w-0: a flex item's default min-width is its content's natural width, not
+                        0 — without this, this pane refuses to shrink below that as the window narrows and
+                        pushes itself (and the modal) wider instead. overflow-x-hidden backs that up: with
+                        only overflow-y set, the CSS spec computes overflow-x as auto too (never `visible`),
+                        so anything that still doesn't shrink in time (a long unbreakable path, say) would
+                        otherwise open a horizontal scrollbar of its own rather than just being clipped. */}
+                    <div className="flex-1 min-w-0 p-8 overflow-y-auto overflow-x-hidden bg-[#0f0f0f]">
                         {loading && activeTab !== 'plugins' && activeTab !== 'sync' && (
                             <div className="text-center text-[#555] text-xs py-8">Loading...</div>
                         )}

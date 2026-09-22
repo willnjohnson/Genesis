@@ -10,10 +10,31 @@ import { useWorkspace } from "./useWorkspace";
 // Bumped from 100 -> 300 per the search revision doc ("empirically verified to work great in
 // the Kinesis app").
 const PAGE_SIZE = 300;
-// Debounces both text-search keystrokes and sort/filter button clicks into a single request,
-// mirroring the FTS search debounce this replaced. Short enough that a button click still feels
-// instant.
+// Debounces text-search keystrokes into a single request, mirroring the FTS search debounce this
+// replaced. Sort/filter button clicks are not debounced: a click is one deliberate change, so
+// waiting only delays it.
 const RELOAD_DEBOUNCE_MS = 250;
+// Page 1 of recent sort/filter/search combinations, kept so going back to one shows at once.
+const PAGE_CACHE_LIMIT = 24;
+// How long the view sits still before the neighbouring sorts are fetched in the background.
+const PREFETCH_DELAY_MS = 400;
+
+interface PageOne {
+    videos: Video[];
+    totalCount: number;
+}
+
+const sameVideoIds = (a: Video[], b: Video[]) => a.length === b.length && a.every((v, i) => v.id === b[i].id);
+
+const cacheKey = (search: string, wdbs: string | null, kind: LibraryFilterKind, field: LibrarySortField, order: LibrarySortOrder) =>
+    JSON.stringify([search, wdbs, kind, field, order]);
+
+// Most recently used last; the oldest entries fall off the front.
+function rememberPage(cache: Map<string, PageOne>, key: string, page: PageOne) {
+    cache.delete(key);
+    cache.set(key, page);
+    while (cache.size > PAGE_CACHE_LIMIT) cache.delete(cache.keys().next().value as string);
+}
 
 /**
  * Owns the saved-videos library: paged loading from the DB (300 rows at a time, sorted/filtered
@@ -67,6 +88,14 @@ export function useLibrary(
     // the search/sort/filter again) can't clobber a newer one that resolves first.
     const requestIdRef = useRef(0);
     const loadingMoreRef = useRef(false);
+    // Page 1 per sort/filter/search combination (see the reload effect below). Emptied whenever a
+    // save/delete/summarize changes what the DB would return; `cacheGenRef` lets a background fetch
+    // that started before that emptying notice it and drop its (now stale) result.
+    const pageCacheRef = useRef(new Map<string, PageOne>());
+    const cacheGenRef = useRef(0);
+    const lastNonceRef = useRef(0);
+    const lastSearchRef = useRef("");
+    const summaryCountLoadedRef = useRef(false);
 
     const refreshSummarizedCount = useCallback(async () => {
         if (!pluginSummarizeEnabled) return;
@@ -108,24 +137,84 @@ export function useLibrary(
         setReloadNonce(n => n + 1);
     }, []);
 
+    // Fetches the plain Library's page 1 for the sorts one click away (the other two sort fields and
+    // the reversed order, under the current filter) into the cache, one at a time, so those clicks
+    // show at once. Stops as soon as the user changes anything. Only when the current filter is
+    // "all": that keeps it to cheap, index-ordered queries — the Transcript Only / With AI Summary
+    // filters have to test every video's text, too heavy to run speculatively.
+    const prefetchNeighbours = useCallback(async (requestId: number) => {
+        await new Promise(resolve => window.setTimeout(resolve, PREFETCH_DELAY_MS));
+        const gen = cacheGenRef.current;
+        const fields: LibrarySortField[] = ['date', 'added', 'popularity'];
+        const neighbours: [LibrarySortField, LibrarySortOrder][] = [
+            [sortField, sortOrder === 'desc' ? 'asc' : 'desc'],
+            ...fields.filter(f => f !== sortField).map(f => [f, sortOrder] as [LibrarySortField, LibrarySortOrder]),
+        ];
+        for (const [field, order] of neighbours) {
+            if (requestIdRef.current !== requestId || cacheGenRef.current !== gen) return;
+            const key = cacheKey("", null, 'all', field, order);
+            if (pageCacheRef.current.has(key)) continue;
+            try {
+                const res = await getSavedVideos(false, { filterKind: 'all', sortField: field, sortOrder: order, limit: PAGE_SIZE, offset: 0 });
+                if (cacheGenRef.current !== gen) return;
+                rememberPage(pageCacheRef.current, key, { videos: res.videos, totalCount: res.totalCount ?? res.videos.length });
+            } catch {
+                return; // best effort: the click will just load normally
+            }
+        }
+    }, [sortField, sortOrder]);
+
     // Reactive page-1 reload: fires whenever the user changes the search text, sort, or filter
-    // (or first enters the Library). Debounced so rapid typing/clicking doesn't spam the DB.
+    // (or first enters the Library). A combination seen before shows straight from the cache and
+    // is re-checked against the DB in the background; a new one loads, waiting out the debounce only
+    // while the user is typing (a button click goes straight through).
     useEffect(() => {
         if (!enabled) return;
         const myRequestId = ++requestIdRef.current;
-        setLoading(true);
-        const timer = window.setTimeout(async () => {
+
+        const nonceChanged = reloadNonce !== lastNonceRef.current;
+        lastNonceRef.current = reloadNonce;
+        if (nonceChanged) {
+            // A save/delete/summarize changed what the DB would return, so nothing cached is trusted.
+            pageCacheRef.current.clear();
+            cacheGenRef.current++;
+        }
+        const searchChanged = librarySearch !== lastSearchRef.current;
+        lastSearchRef.current = librarySearch;
+
+        const key = cacheKey(librarySearch, wdbsFilter, filterKind, sortField, sortOrder);
+        const cached = pageCacheRef.current.get(key);
+        const show = (page: PageOne) => {
+            setLibraryVideos(page.videos);
+            setTotalCount(page.totalCount);
+            // A new search/sort/filter starts the grid over from page 1 — reset scroll too,
+            // otherwise staying scrolled deep into the old (possibly much longer) result set
+            // can make the infinite-scroll trigger in VideoList fire several "load more"
+            // calls back-to-back just to catch up to where the page happened to be.
+            window.scrollTo({ top: 0 });
+        };
+        if (cached) {
+            show(cached);
+            setLoading(false);
+        } else {
+            setLoading(true);
+        }
+
+        const load = async () => {
             try {
                 const res = await fetchPage(0);
                 if (requestIdRef.current !== myRequestId) return; // superseded by a newer request
-                setLibraryVideos(res.videos);
-                setTotalCount(res.totalCount ?? res.videos.length);
-                // A new search/sort/filter starts the grid over from page 1 — reset scroll too,
-                // otherwise staying scrolled deep into the old (possibly much longer) result set
-                // can make the infinite-scroll trigger in VideoList fire several "load more"
-                // calls back-to-back just to catch up to where the page happened to be.
-                window.scrollTo({ top: 0 });
-                if (pluginSummarizeEnabled) refreshSummarizedCount();
+                const page: PageOne = { videos: res.videos, totalCount: res.totalCount ?? res.videos.length };
+                rememberPage(pageCacheRef.current, key, page);
+                // What the cache showed is still right unless the DB says otherwise.
+                if (!cached || cached.totalCount !== page.totalCount || !sameVideoIds(cached.videos, page.videos)) show(page);
+                // The summarized count doesn't depend on sort/filter/search, so it's only worked out
+                // the first time and after something that could change it.
+                if (pluginSummarizeEnabled && (nonceChanged || !summaryCountLoadedRef.current)) {
+                    summaryCountLoadedRef.current = true;
+                    refreshSummarizedCount();
+                }
+                if (filterKind === 'all' && !wdbsFilter && !librarySearch.trim()) prefetchNeighbours(myRequestId);
             } catch {
                 if (requestIdRef.current === myRequestId) {
                     setNotification({ message: `Failed to load ${libraryLabelRef.current}`, type: "error" });
@@ -133,8 +222,13 @@ export function useLibrary(
             } finally {
                 if (requestIdRef.current === myRequestId) setLoading(false);
             }
-        }, RELOAD_DEBOUNCE_MS);
-        return () => window.clearTimeout(timer);
+        };
+
+        if (searchChanged && !cached) {
+            const timer = window.setTimeout(load, RELOAD_DEBOUNCE_MS);
+            return () => window.clearTimeout(timer);
+        }
+        load();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [enabled, librarySearch, wdbsFilter, sortField, sortOrder, filterKind, reloadNonce, fetchPage]);
 

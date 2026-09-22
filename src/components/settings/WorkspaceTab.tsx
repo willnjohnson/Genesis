@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { ArrowLeftRight, ChevronDown, ChevronRight, FolderOpen } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowLeftRight, BookA, BookMarked, ChevronDown, ChevronRight, FolderOpen, HardDrive, Search, Shield, UserSearch, type LucideIcon } from "lucide-react";
 import { getWorkspaceStatus, revealWorkspace, setWorkspaceLabel, type WorkspaceStatus } from "../../api";
 import { WorkspaceLauncher } from "../workspace/WorkspaceLauncher";
 import { ErrorBox } from "../workspace/shared";
@@ -8,6 +8,7 @@ import { settingsSecondaryBtn } from "./buttons";
 import { useFlags } from "../../hooks/useFlags";
 import { useWorkspace } from "../../hooks/useWorkspace";
 import { checkLabel, LABEL_DEFS, type LabelKey } from "../../lib/workspace";
+import { PermissionsPanel } from "./PermissionsPanel";
 
 interface FieldProps {
     labelKey: LabelKey;
@@ -84,15 +85,23 @@ function LabelField({ labelKey, title, hint, max, defaultValue, value, disabled,
     );
 }
 
-// The Advanced names grouped by the part of the app they rename, in navigation order. Same
-// underline-tab styling as the Export tab.
-const ADVANCED_TABS: { id: string; label: string; keys: LabelKey[] }[] = [
-    { id: 'search', label: 'Search', keys: ['aliasSearch'] },
-    { id: 'library', label: 'Library', keys: ['aliasLibrary'] },
-    { id: 'glossary', label: 'Glossary', keys: ['aliasGlossary'] },
-    { id: 'biography', label: 'Biography', keys: ['aliasBiography', 'aliasBiographyItem'] },
-    { id: 'drive', label: 'Drive', keys: ['aliasDriveName', 'aliasDriveLink', 'aliasDriveSymlink'] },
+// The Advanced names grouped by the part of the app they rename, in navigation order, plus
+// Permissions (which renders PermissionsPanel instead of LabelFields — see its `keys: []` and the
+// branch in the render below). Same underline-tab styling as the Export tab. Icons match the main
+// nav rail's own icons for these exact views (App.tsx), so "Library" always means BookMarked, etc.
+const ADVANCED_TABS: { id: string; label: string; icon: LucideIcon; keys: LabelKey[] }[] = [
+    { id: 'search', label: 'Search', icon: Search, keys: ['aliasSearch'] },
+    { id: 'library', label: 'Library', icon: BookMarked, keys: ['aliasLibrary'] },
+    { id: 'glossary', label: 'Glossary', icon: BookA, keys: ['aliasGlossary'] },
+    { id: 'biography', label: 'Biography', icon: UserSearch, keys: ['aliasBiography', 'aliasBiographyItem'] },
+    { id: 'drive', label: 'Drive', icon: HardDrive, keys: ['aliasDriveName', 'aliasDriveLink', 'aliasDriveSymlink'] },
+    { id: 'permissions', label: 'Permissions', icon: Shield, keys: [] },
 ];
+
+// Below this width (px), the sub-tab row shows icons alone (with a tooltip) instead of icon + label —
+// same ResizeObserver approach as the sequence bar's Previous/Next labels (SequenceDock.tsx): a
+// Settings modal can be small, and 6 labelled tabs don't always fit.
+const TABS_ICON_ONLY_BELOW = 480;
 
 export function WorkspaceTab() {
     const { flags } = useFlags();
@@ -102,6 +111,17 @@ export function WorkspaceTab() {
     const [status, setStatus] = useState<WorkspaceStatus | null>(null);
     const [launcherOpen, setLauncherOpen] = useState(false);
     const [error, setError] = useState<string | null>(null);
+
+    // Collapses the sub-tab row to icons alone once it's too narrow for icon + label.
+    const tabsRowRef = useRef<HTMLDivElement>(null);
+    const [tabsIconOnly, setTabsIconOnly] = useState(false);
+    useEffect(() => {
+        const el = tabsRowRef.current;
+        if (!el) return;
+        const observer = new ResizeObserver(([entry]) => setTabsIconOnly(entry.contentRect.width < TABS_ICON_ONLY_BELOW));
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, []);
 
     // Re-read when the name changes: renaming the workspace renames its folder too.
     useEffect(() => {
@@ -158,23 +178,29 @@ export function WorkspaceTab() {
                         Advanced
                     </button>
                     <p className="text-[11px] text-[#666666] mt-1">
-                        Rename sections to fit your workspace. Up to 18 characters: letters, numbers and spaces.
+                        {activeTab.id === 'permissions'
+                            ? "Turn specific editing permissions on or off for this workspace."
+                            : "Rename sections to fit your workspace. Up to 18 characters: letters, numbers and spaces."}
                     </p>
                     {advancedOpen && (
                         <div className="mt-4">
-                            <div className="flex items-center gap-4 mb-4">
-                                {ADVANCED_TABS.map(({ id, label }) => (
+                            <div ref={tabsRowRef} className="flex items-center gap-4 mb-4">
+                                {ADVANCED_TABS.map(({ id, label, icon: Icon }) => (
                                     <button
                                         key={id}
                                         type="button"
                                         onClick={() => setAdvancedTab(id)}
-                                        className={`pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeTab.id === id ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                        title={tabsIconOnly ? label : undefined}
+                                        className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeTab.id === id ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                     >
-                                        {label}
+                                        {tabsIconOnly ? <Icon className="w-3.5 h-3.5 shrink-0" /> : label}
                                         {activeTab.id === id && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                     </button>
                                 ))}
                             </div>
+                            {activeTab.id === 'permissions' ? (
+                                <PermissionsPanel />
+                            ) : (
                             <div className="grid grid-cols-1 gap-4">
                             {tabDefs.map(def => (
                                 <LabelField
@@ -189,6 +215,7 @@ export function WorkspaceTab() {
                                 />
                             ))}
                             </div>
+                            )}
                         </div>
                     )}
                 </div>

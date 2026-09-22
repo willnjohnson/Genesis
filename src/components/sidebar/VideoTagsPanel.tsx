@@ -14,8 +14,13 @@ interface Props {
     onAddTag?: (term: string) => void;
     onRemoveTag?: (term: string) => void;
     onSelectTerm: (term: GlossaryTerm) => void;
+    /** Terms to list first in the add dropdown (the ones filed under the video's Drive), with
+     *  `priorityLabel` naming that Drive. Everything else follows under "All". Omit for no grouping. */
+    priorityTerms?: Set<string>;
+    priorityLabel?: string;
     /** False = read-only: tags are shown and open their definition, but can't be added or removed
-     *  (a DB owner's allowEditTags flag). */
+     *  (a DB owner's allowEditTermsAndTags flag — one flag for both, since this is the same component
+     *  for either tab). */
     canEdit?: boolean;
 }
 
@@ -23,7 +28,7 @@ interface Props {
  *  the ones not already applied. Clicking a chip opens its term definition (via
  *  `onSelectTerm`); the dropdown closes on an outside click. Renders just the tag row — the
  *  surrounding card/header is owned by Sidebar.tsx's Tags/Similar Videos tab switcher. */
-export function VideoTagsPanel({ kind, videoTags, glossaryTerms, onAddTag, onRemoveTag, onSelectTerm, canEdit = true }: Props) {
+export function VideoTagsPanel({ kind, videoTags, glossaryTerms, onAddTag, onRemoveTag, onSelectTerm, priorityTerms, priorityLabel, canEdit = true }: Props) {
     const noun = kind === 'terms' ? 'term' : 'tag';
     // A Quick Tag is a glossary entry without a definition; a term has one.
     const ofKind = glossaryTerms.filter(t => (t.definition.trim() !== '') === (kind === 'terms'));
@@ -49,6 +54,29 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, onAddTag, onRem
     const availableTerms = ofKind.filter(t =>
         !videoTags.includes(t.term) &&
         t.term.toLowerCase().includes(tagFilter.toLowerCase())
+    );
+    // The video's Drive's own terms go first; the rest follow without repeating them.
+    const prioritized = priorityTerms ? availableTerms.filter(t => priorityTerms.has(t.term)) : [];
+    const others = priorityTerms ? availableTerms.filter(t => !priorityTerms.has(t.term)) : availableTerms;
+    // A label with a rule running out to the right ("IN :UAP ────"), in the dropdown's own border colour.
+    const groupHeader = (text: string) => (
+        <div className="flex items-center gap-2 px-4 pt-3 pb-1 select-none">
+            <span className="shrink-0 text-[10px] font-bold uppercase tracking-wider text-[#aaaaaa]">{text}</span>
+            <span className="flex-1 h-px bg-[#383838]" />
+        </div>
+    );
+    const termButton = (term: GlossaryTerm) => (
+        <button
+            key={term.term}
+            onClick={() => {
+                onAddTag?.(term.term);
+                setShowTagDropdown(false);
+                setTagFilter("");
+            }}
+            className="w-full text-left px-4 py-2 text-[11px] text-white hover:bg-[#2a2a2a] transition-colors cursor-pointer rounded"
+        >
+            {term.term}
+        </button>
     );
 
     return (
@@ -99,7 +127,7 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, onAddTag, onRem
                     </button>
 
                     {showTagDropdown && (
-                        <div className="absolute bottom-full left-0 mb-2 bg-[#1a1a1a] border border-[#383838] rounded-lg max-h-[300px] overflow-hidden flex flex-col z-50 w-[240px]">
+                        <div className="absolute bottom-full left-0 mb-2 bg-[#1a1a1a] border border-[#383838] rounded-lg max-h-[min(60vh,520px)] overflow-hidden flex flex-col z-50 w-[240px]">
                             <div className="p-3 border-b border-[#303030] bg-white/5">
                                 <input
                                     type="text"
@@ -111,25 +139,23 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, onAddTag, onRem
                                     onClick={(e) => e.stopPropagation()}
                                 />
                             </div>
-                            <div className="overflow-y-auto max-h-[150px] custom-scrollbar p-1">
+                            {/* Fills what's left under the filter box, instead of a fixed 150px. */}
+                            <div className="overflow-y-auto flex-1 min-h-0 custom-scrollbar p-1">
                                 {availableTerms.length === 0 ? (
                                     <p className="p-4 text-[11px] text-[#666666] text-center italic">
                                         {tagFilter ? `No matching ${noun}s` : `No ${noun}s available`}
                                     </p>
                                 ) : (
-                                    availableTerms.map((term) => (
-                                        <button
-                                            key={term.term}
-                                            onClick={() => {
-                                                onAddTag?.(term.term);
-                                                setShowTagDropdown(false);
-                                                setTagFilter("");
-                                            }}
-                                            className="w-full text-left px-4 py-2 text-[11px] text-white hover:bg-[#2a2a2a] transition-colors cursor-pointer rounded"
-                                        >
-                                            {term.term}
-                                        </button>
-                                    ))
+                                    <>
+                                        {prioritized.length > 0 && (
+                                            <>
+                                                {groupHeader(`In ${priorityLabel}`)}
+                                                {prioritized.map(termButton)}
+                                                {others.length > 0 && groupHeader(`All ${noun}s`)}
+                                            </>
+                                        )}
+                                        {others.map(termButton)}
+                                    </>
                                 )}
                             </div>
                         </div>

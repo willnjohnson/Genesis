@@ -429,6 +429,8 @@ pub fn remove_video_wdbs_link(db_path: &str, video_id: &str, encoded_wdbs: &str)
         "DELETE FROM VideoWDBSLinks WHERE video_id = ?1 AND wdbs = ?2",
         params![video_id, encoded_wdbs],
     )?;
+    // A sequence only holds videos filed at or beneath its Drive.
+    super::sequences::prune_video_memberships(db_path, video_id);
     Ok(())
 }
 
@@ -438,13 +440,14 @@ pub fn remove_video_wdbs_link(db_path: &str, video_id: &str, encoded_wdbs: &str)
 pub fn clear_video_wdbs_links(db_path: &str, video_id: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute("DELETE FROM VideoWDBSLinks WHERE video_id = ?1", params![video_id])?;
+    super::sequences::prune_video_memberships(db_path, video_id);
     Ok(())
 }
 
 /// One top-level Drive (level 1), as the Glossary's drive dropdown and assignment picker list them.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WdbsRoot {
-    /// Display path, e.g. ":CRYPTO" — what GlossaryDrives stores.
+    /// Display path, e.g. ":CRYPTO" — what Glossary.drives stores (one root per line).
     pub path: String,
     /// The bare name shown in the UI ("CRYPTO").
     pub segment: String,
@@ -477,12 +480,16 @@ pub fn get_wdbs_roots(db_path: &str) -> Result<Vec<WdbsRoot>> {
             roots.entry(path.clone()).or_insert(WdbsRoot { path, segment, alias });
         }
     }
-    if table_exists(&conn, "GlossaryDrives")? {
-        let mut stmt = conn.prepare("SELECT DISTINCT root FROM GlossaryDrives")?;
+    // Glossary is Kinesis-owned and always exists (see db/schema.rs), unlike tblWDBS above.
+    {
+        let mut stmt = conn.prepare("SELECT drives FROM Glossary WHERE drives != ''")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        for path in rows.filter_map(|r| r.ok()) {
-            let segment = path.trim_start_matches(':').to_string();
-            roots.entry(path.clone()).or_insert(WdbsRoot { path, segment, alias: None });
+        for raw in rows.filter_map(|r| r.ok()) {
+            for path in raw.split('\n').filter(|r| !r.is_empty()) {
+                let path = path.to_string();
+                let segment = path.trim_start_matches(':').to_string();
+                roots.entry(path.clone()).or_insert(WdbsRoot { path, segment, alias: None });
+            }
         }
     }
 

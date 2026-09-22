@@ -369,6 +369,14 @@ pub fn init_db(db_path: &str) -> Result<()> {
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosDateAdded ON Videos(date_added)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosPublishedAt ON Videos(published_at)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosViewCount ON Videos(view_count)", []);
+    // `tags` sits after the (large) transcript column, so reading it off the table walks the
+    // transcript's overflow pages. This lets the Glossary's tag preview (tag_videos_preview) find a
+    // tag's videos from the small index alone, without touching the transcripts.
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosTags ON Videos(tags)", []);
+    // Same reason for `WDBS`, the last column: "which videos are under this Drive?" (the sequence
+    // picker, db::sequences::list_drive_videos_for_sequence) is a range on this index rather than a
+    // read of every video's transcript to reach it.
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idxVideosWDBS ON Videos(WDBS)", []);
 
     // Warp Drive taxonomy: `WDBS` indirectly ties a video to a row in `tblWDBS` (the Warp Drive
     // repository) — see db/wdbs.rs. The computed/IMMUTABLE `fkWDBS` column that directly enforces
@@ -454,26 +462,66 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     )?;
 
-    // Create glossary table
+    // Create glossary table. `drives` is the newline-joined Drive roots (level 1 only, e.g.
+    // ":CRYPTO") a Standard Glossary Tag is filed under, '' = uncategorized (shown under "All").
+    // Quick Tags (empty definition) never have one. This used to be a separate GlossaryDrives join
+    // table (term, root); folded directly onto Glossary instead, so a term's filings can never
+    // drift out of step with a second copy of its definition the way a denormalized (term, root)
+    // row-per-drive table would risk — one row, one definition, per term, always.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS Glossary (
             term TEXT PRIMARY KEY,
-            definition TEXT NOT NULL
+            definition TEXT NOT NULL,
+            drives TEXT NOT NULL DEFAULT ''
         ) STRICT",
         [],
     )?;
+    // A database from before the fold-in above: carry each term's rows from the old join table
+    // into its new drives column before that table goes. Gated on `drives` not existing yet so
+    // this backfill only ever runs once, the same pattern as the Biographies migrations below.
+    if !column_exists(&conn, "Glossary", "drives")? {
+        conn.execute("ALTER TABLE Glossary ADD COLUMN drives TEXT NOT NULL DEFAULT ''", [])?;
+        if table_exists(&conn, "GlossaryDrives")? {
+            conn.execute(
+                "UPDATE Glossary SET drives = COALESCE(
+                    (SELECT group_concat(d.root, char(10)) FROM GlossaryDrives d WHERE d.term = Glossary.term),
+                    ''
+                )",
+                [],
+            )?;
+        }
+    }
+    if table_exists(&conn, "GlossaryDrives")? {
+        conn.execute("DROP TABLE GlossaryDrives", [])?;
+    }
 
-    // Which Drive roots (level 1 only, e.g. ":CRYPTO") a Standard Glossary Tag is filed under. A
-    // term with no rows here is simply uncategorized (shown under "All"). Quick Tags (empty
-    // definition) never have rows. Kinesis-owned, like VideoWDBSLinks: created on every database.
+    // Drive sequences (see db/sequences.rs): one ordered watch-through list per Drive, for the
+    // sidebar's First / Previous / Next bar. `drive` is the display path (":CS-DSA", uppercase) and a
+    // sequence may hold any video at or beneath that Drive. A video appears at most once in a given
+    // sequence (the primary key) but can be in the sequences of several Drives. Kinesis-owned, like
+    // VideoWDBSLinks: created on every database.
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS GlossaryDrives (
-            term TEXT NOT NULL,
-            root TEXT NOT NULL,
-            PRIMARY KEY (term, root)
+        "CREATE TABLE IF NOT EXISTS DriveSequence (
+            drive    TEXT NOT NULL,
+            video_id TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            PRIMARY KEY (drive, video_id)
         ) STRICT",
         [],
     )?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idxDriveSequenceOrder ON DriveSequence(drive, position)", [])?;
+    // "Which sequences is this video in?" — asked every time a video opens in the sidebar.
+    conn.execute("CREATE INDEX IF NOT EXISTS idxDriveSequenceVideo ON DriveSequence(video_id)", [])?;
+    // A deleted video leaves its sequences. Outside the trigger block below on purpose: the table is
+    // Kinesis's own, so this is needed on a hand-maintained production schema too.
+    let _ = conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trgVideosAfterDEL_DriveSequence_CascadeDelete
+        AFTER DELETE ON Videos
+        BEGIN
+            DELETE FROM DriveSequence WHERE video_id = OLD.video_id;
+        END",
+        [],
+    );
 
     // Per-video notes and attachments, kept inside the database (see db/attachments.rs). Blobs are
     // content-addressed by the sha256 of the original bytes so identical files are stored once.
@@ -692,30 +740,15 @@ pub fn init_db(db_path: &str) -> Result<()> {
         )?;
     }
 
-    // Initialize default settings if they don't exist
+    // Initialize default settings if they don't exist. Only for settings that AREN'T feature flags
+    // (those are seeded uniformly below, from the one list FEATURE_FLAGS — the UI/backend parity
+    // test keeps that list and src/lib/flags.ts's copy in step). This array used to also carry
+    // several feature flags' own defaults (allowEditWDBS among them) — duplicated, not just
+    // redundant: running first, its INSERT OR IGNORE silently won the race and shadowed whatever
+    // FEATURE_FLAGS said, so a change made there (checked by that parity test) could still have no
+    // actual effect on a real database. Keep this array to genuinely flag-less settings only.
     let defaults = [
-        ("showSearch", "true"),
-        ("allowDeletionLibrary", "true"),
-        ("allowModificationGlossary", "true"),
-        ("showSummarizeButton", "false"),
-        ("showSummarizeOllama", "true"),
-        ("showSummarizeVenice", "true"),
-        ("showSynthesizeVenice", "true"),
-        ("showSynthesizePixabay", "true"),
-        ("showSynthesizeUpload", "true"),
-        ("showGlossarySearchByTag", "true"),
-        ("showGlossarySearchInLibrary", "true"),
-        ("showBiography", "true"),
-        ("showDrive", "true"),
-        ("allowEditBio", "true"),
-        ("allowEditTranscriptOnNA", "true"),
         ("navigation_orientation", "horizontal"),
-        ("hideShortsInSearch", "true"),
-        ("setTranscriptAfterSummarizeToNA", "false"),
-        // Off by default: WDBS taxonomy editing is meant to be gated to bona fide IKLAO Admin
-        // Users once the IKLAO Cloud is stood up. Until then it's an opt-in switch (mirrors
-        // allowEditBio's "settings-table flag, no dedicated UI toggle yet" convention).
-        ("allowEditWDBS", "false"),
         ("venice_model", "zai-org-glm-5"),
     ];
 
@@ -725,8 +758,8 @@ pub fn init_db(db_path: &str) -> Result<()> {
             params![key, val],
         )?;
     }
-    // Every feature flag gets a row too (INSERT OR IGNORE, so the values above and anything a DB
-    // owner already set win), which makes `SELECT * FROM settings` a list of what can be changed.
+    // Every feature flag gets a row too (INSERT OR IGNORE, so anything a DB owner already set
+    // wins), which makes `SELECT * FROM settings` a list of what can be changed.
     crate::flags::seed_feature_flags(&conn)?;
 
     // One-time normalization of the "unassigned Warp Drive" placeholder from "θψ" to ":". "θψ" is
@@ -907,6 +940,13 @@ mod tests {
         let conn = Connection::open(&db_path).unwrap();
         // Mixed-case table names of the current schema; none of the old snake_case ones.
         for (old, new) in LEGACY_TABLE_NAMES {
+            // GlossaryDrives is the one entry whose new spelling never actually sticks around: a
+            // rename (old snake_case) or a fresh create both immediately fold it into
+            // Glossary.drives and drop it (see the migration in init_db, above).
+            if new == "GlossaryDrives" {
+                assert!(!table_exists(&conn, new).unwrap(), "{new} should have been folded into Glossary.drives");
+                continue;
+            }
             assert!(table_exists_exact(&conn, new).unwrap(), "{new} missing");
             assert!(!table_exists(&conn, old).unwrap(), "{old} should not exist");
         }
@@ -1115,6 +1155,12 @@ mod tests {
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
         for (old, new) in LEGACY_TABLE_NAMES {
+            // See the matching skip in fresh_database_uses_expected_names: GlossaryDrives is
+            // folded into Glossary.drives and dropped, never left standing under either name.
+            if new == "GlossaryDrives" {
+                assert!(!table_exists(&conn, new).unwrap(), "{new} should have been folded into Glossary.drives");
+                continue;
+            }
             assert!(table_exists_exact(&conn, new).unwrap(), "{new} missing");
             assert!(!table_exists(&conn, old).unwrap(), "{old} should be gone");
         }
@@ -1135,6 +1181,38 @@ mod tests {
         let notes: i64 = conn.query_row("SELECT COUNT(*) FROM VideoNotes", [], |row| row.get(0)).unwrap();
         assert_eq!(notes, 0);
         drop(conn);
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn a_preexisting_glossary_drives_table_is_folded_into_glossary_drives_and_dropped() {
+        let db_path = temp_db_path("glossary_fold");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("CREATE TABLE Glossary (term TEXT PRIMARY KEY, definition TEXT NOT NULL)", []).unwrap();
+            conn.execute(
+                "INSERT INTO Glossary (term, definition) VALUES ('Halving', 'Supply cut'), ('Loose', 'No drive'), ('qt', '')",
+                [],
+            )
+            .unwrap();
+            conn.execute("CREATE TABLE GlossaryDrives (term TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (term, root))", []).unwrap();
+            conn.execute(
+                "INSERT INTO GlossaryDrives (term, root) VALUES ('Halving', ':FIN'), ('Halving', ':CRYPTO')",
+                [],
+            )
+            .unwrap();
+        }
+        init_db(&db_path).unwrap();
+        // A second run must be a no-op (the backfill is gated on the column not existing yet).
+        init_db(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        assert!(!table_exists(&conn, "GlossaryDrives").unwrap(), "the join table is gone once its rows are folded in");
+        let halving: String = conn.query_row("SELECT drives FROM Glossary WHERE term = 'Halving'", [], |row| row.get(0)).unwrap();
+        let mut roots: Vec<&str> = halving.split('\n').collect();
+        roots.sort();
+        assert_eq!(roots, [":CRYPTO", ":FIN"], "existing assignments survive the fold-in, not just new ones");
+        let loose: String = conn.query_row("SELECT drives FROM Glossary WHERE term = 'Loose'", [], |row| row.get(0)).unwrap();
+        assert_eq!(loose, "", "a term with no rows in the old table is simply uncategorized, not lost");
         let _ = fs::remove_file(&db_path);
     }
 

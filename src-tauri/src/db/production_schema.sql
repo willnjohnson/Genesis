@@ -4,8 +4,7 @@ OVERVIEW OF CHANGES (mainly table names changed to new mixed-case convention)
 Prior	      (changed to)	       Now
 ------------------------TABLES------------------------------
 settings                ==> Settings
-glossary                ==> Glossary
-glossary_drives         ==> GlossaryDrives
+glossary                ==> Glossary (now also carries drives directly; glossary_drives is gone)
 stop_words              ==> StopWords
 custom_prompts          ==> CustomPrompts
 search_history          ==> SearchHistory
@@ -90,6 +89,7 @@ CREATE TABLE Videos (
 CREATE TABLE Glossary (
 	term TEXT NOT NULL,
 	definition TEXT NOT NULL,
+	drives TEXT NOT NULL DEFAULT (''),
 	CONSTRAINT GLOSSARY_PK PRIMARY KEY (term)
 ) STRICT;
 
@@ -113,10 +113,11 @@ CREATE TABLE Biographies (
 	CONSTRAINT BIOGRAPHIES_PK PRIMARY KEY (handle)
 ) STRICT;
 
-CREATE TABLE GlossaryDrives (
-    term TEXT NOT NULL,
-    root TEXT NOT NULL,
-    PRIMARY KEY (term, root)
+CREATE TABLE DriveSequence (
+    drive    TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (drive, video_id)
 ) STRICT;
 
 CREATE TABLE SyncItems (
@@ -197,6 +198,10 @@ CREATE INDEX idxVideosPublishedAt ON Videos(published_at);
 CREATE INDEX idxVideosDateAdded ON Videos(date_added);
 CREATE INDEX idxVideosHandle ON Videos(handle);
 CREATE INDEX idxVideoAttachmentsVideoID ON VideoAttachments(video_id);
+CREATE INDEX idxVideosTags ON Videos(tags);
+CREATE INDEX idxVideosWDBS ON Videos(WDBS);
+CREATE INDEX idxDriveSequenceOrder ON DriveSequence(drive, position);
+CREATE INDEX idxDriveSequenceVideo ON DriveSequence(video_id);
 CREATE UNIQUE INDEX idxBiographiesHandleLower ON Biographies(LOWER(handle));
 
 CREATE VIRTUAL TABLE ftsVideos USING fts5(
@@ -471,6 +476,12 @@ CREATE TRIGGER trgVideosAfterDEL_Attachments_CascadeDelete
             DELETE FROM VideoNotes WHERE video_id = OLD.video_id;
             DELETE FROM VideoAttachments WHERE video_id = OLD.video_id;
             DELETE FROM AttachmentBlobs WHERE hash NOT IN (SELECT hash FROM VideoAttachments);
+END;
+
+CREATE TRIGGER trgVideosAfterDEL_DriveSequence_CascadeDelete
+        AFTER DELETE ON Videos
+        BEGIN
+            DELETE FROM DriveSequence WHERE video_id = OLD.video_id;
 END;
 
 CREATE TRIGGER trgVideosBeforeUPD_Videos_ValidateWDBS

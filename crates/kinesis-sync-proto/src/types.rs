@@ -11,6 +11,8 @@ pub enum Kind {
     Wdbs,
     Video,
     VideoLink,
+    /// One video's membership (and position) in one Drive's sequence — see db/sequences.rs.
+    DriveSequence,
     Glossary,
     Biography,
     CustomPrompt,
@@ -18,11 +20,13 @@ pub enum Kind {
 
 impl Kind {
     /// Order in which kinds must be applied: taxonomy before videos (the production schema
-    /// validates `videos.WDBS`), links after both.
-    pub const APPLY_ORDER: [Kind; 6] = [
+    /// validates `videos.WDBS`), links and sequence memberships after both (each needs its video
+    /// to already exist).
+    pub const APPLY_ORDER: [Kind; 7] = [
         Kind::Wdbs,
         Kind::Video,
         Kind::VideoLink,
+        Kind::DriveSequence,
         Kind::Glossary,
         Kind::Biography,
         Kind::CustomPrompt,
@@ -33,6 +37,7 @@ impl Kind {
             Kind::Wdbs => "wdbs",
             Kind::Video => "video",
             Kind::VideoLink => "video_link",
+            Kind::DriveSequence => "drive_sequence",
             Kind::Glossary => "glossary",
             Kind::Biography => "biography",
             Kind::CustomPrompt => "custom_prompt",
@@ -178,6 +183,16 @@ pub struct VideoLinkData {
     pub wdbs: String,
 }
 
+/// One video's place in one Drive's sequence. `drive` is the display path (":CS-DSA"), matching
+/// what `wdbs` items are keyed by; `position` only has to be in the right relative order among a
+/// drive's items, not contiguous or gap-free — see db/sequences.rs's own module comment.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SequenceData {
+    pub drive: String,
+    pub video_id: String,
+    pub position: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct GlossaryData {
     #[serde(default)]
@@ -241,6 +256,17 @@ pub fn split_link_key(key: &str) -> Option<(&str, &str)> {
     key.split_once('|').filter(|(v, w)| !v.is_empty() && !w.is_empty())
 }
 
+/// Composite key for `drive_sequence` items: `drive|video_id`. A Drive path can't contain `|`
+/// (normalize_drive restricts it to `:`, letters, digits and `-`), so splitting on the first one
+/// is unambiguous even though a video id can contain other punctuation.
+pub fn sequence_key(drive: &str, video_id: &str) -> String {
+    format!("{drive}|{video_id}")
+}
+
+pub fn split_sequence_key(key: &str) -> Option<(&str, &str)> {
+    key.split_once('|').filter(|(d, v)| !d.is_empty() && !v.is_empty())
+}
+
 /// Rejects keys that are empty, oversized or contain control characters.
 pub fn validate_key(key: &str) -> Result<(), String> {
     if key.trim().is_empty() {
@@ -275,6 +301,16 @@ mod tests {
         assert_eq!(split_link_key(&k), Some(("abc123", ":UAP-GERB")));
         assert_eq!(split_link_key("nopipe"), None);
         assert_eq!(split_link_key("|x"), None);
+    }
+
+    #[test]
+    fn sequence_key_round_trips() {
+        let k = sequence_key(":CS-DSA", "abc123");
+        assert_eq!(k, ":CS-DSA|abc123");
+        assert_eq!(split_sequence_key(&k), Some((":CS-DSA", "abc123")));
+        assert_eq!(split_sequence_key("nopipe"), None);
+        assert_eq!(split_sequence_key("|x"), None);
+        assert_eq!(split_sequence_key("x|"), None);
     }
 
     #[test]

@@ -40,9 +40,14 @@ pub fn get_glossary_drive_links(app: tauri::AppHandle) -> Result<Vec<(String, St
     db::get_glossary_drive_links(&db_path).map_err(|e| e.to_string())
 }
 
-/// The top-level Drives a term can be filed under.
+/// The top-level Drives a term can be filed under. Async on a blocking thread because it's worked
+/// out from every video: a plain (non-async) command runs on the main thread and would freeze the
+/// window for as long as that takes on a big library.
 #[command]
-pub fn get_wdbs_roots(app: tauri::AppHandle) -> Result<Vec<db::WdbsRoot>, String> {
+pub async fn get_wdbs_roots(app: tauri::AppHandle) -> Result<Vec<db::WdbsRoot>, String> {
     let db_path = get_db_path(&app);
-    db::get_wdbs_roots(&db_path).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || db::get_wdbs_roots(&db_path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }

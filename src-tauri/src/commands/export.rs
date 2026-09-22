@@ -1,3 +1,4 @@
+use crate::drive_scope::{root_of_storage, DriveScope, ScopePlan};
 use crate::{db, get_db_path};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -11,6 +12,63 @@ pub struct ExportSummary {
     pub glossary_terms: i64,
     pub biographies: i64,
     pub folder_path: String,
+}
+
+/// What an Obsidian export includes. Everything is on unless turned off.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ObsidianOptions {
+    pub videos: bool,
+    /// The bulk of a note's size; off keeps titles, summaries and tags.
+    pub transcripts: bool,
+    pub glossary: bool,
+    pub biographies: bool,
+    /// Drives to leave out and what to do with what touches them.
+    pub drives: DriveScope,
+}
+
+impl Default for ObsidianOptions {
+    fn default() -> Self {
+        ObsidianOptions { videos: true, transcripts: true, glossary: true, biographies: true, drives: DriveScope::default() }
+    }
+}
+
+/// One Drive as the export pickers list it.
+#[derive(Debug, Serialize)]
+pub struct ExportDrive {
+    /// Display path, e.g. ":UAP" (what an exclusion is given as).
+    pub path: String,
+    pub segment: String,
+    pub alias: Option<String>,
+    /// Videos whose home is in this Drive.
+    pub videos: i64,
+}
+
+/// Every Drive with how many videos live in it, for choosing which to leave out of an export.
+#[command]
+pub async fn get_export_drives(app: AppHandle) -> Result<Vec<ExportDrive>, String> {
+    let db_path = get_db_path(&app);
+    tokio::task::spawn_blocking(move || {
+        let roots = db::get_wdbs_roots(&db_path).map_err(|e| e.to_string())?;
+        let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare("SELECT IFNULL(WDBS, ''), COUNT(*) FROM Videos GROUP BY WDBS").map_err(|e| e.to_string())?;
+        let mut per_root: HashMap<String, i64> = HashMap::new();
+        for (wdbs, n) in stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+        {
+            if let Some(root) = root_of_storage(&wdbs) {
+                *per_root.entry(root).or_default() += n;
+            }
+        }
+        Ok(roots
+            .into_iter()
+            .map(|r| ExportDrive { videos: per_root.get(&r.path).copied().unwrap_or(0), path: r.path, segment: r.segment, alias: r.alias })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn emit_progress(app: &AppHandle, msg: &str) {
@@ -145,6 +203,18 @@ impl LinkResolver {
     }
 }
 
+/// One Drive's Prev/Next around a video, for its "## Sequence" section. `prev`/`next` are the note
+/// basenames to link to; both are always videos that are themselves being exported, since a video
+/// only reaches here by surviving the same scope filtering the sequence it belongs to did.
+struct SequenceLine {
+    /// Display path, e.g. ":CS-DSA".
+    drive: String,
+    position: usize,
+    total: usize,
+    prev: Option<String>,
+    next: Option<String>,
+}
+
 /// The video player, embedded the way YouTube's own "Embed" snippet does it. Obsidian shows it in
 /// reading view and live preview. `None` for an id that doesn't look like a YouTube id, so nothing
 /// odd ever lands in the note's HTML.
@@ -157,7 +227,7 @@ fn youtube_embed(video_id: &str) -> Option<String> {
     })
 }
 
-fn build_video_note(video: &crate::Video, links: &LinkResolver) -> String {
+fn build_video_note(video: &crate::Video, links: &LinkResolver, sequences: Option<&[SequenceLine]>) -> String {
     let tag_list = parse_tags(video.tags.as_deref());
 
     let mut fm = String::from("---\n");
@@ -203,6 +273,15 @@ fn build_video_note(video: &crate::Video, links: &LinkResolver) -> String {
     if !tag_list.is_empty() {
         let links: Vec<String> = tag_list.iter().map(|t| format!("[[{}]]", glossary_note_basename(t))).collect();
         body.push_str(&format!("Tags: {}\n\n", links.join(" ")));
+    }
+    if let Some(lines) = sequences.filter(|l| !l.is_empty()) {
+        body.push_str("## Sequence\n\n");
+        for line in lines {
+            let prev = line.prev.as_deref().map(|b| format!("[[{}]]", b)).unwrap_or_else(|| "—".to_string());
+            let next = line.next.as_deref().map(|b| format!("[[{}]]", b)).unwrap_or_else(|| "—".to_string());
+            body.push_str(&format!("- **{}** ({} of {}) — Prev: {} · Next: {}\n", line.drive, line.position, line.total, prev, next));
+        }
+        body.push('\n');
     }
 
     let has_summary = video.has_summary.unwrap_or(false);
@@ -294,9 +373,15 @@ pub(crate) fn unique_vault_path(chosen: &Path) -> PathBuf {
 
 /// Writes the vault into `root` (the folder is created; callers pass a path that doesn't exist yet,
 /// see `unique_vault_path`).
-fn run_export(
+#[cfg(test)]
+fn run_export(db_path: &str, root: &Path, on_progress: impl FnMut(&str)) -> Result<ExportSummary, String> {
+    run_export_with(db_path, root, &ObsidianOptions::default(), on_progress)
+}
+
+fn run_export_with(
     db_path: &str,
     root: &Path,
+    options: &ObsidianOptions,
     mut on_progress: impl FnMut(&str),
 ) -> Result<ExportSummary, String> {
     // The folder names follow the workspace's aliases (e.g. "Portal", "Thesaurus", "Creators"); they're
@@ -309,11 +394,53 @@ fn run_export(
         names["aliasDriveName"].clone(),
     );
     on_progress("Reading library...");
-    let (videos, _total) = db::list_videos(db_path, None, None, None, i64::MAX, 0, true).map_err(|e| e.to_string())?;
+    let (mut videos, _total) = db::list_videos(db_path, None, None, None, i64::MAX, 0, true).map_err(|e| e.to_string())?;
     let wdbs_tree = db::get_wdbs_tree(db_path).map_err(|e| e.to_string())?;
-    let links = db::get_all_video_wdbs_links(db_path).map_err(|e| e.to_string())?;
-    let glossary_terms = db::get_glossary_terms(db_path).map_err(|e| e.to_string())?;
-    let biographies = db::get_all_biographies_for_export(db_path).map_err(|e| e.to_string())?;
+    let mut links = db::get_all_video_wdbs_links(db_path).map_err(|e| e.to_string())?;
+    // Every Drive's sequence, still in each drive's stored order — grouped into per-video Prev/Next
+    // below, once scope filtering has settled which videos and Drives actually survive the export.
+    let mut drive_sequences = db::get_all_drive_sequences(db_path).map_err(|e| e.to_string())?;
+    let mut glossary_terms = db::get_glossary_terms(db_path).map_err(|e| e.to_string())?;
+    let mut glossary_drive_links = db::get_glossary_drive_links(db_path).map_err(|e| e.to_string())?;
+    let mut biographies = db::get_all_biographies_for_export(db_path).map_err(|e| e.to_string())?;
+
+    // What the user chose to include. A link to something that isn't exported becomes plain text
+    // by itself (the resolver below only knows what is written), so nothing else is needed for those.
+    if !options.videos {
+        videos.clear();
+        links.clear();
+        drive_sequences.clear();
+    }
+    if !options.transcripts {
+        for v in &mut videos {
+            v.transcript = None;
+            v.has_transcript = Some(false);
+        }
+    }
+    if !options.glossary {
+        glossary_terms.clear();
+        glossary_drive_links.clear();
+    }
+    if !options.biographies {
+        biographies.clear();
+    }
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
+    if let Some(scope) = ScopePlan::build(&conn, &options.drives)? {
+        videos.retain(|v| scope.video_kept(&v.id));
+        for v in &mut videos {
+            if let Some(home) = scope.new_home(&v.id) {
+                v.wdbs = Some(home.to_string());
+            }
+        }
+        links.retain(|(id, wdbs)| scope.link_kept(id, wdbs));
+        // A dropped video loses its place; a video kept under a dropped Drive simply isn't
+        // sequenced there any more (its Prev/Next in that Drive close around the gap it leaves).
+        drive_sequences.retain(|(drive, id)| scope.video_kept(id) && scope.category_kept(drive));
+        glossary_terms.retain(|(term, _)| scope.term_kept(term));
+        glossary_drive_links.retain(|(term, root)| scope.term_kept(term) && scope.root_kept(root));
+        biographies.retain(|b| scope.handle_kept(&b.handle));
+    }
+    drop(conn);
 
     let mut node_map: HashMap<String, &db::WdbsNode> = HashMap::new();
     flatten_wdbs_tree(&wdbs_tree, &mut node_map);
@@ -324,7 +451,18 @@ fn run_export(
     let glossary_root = root.join(sanitize_path_component(&glossary_name, 60));
     let biography_root = root.join(sanitize_path_component(&biography_name, 60));
 
-    for dir in [&videos_root, &unsorted_root, &glossary_root, &biography_root] {
+    // Only the folders for what is being exported.
+    let mut wanted = vec![&videos_root, &unsorted_root];
+    if options.glossary {
+        wanted.push(&glossary_root);
+    }
+    if options.biographies {
+        wanted.push(&biography_root);
+    }
+    if !options.videos {
+        wanted.retain(|d| **d != videos_root && **d != unsorted_root);
+    }
+    for dir in wanted {
         fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
     }
 
@@ -340,6 +478,34 @@ fn run_export(
             .collect(),
         videos: basename_by_id.clone(),
     };
+
+    // Prev/Next per Drive a video is sequenced in. `drive_sequences` is already grouped by Drive
+    // (its SQL order) and scope-filtered above, so each Drive's remaining videos, in order, are
+    // exactly what that Drive's Prev/Next should walk — no separate query per video.
+    let mut sequence_by_video: HashMap<String, Vec<SequenceLine>> = HashMap::new();
+    {
+        let mut i = 0;
+        while i < drive_sequences.len() {
+            let drive = drive_sequences[i].0.clone();
+            let mut j = i;
+            while j < drive_sequences.len() && drive_sequences[j].0 == drive {
+                j += 1;
+            }
+            let ids: Vec<&String> = drive_sequences[i..j].iter().map(|(_, id)| id).collect();
+            let total = ids.len();
+            for (idx, id) in ids.iter().enumerate() {
+                let basename_of = |k: usize| basename_by_id.get(ids[k]).cloned();
+                sequence_by_video.entry((*id).clone()).or_default().push(SequenceLine {
+                    drive: drive.clone(),
+                    position: idx + 1,
+                    total,
+                    prev: idx.checked_sub(1).and_then(basename_of),
+                    next: idx.checked_add(1).filter(|&k| k < total).and_then(basename_of),
+                });
+            }
+            i = j;
+        }
+    }
 
     let total = videos.len();
     on_progress(&format!("Exporting {} videos...", total));
@@ -358,7 +524,8 @@ fn run_export(
         };
         fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
         let file_path = dir.join(format!("{}.md", basename));
-        fs::write(&file_path, build_video_note(video, &resolver)).map_err(|e| format!("Failed to write {}: {}", file_path.display(), e))?;
+        let sequences = sequence_by_video.get(&video.id).map(Vec::as_slice);
+        fs::write(&file_path, build_video_note(video, &resolver, sequences)).map_err(|e| format!("Failed to write {}: {}", file_path.display(), e))?;
 
         if i % 10 == 0 || i + 1 == total {
             on_progress(&format!("Exporting videos ({}/{})...", i + 1, total));
@@ -389,7 +556,7 @@ fn run_export(
     // drives in frontmatter; "By <Drive>" index notes then group the same terms per drive.
     let mut drives_by_term: HashMap<String, Vec<String>> = HashMap::new();
     let mut terms_by_drive: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (term, root) in db::get_glossary_drive_links(db_path).map_err(|e| e.to_string())? {
+    for (term, root) in glossary_drive_links {
         let label = drive_root_label(&root, &node_map);
         drives_by_term.entry(term.clone()).or_default().push(label.clone());
         terms_by_drive.entry(label).or_default().push(term);
@@ -452,10 +619,12 @@ fn run_export(
 pub async fn export_to_obsidian(
     app: AppHandle,
     vault_path: String,
+    options: Option<ObsidianOptions>,
 ) -> Result<ExportSummary, String> {
     let db_path = get_db_path(&app);
     let root = unique_vault_path(Path::new(&vault_path));
-    run_export(&db_path, &root, |msg| emit_progress(&app, msg))
+    let options = options.unwrap_or_default();
+    run_export_with(&db_path, &root, &options, |msg| emit_progress(&app, msg))
 }
 
 #[cfg(test)]
@@ -705,5 +874,167 @@ mod tests {
 
         fs::remove_dir_all(&work_dir).ok();
         fs::remove_dir_all(&out_dir).ok();
+    }
+
+    fn files_under(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn leaving_a_drive_out_and_choosing_what_to_include() {
+        use crate::drive_scope::TermsMode;
+        let work_dir = temp_dir("scope");
+        let db_path = work_dir.join("test.db").to_string_lossy().to_string();
+        db::init_db(&db_path).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for (path, lev, id) in [(":UAP", 1, "UAP"), (":UAP-GERB", 2, "GERB"), (":FIN", 1, "FIN")] {
+            conn.execute("INSERT OR IGNORE INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon, WDDefault) VALUES (?1, ?2, ?3, '', '', 0)", rusqlite::params![path, lev, id]).unwrap();
+        }
+        let mention = "See [a1](kinesis://video/a1) and [only](kinesis://glossary/OnlyUap) and [both](kinesis://glossary/Both).";
+        for (id, wdbs, handle, summary) in [
+            ("a1", "θψUAP_GERB", "@uapguy", ""),
+            ("f1", "θψFIN", "@fingal", mention),
+            ("m1", "θψUAP_GERB", "@mixed", ""),
+        ] {
+            conn.execute(
+                "INSERT INTO Videos (video_id, title, author, handle, length_seconds, transcript, summary, view_count, published_at, tags, WDBS)
+                 VALUES (?1, ?1, 'A', ?2, 60, 'the transcript words', ?3, 1, '2024-01-01', '', ?4)",
+                rusqlite::params![id, handle, summary, wdbs],
+            )
+            .unwrap();
+        }
+        conn.execute("INSERT INTO VideoWDBSLinks (video_id, wdbs) VALUES ('m1', 'θψFIN')", []).unwrap();
+        for (term, drives) in [("OnlyUap", ":UAP"), ("Both", ":UAP\n:FIN")] {
+            conn.execute("INSERT INTO Glossary (term, definition, drives) VALUES (?1, 'defined', ?2)", rusqlite::params![term, drives]).unwrap();
+        }
+        for handle in ["@uapguy", "@fingal", "@mixed"] {
+            conn.execute("INSERT INTO Biographies (handle, display_name, bio) VALUES (?1, ?1, 'bio')", [handle]).unwrap();
+        }
+        drop(conn);
+        let read = |root: &Path, name: &str| fs::read_to_string(root.join(name)).unwrap();
+        let has = |files: &[String], needle: &str| files.iter().any(|f| f.contains(needle));
+
+        // Leave :UAP out (defaults: keep its terms, keep linked videos, links in text become plain text).
+        let out = temp_dir("scope_out");
+        let opts = ObsidianOptions { drives: DriveScope { excluded: vec![":UAP".into()], ..DriveScope::default() }, ..ObsidianOptions::default() };
+        let summary = run_export_with(&db_path, &out.join("V"), &opts, |_| {}).unwrap();
+        let root = out.join("V");
+        let files = files_under(&root);
+        assert!(!has(&files, "a1 (a1)"), "{files:?}");
+        assert!(has(&files, "f1 (f1).md"), "{files:?}");
+        assert_eq!((summary.videos_exported, summary.glossary_terms, summary.biographies), (2, 2, 2), "{files:?}");
+        // m1 moved to :FIN; its note is a real note, not overwritten by a "See:" stub for the same place.
+        let m1 = files.iter().find(|f| f.ends_with("m1 (m1).md")).expect("m1 is exported");
+        assert!(m1.contains("FIN"), "{m1}");
+        assert!(read(&root, m1).contains("video_id: m1"), "{}", read(&root, m1));
+        assert!(!has(&files, "UAP"), "nothing of the left-out Drive: {files:?}");
+        // The term filed only under :UAP stays, without the Drive; the mixed one keeps :FIN.
+        assert!(!read(&root, "Glossary/OnlyUap.md").contains("drives:"));
+        assert!(read(&root, "Glossary/Both.md").contains("drives: [\"FIN\"]"));
+        assert!(!has(&files, "Biography/@uapguy"), "{files:?}");
+        let f1 = files.iter().find(|f| f.ends_with("f1 (f1).md")).unwrap();
+        let note = read(&root, f1);
+        assert!(note.contains("See a1 and [[OnlyUap|only]] and [[Both|both]]."), "{note}");
+
+        // Dropping terms filed only under a left-out Drive, and not moving linked videos.
+        let out2 = temp_dir("scope_out2");
+        let opts = ObsidianOptions {
+            drives: DriveScope { excluded: vec![":UAP".into()], terms: TermsMode::Drop, keep_linked_videos: false, ..DriveScope::default() },
+            ..ObsidianOptions::default()
+        };
+        run_export_with(&db_path, &out2.join("V"), &opts, |_| {}).unwrap();
+        let files = files_under(&out2.join("V"));
+        assert!(!has(&files, "m1 (m1)") && !has(&files, "OnlyUap.md") && has(&files, "Glossary/Both.md"), "{files:?}");
+
+        // A video based only in the left-out Drive can stay, uncategorized (it goes to _Unsorted).
+        let out5 = temp_dir("scope_out5");
+        let opts = ObsidianOptions {
+            drives: DriveScope { excluded: vec![":UAP".into()], keep_unlinked_videos: true, ..DriveScope::default() },
+            ..ObsidianOptions::default()
+        };
+        run_export_with(&db_path, &out5.join("V"), &opts, |_| {}).unwrap();
+        let files = files_under(&out5.join("V"));
+        assert!(files.iter().any(|f| f.contains("_Unsorted/") && f.ends_with("a1 (a1).md")), "{files:?}");
+        assert!(!has(&files, "UAP"), "{files:?}");
+
+        // Choosing sections: no videos, no glossary, no folders for them.
+        let out3 = temp_dir("scope_out3");
+        let opts = ObsidianOptions { videos: false, glossary: false, ..ObsidianOptions::default() };
+        run_export_with(&db_path, &out3.join("V"), &opts, |_| {}).unwrap();
+        let files = files_under(&out3.join("V"));
+        assert!(files.iter().all(|f| f.starts_with("Biography/")), "{files:?}");
+        assert!(!out3.join("V").join("Glossary").exists() && !out3.join("V").join("Library").exists());
+
+        // No transcripts: the notes keep everything else.
+        let out4 = temp_dir("scope_out4");
+        let opts = ObsidianOptions { transcripts: false, ..ObsidianOptions::default() };
+        run_export_with(&db_path, &out4.join("V"), &opts, |_| {}).unwrap();
+        let f1 = files_under(&out4.join("V")).into_iter().find(|f| f.ends_with("f1 (f1).md")).unwrap();
+        let note = read(&out4.join("V"), &f1);
+        assert!(!note.contains("## Transcript") && note.contains("## Summary"), "{note}");
+    }
+
+    #[test]
+    fn a_sequences_prev_next_line_appears_per_drive_and_closes_around_a_dropped_video() {
+        let work_dir = temp_dir("seq");
+        let db_path = work_dir.join("test.db").to_string_lossy().to_string();
+        db::init_db(&db_path).unwrap();
+        for id in ["v1", "v2", "v3"] {
+            db::save_video(&db_path, id, id, "Author", 60, "words", 1, "2026-01-02T00:00:00Z", "@auth", None).unwrap();
+        }
+        // v1, v2 also share a second, unrelated sequence under :FIN, exercising more than one line.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO DriveSequence (drive, video_id, position) VALUES (':UAP', 'v1', 1), (':UAP', 'v2', 2), (':UAP', 'v3', 3), (':FIN', 'v1', 1), (':FIN', 'v2', 2)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let out = temp_dir("seq_out");
+        run_export(&db_path, &out.join("V"), |_| {}).unwrap();
+        let root = out.join("V");
+        let v1 = fs::read_to_string(root.join("Library/_Unsorted/v1 (v1).md")).unwrap();
+        let v2 = fs::read_to_string(root.join("Library/_Unsorted/v2 (v2).md")).unwrap();
+        let v3 = fs::read_to_string(root.join("Library/_Unsorted/v3 (v3).md")).unwrap();
+
+        // First in :UAP: no Prev; also 1 of 2 in :FIN, one line per Drive.
+        assert!(v1.contains("- **:UAP** (1 of 3) — Prev: — · Next: [[v2 (v2)]]"), "{v1}");
+        assert!(v1.contains("- **:FIN** (1 of 2) — Prev: — · Next: [[v2 (v2)]]"), "{v1}");
+        // Middle of :UAP, last of :FIN: both neighbors in one Drive, no Next in the other.
+        assert!(v2.contains("- **:UAP** (2 of 3) — Prev: [[v1 (v1)]] · Next: [[v3 (v3)]]"), "{v2}");
+        assert!(v2.contains("- **:FIN** (2 of 2) — Prev: [[v1 (v1)]] · Next: —"), "{v2}");
+        // Last of :UAP, not in :FIN at all: exactly one line.
+        assert!(v3.contains("- **:UAP** (3 of 3) — Prev: [[v2 (v2)]] · Next: —"), "{v3}");
+        assert_eq!(v3.matches("## Sequence").count(), 1);
+        assert!(!v3.contains(":FIN"), "{v3}");
+
+        // Dropping v2 out of the library entirely closes the gap: v1 and v3 become each other's
+        // neighbors in :UAP, and :FIN (now down to one video) still gets a line, just with no Next.
+        let dropped = temp_dir("seq_out_dropped");
+        rusqlite::Connection::open(&db_path).unwrap().execute("DELETE FROM Videos WHERE video_id = 'v2'", []).unwrap();
+        run_export(&db_path, &dropped.join("V"), |_| {}).unwrap();
+        let v1_after = fs::read_to_string(dropped.join("V/Library/_Unsorted/v1 (v1).md")).unwrap();
+        let v3_after = fs::read_to_string(dropped.join("V/Library/_Unsorted/v3 (v3).md")).unwrap();
+        assert!(v1_after.contains("- **:UAP** (1 of 2) — Prev: — · Next: [[v3 (v3)]]"), "{v1_after}");
+        assert!(v1_after.contains("- **:FIN** (1 of 1) — Prev: — · Next: —"), "{v1_after}");
+        assert!(v3_after.contains("- **:UAP** (2 of 2) — Prev: [[v1 (v1)]] · Next: —"), "{v3_after}");
+
+        fs::remove_dir_all(&work_dir).ok();
+        fs::remove_dir_all(&out).ok();
+        fs::remove_dir_all(&dropped).ok();
     }
 }

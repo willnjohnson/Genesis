@@ -561,18 +561,24 @@ function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowD
                     )}
                 </div>
 
-                {onDelete && allowDeletion && (
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onDelete(video);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-[#3f3f3f] rounded-full transition-all text-white self-start hover:cursor-pointer z-10"
-                        title="Remove"
-                    >
-                        <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                )}
+                {/* A fixed-width slot, present whether or not the button inside it is — allowDeletion
+                    (allowDeletionLibrary) can flip for the whole grid at once (e.g. Read-only), and
+                    without this every card's title reflows to fill the space the button leaves
+                    behind, which reads as every title's wrapping changing for no reason. */}
+                <div className="w-7 shrink-0 self-start">
+                    {onDelete && allowDeletion && (
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onDelete(video);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-[#3f3f3f] rounded-full transition-all text-white hover:cursor-pointer z-10"
+                            title="Remove"
+                        >
+                            <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                    )}
+                </div>
             </div>
         </div>
     );

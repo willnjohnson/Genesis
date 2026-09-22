@@ -8,6 +8,12 @@
 
 // One `key: default,` per line. Keep this block simple: the Rust test parses it.
 export const FLAG_DEFAULTS = {
+    // Read-only master switch: forces every content-editing flag below off (see the
+    // READ_ONLY_OVERRIDE list and applyRules further down) without touching what's actually
+    // stored, so turning it back off restores whatever fine-grained permissions were configured.
+    // Doesn't touch app-level settings (workspace rename, sync, DB location, themes, custom
+    // prompts) — those aren't "the workspace's data".
+    workspaceReadOnly: false,
     // Main views
     showSearch: true,
     showLibrary: true,
@@ -35,11 +41,15 @@ export const FLAG_DEFAULTS = {
     showSimilarVideos: true,
     showAttachments: true,
     editAttachments: true,
-    allowEditTags: true,
+    allowEditTermsAndTags: true,
     allowEditSummary: true,
     allowEditTranscript: true,
     allowEditTranscriptOnNA: true,
-    allowEditWDBS: false,
+    allowEditWDBS: true,
+    allowEditDriveLinking: true,
+    showSequences: true,
+    allowEditSequences: true,
+    allowEditVideosInSequenceList: true,
     showCustomPrompt: true,
     setTranscriptAfterSummarizeToNA: false,
     // AI summarize and image tools
@@ -90,6 +100,18 @@ export type Flags = { [K in Exclude<FlagKey, 'defaultView'>]: boolean } & { defa
 export const FLAG_KEYS = Object.keys(FLAG_DEFAULTS) as FlagKey[];
 
 const VIEW_ORDER: ViewName[] = ['search', 'library', 'glossary', 'biography'];
+
+// Every flag `workspaceReadOnly` forces off — everything that changes the workspace's saved
+// content. Also exactly what settings/PermissionsPanel.tsx lists as individually toggleable
+// (its "Content editing only" scope), so the two stay in step by construction: this is the one
+// place either of them reads from. Deliberately excludes app-level settings (workspace rename,
+// sync, DB location, Ollama setup, custom prompts, custom themes).
+export const READ_ONLY_OVERRIDE_KEYS: readonly FlagKey[] = [
+    'allowClearHistory', 'allowSaveToLibrary', 'allowSaveAll', 'allowDeletionLibrary', 'allowSummarizeAll',
+    'editAttachments', 'allowEditTermsAndTags', 'allowEditSummary', 'allowEditTranscript', 'allowEditTranscriptOnNA',
+    'allowEditWDBS', 'allowEditDriveLinking', 'allowEditSequences', 'allowEditVideosInSequenceList',
+    'allowModificationGlossary', 'allowEditBio',
+];
 
 export function parseBool(value: string | null | undefined, fallback: boolean): boolean {
     switch ((value ?? '').trim().toLowerCase()) {
@@ -166,6 +188,13 @@ export function applyRules(f: Flags): ResolvedFlags {
         if (viewVisible[preferred]) return preferred;
         return VIEW_ORDER.find(v => viewVisible[v]) ?? 'library';
     };
+    // Forces every content-editing flag off without touching what's actually stored in `f` — a
+    // Partial so this only ever overrides, never has to repeat the "leave it alone" branch for
+    // every key. Built from f (the stored values), not the object below, so it isn't shadowed by
+    // whatever those keys already resolved to.
+    const readOnlyOverride: Partial<Flags> = f.workspaceReadOnly
+        ? Object.fromEntries(READ_ONLY_OVERRIDE_KEYS.map(key => [key, false]))
+        : {};
     return {
         ...f,
         viewVisible,
@@ -173,9 +202,14 @@ export function applyRules(f: Flags): ResolvedFlags {
         exportObsidianVisible,
         exportSyncDataVisible,
         settingsVisible: f.showSettings && Object.values(tabVisible).some(Boolean),
-        saveAllAllowed: f.allowSaveAll && f.allowSaveToLibrary,
+        // Derived from f (the stored values) like the rest of this object, so it needs its own
+        // check: readOnlyOverride can't carry it (saveAllAllowed isn't a stored flag), but it must
+        // still go false when Read-only forces allowSaveAll/allowSaveToLibrary off below.
+        saveAllAllowed: !f.workspaceReadOnly && f.allowSaveAll && f.allowSaveToLibrary,
         glossaryDriveFilterVisible: f.showDrive && f.showGlossaryDriveFilter,
         glossaryDrivePickerVisible: f.showDrive,
         pickView,
+        // Spread last: overrides every content-editing flag above (from `...f`) when Read-only is on.
+        ...readOnlyOverride,
     };
 }

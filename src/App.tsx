@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
-    getApiKey, getKeyStatus, getSetting, openExternalUrl, bulkUpdateVideoWdbs,
+    getApiKey, getKeyStatus, getSetting, openExternalUrl, bulkUpdateVideoWdbs, addToDriveSequence,
     type Video, type BiographyEntry, saveTags, getBiography,
     getVideoById, getGlossaryTerms, getWdbsTree, decodeWdbs, type WdbsNode,
 } from "./api";
@@ -228,15 +228,19 @@ function App() {
     useEffect(() => {
         if (!showDrive) setShowDrivePanel(false);
     }, [showDrive]);
+    // What Bulk Assign Mode can do: assign a Drive (allowEditWDBS) and/or add to a Drive's sequence.
+    // The whole mode is hidden outright when allowEditDriveLinking is off, regardless of either.
+    const canBulkSequence = showDrive && flags.showSequences && flags.allowEditSequences;
+    const canBulkAssign = showDrive && flags.allowEditDriveLinking && (allowEditWDBS || canBulkSequence);
     useEffect(() => {
-        if (!showDrive || !allowEditWDBS) {
+        if (!canBulkAssign) {
             // Bulk Assign Mode's toggle button disappears when editing is disabled: exit the mode
             // too so the grid doesn't stay stuck in bulk-select with no visible way out.
             setBulkAssignMode(false);
             setBulkSelectedIds(new Set());
             setBulkAssignMenu(null);
         }
-    }, [showDrive, allowEditWDBS]);
+    }, [canBulkAssign]);
 
     useEffect(() => {
         // Which database is open is the workspace's business (see WorkspaceGate): by the time this
@@ -293,6 +297,13 @@ function App() {
     }, []);
 
     useEffect(() => { loadDisplay(); }, [loadDisplay]);
+
+    // The vertical rail's width, published as a CSS variable rather than threaded down as a prop:
+    // a true `fixed` element anywhere in the tree (like AlphabetJumpNav's bottom bar) can stay clear
+    // of the rail with plain CSS, without every such element needing to know navigationOrientation.
+    useEffect(() => {
+        document.documentElement.style.setProperty('--k-rail-width', navigationOrientation === 'vertical' ? '4rem' : '0px');
+    }, [navigationOrientation]);
 
     // Everything a sync (or pack import) can change that App holds in memory: enforced flags, the
     // theme, the license-backed key status, and the content itself.
@@ -604,6 +615,38 @@ function App() {
         }
     }, [bulkAssignMenu, library, setNotification]);
 
+    // Adds the selection to a Drive's sequence in the order the grid shows it (so sorting the grid by
+    // date, then selecting a range, gives a chronological sequence), not the order they were clicked.
+    const handleBulkAddToSequence = useCallback(async (drive: string) => {
+        if (!bulkAssignMenu) return;
+        setBulkAssigning(true);
+        setBulkAssignError(null);
+        try {
+            const shown = new Map(displayedVideos.map((v, i) => [v.id, i]));
+            const ids = [...bulkAssignMenu.videoIds].sort((a, b) => (shown.get(a) ?? Infinity) - (shown.get(b) ?? Infinity));
+            const out = await addToDriveSequence(drive, ids);
+            const name = drive.trim().toUpperCase();
+            const skipped = [
+                out.alreadyIn > 0 ? `${out.alreadyIn} already in it` : '',
+                out.notInDrive > 0 ? `${out.notInDrive} not filed under ${name}` : '',
+            ].filter(Boolean).join(', ');
+            if (out.added === 0) {
+                setBulkAssignError(`Nothing added${skipped ? `: ${skipped}` : ''}.`);
+            } else {
+                setNotification({
+                    message: `Added ${out.added} video${out.added === 1 ? '' : 's'} to the ${name} sequence${skipped ? `; ${skipped}` : ''}.`,
+                    type: skipped ? "info" : "success",
+                });
+                setBulkSelectedIds(new Set());
+                setBulkAssignMenu(null);
+            }
+        } catch (e: any) {
+            setBulkAssignError(typeof e === "string" ? e : e?.message ?? "Couldn't add to the sequence.");
+        } finally {
+            setBulkAssigning(false);
+        }
+    }, [bulkAssignMenu, displayedVideos, setNotification]);
+
     // "No videos are tagged under X yet" is only true when the category itself is being shown
     // unfiltered — with a search or filter (transcript/summary) active, the category can easily
     // be non-empty while still returning zero results for that combination, so the message needs
@@ -851,11 +894,12 @@ function App() {
                     </div>
                 )}
 
-                <div className="mt-8">
+                <div className="mt-4">
                      {viewMode === 'glossary' ? (
                          <GlossaryView
                              searchQuery={glossarySearchQuery}
                              onSearchInLibrary={handleSearchInLibrary}
+                             onOpenVideo={handleSelectVideo}
                              allowModification={allowModificationGlossary}
                          />
                      ) : viewMode === 'biography' ? (
@@ -906,7 +950,7 @@ function App() {
                                         allowEditAlias={allowEditWDBS}
                                         clearNavRail={navigationOrientation === 'vertical'}
                                     />
-                                    {allowEditWDBS && (
+                                    {canBulkAssign && (
                                         <button
                                             onClick={() => setBulkAssignMode(prev => {
                                                 const next = !prev;
@@ -914,7 +958,7 @@ function App() {
                                                 return next;
                                             })}
                                             className={`mt-3 w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${bulkAssignMode ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
-                                            title={`Select videos, then right-click to assign them to a ${labels.aliasDriveName} category`}
+                                            title={`Select videos, then right-click to ${allowEditWDBS ? `assign them to a ${labels.aliasDriveName} category` : ''}${allowEditWDBS && canBulkSequence ? ' or ' : ''}${canBulkSequence ? 'add them to a sequence' : ''}`}
                                         >
                                             <MousePointerClick className="w-3.5 h-3.5" />
                                             {bulkAssignMode ? `Bulk Assign Mode (${bulkSelectedIds.size} selected)` : "Bulk Assign Mode"}
@@ -960,6 +1004,10 @@ function App() {
                             y={bulkAssignMenu.y}
                             count={bulkAssignMenu.videoIds.length}
                             onAssign={handleBulkAssign}
+                            canAssignDrive={allowEditWDBS}
+                            canAddToSequence={canBulkSequence}
+                            defaultSequenceDrive={library.wdbsFilter ? decodeWdbs(library.wdbsFilter).toUpperCase() : ''}
+                            onAddToSequence={handleBulkAddToSequence}
                             onClose={() => { setBulkAssignMenu(null); setBulkAssignError(null); }}
                             assigning={bulkAssigning}
                             error={bulkAssignError}
@@ -1009,6 +1057,7 @@ function App() {
                 }}
                 onWdbsChanged={() => setDriveVersion(v => v + 1)}
                 onSelectDrive={showDrive ? goToLibraryDrive : undefined}
+                driveContext={library.wdbsFilter}
                 onVideoSelect={handleSelectVideo}
             />
 
@@ -1073,6 +1122,7 @@ function App() {
                         setLinkedTerm(null);
                         handleSearchInLibrary(term, mode);
                     }}
+                    onOpenVideo={video => handleSelectVideo(video)}
                 />
             )}
 
@@ -1093,7 +1143,14 @@ function App() {
             )}
 
             <button
-                onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+                // Not "smooth": VideoList's rows are window-virtualized (useWindowVirtualizer)
+                // with an *estimated* row height. A multi-frame smooth scroll gives it time to
+                // swap in newly-visible rows mid-animation and correct that estimate, which
+                // shifts the page's total height while the browser's scroll animation is still
+                // computing against the original one — the scroll can end up landing wherever
+                // that shifting layout leaves it, well short of 0. A single instant jump happens
+                // before the virtualizer gets a chance to do that.
+                onClick={() => window.scrollTo({ top: 0, behavior: "auto" })}
                 className={`fixed bottom-12 right-6 p-3 bg-red-600 hover:bg-red-500 text-white rounded-full shadow-lg transition-opacity duration-200 cursor-pointer z-39 active:scale-95 ${showScrollTop ? "opacity-100" : "opacity-0 pointer-events-none"}`}
                 title="Back to Top"
             >

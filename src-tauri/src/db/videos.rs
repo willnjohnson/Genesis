@@ -402,6 +402,8 @@ pub fn update_video_wdbs(db_path: &str, video_id: &str, encoded_wdbs: &str) -> R
         "UPDATE Videos SET WDBS = ?1 WHERE video_id = ?2",
         params![encoded_wdbs, video_id],
     )?;
+    // Leaving a Drive takes the video out of that Drive's sequence.
+    super::sequences::prune_video_memberships(db_path, video_id);
     Ok(())
 }
 

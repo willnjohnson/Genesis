@@ -1,4 +1,4 @@
-import { Cpu, ArrowRight, FolderTree } from "lucide-react";
+import { Cpu, ArrowRight } from "lucide-react";
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -7,7 +7,6 @@ import {
     getOllamaPrompt, setOllamaPrompt as saveOllamaPrompt,
     getKeyStatus,
 } from "../../api";
-import { useWorkspace } from "../../hooks/useWorkspace";
 import { useLockedSettings, LOCKED_TITLE } from "../../hooks/useLockedSettings";
 import { useFlags } from "../../hooks/useFlags";
 import { PromptEditor, DefaultBadge, TooltipLightbulb } from "./pluginShared";
@@ -212,58 +211,6 @@ function VeniceSubTab({ summarizeProvider, onSetDefault, onOpenVeniceSettings }:
     );
 }
 
-// ─── Warp Drive editing toggle ────────────────────────────────────────────────
-
-// Self-contained (loads/saves its own setting directly) rather than threaded through
-// SettingsModal's props, mirroring the "Clear Transcript After Summarizing" toggle above.
-// Gates the pencil/"Also in" editing controls in Sidebar.tsx's Warp Drive section — off by
-// default (see schema.rs's "allowEditWDBS" seed value) since taxonomy edits are eventually meant
-// to be restricted to IKLAO Admin Users once the IKLAO Cloud is stood up, but there's no such
-// auth yet, so this is how to turn editing on in the meantime.
-function WarpDriveSection() {
-    const { labels } = useWorkspace();
-    const [allowEdit, setAllowEdit] = useState(false);
-    const isLocked = useLockedSettings();
-    const locked = isLocked('allowEditWDBS');
-
-    useEffect(() => {
-        getSetting('allowEditWDBS').then(v => setAllowEdit(v === 'true'));
-    }, []);
-
-    const toggle = async () => {
-        if (locked) return;
-        const next = !allowEdit;
-        setAllowEdit(next);
-        await setSetting('allowEditWDBS', next.toString());
-    };
-
-    return (
-        <div className="bg-[#121212] border border-[#303030] rounded-xl p-5 hover:border-[#404040] transition-all">
-            <div className="flex items-start justify-between">
-                <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                        <div className="p-2 text-gray-400"><FolderTree className="w-4 h-4" /></div>
-                        <h4 className="text-sm font-bold text-white">{labels.aliasDriveName} Editing</h4>
-                    </div>
-                    <p className="text-[11px] text-[#aaaaaa] leading-relaxed max-w-sm">
-                        Lets you assign, change, and symlink a saved video's {labels.aliasDriveName} designator from its detail panel. Off by default.
-                    </p>
-                </div>
-                <div className="ml-6 shrink-0">
-                    <button
-                        onClick={toggle}
-                        disabled={locked}
-                        title={locked ? LOCKED_TITLE : undefined}
-                        className={allowEdit ? settingsSecondaryBtn : settingsPrimaryBtn}
-                    >
-                        {allowEdit ? 'Disable' : 'Enable'}
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-}
-
 // ─── Plugin card wrapper ──────────────────────────────────────────────────────
 
 interface Plugin {
@@ -320,7 +267,6 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
                     Extend the app with modular functionalities powered by external services.
                 </p>
                 <div className="space-y-4">
-                    <WarpDriveSection />
                     {plugins.map(plugin => (
                         <div key={plugin.id} className="bg-[#121212] border border-[#303030] rounded-xl p-5 hover:border-[#404040] transition-all">
                             <div className="flex items-start justify-between">

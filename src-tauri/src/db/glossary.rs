@@ -31,6 +31,19 @@ fn normalize_roots(roots: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// `Glossary.drives`' on-disk encoding: newline-joined roots, '' meaning uncategorized. A root
+/// can't itself contain a newline (or any control character — see `is_root_path`), so '\n' is an
+/// unambiguous separator. Same shape the sync/export layer already reads (see
+/// kinesis-sync-proto/src/sqlite.rs's `GlossaryData`), so nothing downstream of that needs to
+/// change even though this used to come from a join table.
+fn encode_drives(roots: &[String]) -> String {
+    roots.join("\n")
+}
+
+fn decode_drives(raw: &str) -> Vec<String> {
+    raw.split('\n').filter(|r| !r.is_empty()).map(str::to_string).collect()
+}
+
 pub fn add_glossary_term(db_path: &str, term: &str, definition: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(
@@ -53,11 +66,8 @@ pub fn get_glossary_terms(db_path: &str) -> Result<Vec<(String, String)>> {
 }
 
 pub fn delete_glossary_term(db_path: &str, term: &str) -> Result<()> {
-    let mut conn = Connection::open(db_path)?;
-    let tx = conn.transaction()?;
-    tx.execute("DELETE FROM Glossary WHERE term = ?", params![term])?;
-    tx.execute("DELETE FROM GlossaryDrives WHERE term = ?", params![term])?;
-    tx.commit()?;
+    let conn = Connection::open(db_path)?;
+    conn.execute("DELETE FROM Glossary WHERE term = ?", params![term])?;
     // Links to a term that no longer exists are dropped, leaving their text.
     if let Err(e) = super::links::apply_link_edits(db_path, &[super::links::LinkEdit::Unlink(super::links::LinkKind::Glossary, term.to_string())]) {
         log::warn!("Couldn't remove links to deleted term {term}: {e}");
@@ -65,38 +75,40 @@ pub fn delete_glossary_term(db_path: &str, term: &str) -> Result<()> {
     Ok(())
 }
 
-/// Every (term, root) assignment, for terms that still exist.
+/// Every (term, root) assignment, for terms that still exist — the same flat (term, root) pairs
+/// callers (sync, export, the UI) already expect, just read from Glossary.drives now instead of a
+/// join table. A term with an empty definition (a Quick Tag) or an empty `drives` never appears.
 pub fn get_glossary_drive_links(db_path: &str) -> Result<Vec<(String, String)>> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare(
-        "SELECT d.term, d.root FROM GlossaryDrives d
-         JOIN Glossary g ON g.term = d.term
-         ORDER BY d.root COLLATE NOCASE, d.term COLLATE NOCASE",
-    )?;
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    let mut stmt = conn.prepare("SELECT term, drives FROM Glossary WHERE drives != ''")?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let term: String = row.get(0)?;
+        let drives: String = row.get(1)?;
+        for root in decode_drives(&drives) {
+            out.push((term.clone(), root));
+        }
+    }
+    out.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    Ok(out)
 }
 
 /// Replaces the roots `term` is filed under. Only Standard Glossary Tags (non-empty definition) can
 /// be filed, so a Quick Tag, or a term that doesn't exist, ends up with none. Callers pass roots
 /// already validated with `normalize_roots`.
 pub(crate) fn set_glossary_drives(conn: &Connection, term: &str, roots: &[String]) -> Result<()> {
-    conn.execute("DELETE FROM GlossaryDrives WHERE term = ?", params![term])?;
     let definition: Option<String> = conn
         .query_row("SELECT definition FROM Glossary WHERE term = ?", params![term], |r| r.get(0))
         .ok();
-    if definition.map(|d| d.trim().is_empty()).unwrap_or(true) {
-        return Ok(());
-    }
-    for root in roots {
-        conn.execute("INSERT OR IGNORE INTO GlossaryDrives (term, root) VALUES (?1, ?2)", params![term, root])?;
-    }
+    let encoded = if definition.map(|d| d.trim().is_empty()).unwrap_or(true) { String::new() } else { encode_drives(roots) };
+    conn.execute("UPDATE Glossary SET drives = ?1 WHERE term = ?2", params![encoded, term])?;
     Ok(())
 }
 
 /// Adds or edits a term together with its drive assignments, atomically. `original_term` is the
 /// term's current name when editing: a different `term` renames it, carrying nothing over but the
-/// roots given here (the old name's rows are removed).
+/// roots given here (the old name's row — definition, drives, all of it — is removed).
 pub fn save_glossary_term(
     db_path: &str,
     original_term: Option<&str>,
@@ -113,7 +125,6 @@ pub fn save_glossary_term(
     let tx = conn.transaction()?;
     if let Some(original) = original_term.filter(|o| *o != term) {
         tx.execute("DELETE FROM Glossary WHERE term = ?", params![original])?;
-        tx.execute("DELETE FROM GlossaryDrives WHERE term = ?", params![original])?;
     }
     tx.execute(
         "INSERT INTO Glossary (term, definition) VALUES (?1, ?2) ON CONFLICT(term) DO UPDATE SET definition=excluded.definition",
@@ -222,9 +233,21 @@ mod tests {
 
         delete_glossary_term(&db, "New").unwrap();
         assert!(get_glossary_drive_links(&db).unwrap().is_empty());
-        let conn = Connection::open(&db).unwrap();
-        let orphans: i64 = conn.query_row("SELECT COUNT(*) FROM GlossaryDrives", [], |r| r.get(0)).unwrap();
-        assert_eq!(orphans, 0, "no orphan rows left behind");
+        assert!(get_glossary_terms(&db).unwrap().is_empty(), "the row — definition, drives, all of it — is gone");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn editing_a_definition_cannot_drift_out_of_step_with_its_own_drives() {
+        // The whole point of folding drives onto Glossary directly: there's exactly one row per
+        // term, so its definition and its drive filings can never independently go stale against
+        // each other the way two copies of the definition (one per (term, root) row) could.
+        let db = temp_db("nodrift");
+        save_glossary_term(&db, None, "Halving", "v1", &[":CRYPTO".into(), ":FIN".into()]).unwrap();
+        save_glossary_term(&db, Some("Halving"), "Halving", "v2", &[":CRYPTO".into(), ":FIN".into()]).unwrap();
+        let (term, definition) = get_glossary_terms(&db).unwrap().into_iter().find(|(t, _)| t == "Halving").unwrap();
+        assert_eq!((term.as_str(), definition.as_str()), ("Halving", "v2"));
+        assert_eq!(roots(&db, "Halving"), vec![":CRYPTO", ":FIN"], "both filings still see the same, single, up to date definition");
         let _ = std::fs::remove_file(&db);
     }
 }

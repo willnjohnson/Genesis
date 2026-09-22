@@ -56,6 +56,7 @@ mod commands;
 mod sync;
 mod workspaces;
 mod kinpak;
+mod drive_scope;
 
 pub use types::{Video, ChannelInfo, VideoResponse, DisplaySettings, DbDetails};
 pub use types::{parse_view_count, extract_handle_from_url};
@@ -182,6 +183,16 @@ pub fn run() {
             commands::save_video,
             commands::fetch_saved_videos,
             commands::search_library,
+            commands::get_tag_videos_preview,
+            commands::get_video_sequences,
+            commands::get_drive_sequence,
+            commands::get_child_drives,
+            commands::add_to_drive_sequence,
+            commands::list_drive_videos_for_sequence,
+            commands::add_matching_to_drive_sequence,
+            commands::remove_from_drive_sequence,
+            commands::set_drive_sequence_order,
+            commands::clear_drive_sequence,
             commands::delete_video,
             commands::check_video_exists,
             commands::bulk_save_videos,
@@ -259,6 +270,8 @@ pub fn run() {
             commands::save_video_note,
             commands::pick_attachment_files,
             commands::add_attachments,
+            commands::add_attachment_link,
+            commands::get_attachment_link,
             commands::remove_attachment,
             commands::open_attachment,
             commands::save_attachment_as,
@@ -268,6 +281,7 @@ pub fn run() {
             commands::update_biography,
             // Export
             commands::export_to_obsidian,
+            commands::get_export_drives,
             // Similar Videos
             commands::get_similar_videos,
             // Sync

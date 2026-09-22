@@ -154,7 +154,7 @@ async fn manifest_lists_only_licenses_the_server_can_honour() {
 #[tokio::test]
 async fn content_flows_as_snapshot_then_delta_with_tombstones() {
     let h = harness("content", |_| {}).await;
-    h.master.execute("INSERT INTO Glossary VALUES ('alpha', 'first'), ('beta', 'second'), ('gamma', 'third')", []).unwrap();
+    h.master.execute("INSERT INTO Glossary (term, definition) VALUES ('alpha', 'first'), ('beta', 'second'), ('gamma', 'third')", []).unwrap();
     h.master.execute("INSERT INTO Videos (video_id, title, transcript, WDBS) VALUES ('vid1', 'A video', 'the words', 'θψUAP')", []).unwrap();
     h.master.execute("INSERT INTO tblWDBS VALUES (':UAP', 1, 'UAP', 'Aliased', 'star', 0)", []).unwrap();
     h.scan();
@@ -205,11 +205,11 @@ async fn content_flows_as_snapshot_then_delta_with_tombstones() {
 #[tokio::test]
 async fn a_cursor_behind_pruned_history_gets_410() {
     let h = harness("gone", |c| c.retention_revisions = 2).await;
-    h.master.execute("INSERT INTO Glossary VALUES ('a', '1'), ('b', '2')", []).unwrap();
+    h.master.execute("INSERT INTO Glossary (term, definition) VALUES ('a', '1'), ('b', '2')", []).unwrap();
     h.scan();
     h.master.execute("DELETE FROM Glossary WHERE term = 'a'", []).unwrap();
     h.scan(); // tombstone at rev 3
-    h.master.execute("INSERT INTO Glossary VALUES ('c', '3'), ('d', '4'), ('e', '5')", []).unwrap();
+    h.master.execute("INSERT INTO Glossary (term, definition) VALUES ('c', '3'), ('d', '4'), ('e', '5')", []).unwrap();
     h.scan(); // head 6, cutoff 4: the tombstone is pruned
 
     let resp = h.get("/api/v1/changes?since=1", Some(TOKEN)).send().await.unwrap();

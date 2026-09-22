@@ -12,6 +12,11 @@
 /// server. The UI's copy of the defaults is `src/lib/flags.ts` (a test keeps the two in step), and
 /// docs/customizing.md describes each one.
 pub const FEATURE_FLAGS: &[(&str, &str)] = &[
+    // Forces every content-editing flag below off (see kinesis's src/lib/flags.ts
+    // READ_ONLY_OVERRIDE_KEYS/applyRules) without touching what's actually stored here — turning it
+    // back off restores whatever fine-grained permissions were already configured. Doesn't touch
+    // app-level settings (workspace rename, sync, DB location, Ollama setup, custom prompts/themes).
+    ("workspaceReadOnly", "false"),
     // ── Main views
     ("showSearch", "true"),
     ("showLibrary", "true"),
@@ -40,11 +45,23 @@ pub const FEATURE_FLAGS: &[(&str, &str)] = &[
     ("showSimilarVideos", "true"),
     ("showAttachments", "true"),
     ("editAttachments", "true"),
-    ("allowEditTags", "true"),
+    // Adding/removing a Term or a Tag on a video — one flag for both tabs, since VideoTagsPanel is
+    // the same component either way (a Term has a definition, a Tag doesn't).
+    ("allowEditTermsAndTags", "true"),
     ("allowEditSummary", "true"),
     ("allowEditTranscript", "true"),
     ("allowEditTranscriptOnNA", "true"),
-    ("allowEditWDBS", "false"),
+    ("allowEditWDBS", "true"),
+    // Off = the sequence bar's pencil (editing the Primary Drive / "Also In" links) and Bulk Assign
+    // Mode are both hidden outright, even when allowEditWDBS is on.
+    ("allowEditDriveLinking", "true"),
+    // The First / Previous / Next bar under a video (needs showDrive: a sequence belongs to a Drive).
+    ("showSequences", "true"),
+    // Off = sequences can be followed but not created or changed.
+    ("allowEditSequences", "true"),
+    // Off = Add Videos, Add to the End and Clear Sequence are hidden (reordering/removing one at a
+    // time still follows allowEditSequences alone). Narrows allowEditSequences; never exceeds it.
+    ("allowEditVideosInSequenceList", "true"),
     ("showCustomPrompt", "true"),
     ("setTranscriptAfterSummarizeToNA", "false"),
     // ── AI summarize and image tools

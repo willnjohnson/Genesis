@@ -80,8 +80,7 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
             .unwrap();
         }
         m.execute("INSERT INTO VideoWDBSLinks (video_id, wdbs) VALUES ('vid1', 'θψCRYPTO')", []).unwrap();
-        m.execute("INSERT INTO Glossary (term, definition) VALUES ('saucer', 'a flying disc')", []).unwrap();
-        m.execute("INSERT INTO GlossaryDrives (term, root) VALUES ('saucer', ':UAP')", []).unwrap();
+        m.execute("INSERT INTO Glossary (term, definition, drives) VALUES ('saucer', 'a flying disc', ':UAP')", []).unwrap();
         m.execute("INSERT OR REPLACE INTO Biographies (handle, display_name, bio, subscriber_count) VALUES ('@auth', 'Author', 'Bio text', 4200)", []).unwrap();
         m.execute("INSERT INTO CustomPrompts (handle, local_prompt_text, cloud_prompt_text) VALUES ('@auth', 'local p', 'cloud p')", []).unwrap();
         m.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('showBiography', 'false')", []).unwrap();
@@ -117,7 +116,7 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
     assert_eq!(n(&client, "SELECT COUNT(*) FROM VideoWDBSLinks WHERE video_id='vid1'"), 1);
     assert_eq!(q(&client, "SELECT definition FROM Glossary WHERE term='saucer'").as_deref(), Some("a flying disc"));
     // The term's top-level drive assignment came with it.
-    assert_eq!(q(&client, "SELECT group_concat(root) FROM GlossaryDrives WHERE term='saucer'").as_deref(), Some(":UAP"));
+    assert_eq!(q(&client, "SELECT drives FROM Glossary WHERE term='saucer'").as_deref(), Some(":UAP"));
     assert_eq!(n(&client, "SELECT subscriber_count FROM Biographies WHERE handle='@auth'"), 4200);
     assert_eq!(q(&client, "SELECT cloud_prompt_text FROM CustomPrompts WHERE handle='@auth'").as_deref(), Some("cloud p"));
     // Derived data was rebuilt locally, so search works on synced videos.
@@ -148,8 +147,7 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
         m.execute("DELETE FROM Videos WHERE video_id = 'vid4'", []).unwrap();
         m.execute("INSERT INTO Glossary (term, definition) VALUES ('orb', 'a sphere')", []).unwrap();
         // The admin refiles a term: only the assignment changes, and the client must follow.
-        m.execute("DELETE FROM GlossaryDrives WHERE term = 'saucer'", []).unwrap();
-        m.execute("INSERT INTO GlossaryDrives (term, root) VALUES ('saucer', ':FIN'), ('saucer', ':CRYPTO')", []).unwrap();
+        m.execute("UPDATE Glossary SET drives = ':FIN' || char(10) || ':CRYPTO' WHERE term = 'saucer'", []).unwrap();
         m.execute("UPDATE Settings SET value = 'true' WHERE key = 'showBiography'", []).unwrap();
     }
     scan_once(&server).unwrap();
@@ -161,8 +159,8 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
     assert_eq!(n(&client, "SELECT COUNT(*) FROM Videos WHERE video_id='mine'"), 1, "the user's video survives the sync");
     assert_eq!(q(&client, "SELECT definition FROM Glossary WHERE term='orb'").as_deref(), Some("a sphere"));
     assert_eq!(
-        q(&client, "SELECT group_concat(root) FROM (SELECT root FROM GlossaryDrives WHERE term='saucer' ORDER BY root)").as_deref(),
-        Some(":CRYPTO,:FIN"),
+        q(&client, "SELECT drives FROM Glossary WHERE term='saucer'").as_deref(),
+        Some(":CRYPTO\n:FIN"),
         "a change that only touches drive assignments still syncs"
     );
     assert_eq!(db::get_setting(&client, "showBiography").unwrap().as_deref(), Some("true"), "policy updates follow the master");

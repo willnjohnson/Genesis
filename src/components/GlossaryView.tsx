@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
-import { getGlossaryTerms, deleteGlossaryTerm, saveGlossaryTerm, getGlossaryDriveLinks, getWdbsRoots, type GlossaryTerm, type WdbsRoot } from '../api';
+import { getGlossaryTerms, deleteGlossaryTerm, saveGlossaryTerm, getGlossaryDriveLinks, getWdbsRoots, type GlossaryTerm, type WdbsRoot, type Video } from '../api';
 import { Plus, X, Pencil, Check, ChevronDown } from 'lucide-react';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { ConfirmDialog } from './ConfirmDialog';
+import { AlphabetJumpNav } from './AlphabetJumpNav';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { normalizeText } from '../lib/utils';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
@@ -97,7 +98,7 @@ function DrivePicker({ roots, selected, onChange }: { roots: WdbsRoot[], selecte
     );
 }
 
-export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'term' | 'library') => void, allowModification?: boolean, onChange?: () => void }) {
+export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'term' | 'library') => void, onOpenVideo?: (video: Video) => void, allowModification?: boolean, onChange?: () => void }) {
     const { labels } = useWorkspace();
     const glossaryLower = labels.aliasGlossary.toLowerCase();
     const [terms, setTerms] = useState<GlossaryTerm[]>([]);
@@ -131,25 +132,34 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
 
     useEffect(() => {
         loadTerms();
+        loadRoots();
     }, []);
 
+    // The terms and which drives each is filed under: both small, and all the default "All Terms"
+    // view needs, so the list shows as soon as they arrive.
     const loadTerms = async () => {
         try {
-            const [res, rootList, links] = await Promise.all([
+            const [res, links] = await Promise.all([
                 getGlossaryTerms(),
-                getWdbsRoots().catch(() => [] as WdbsRoot[]),
                 getGlossaryDriveLinks().catch(() => [] as [string, string][]),
             ]);
             setTerms(res.map(r => ({ term: r[0], definition: r[1] })));
-            setRoots(rootList);
             const byTerm: Record<string, string[]> = {};
             for (const [term, root] of links) (byTerm[term] ??= []).push(root);
             setDriveLinks(byTerm);
-            // A drive that no longer exists can't stay selected in the dropdown.
-            setView(prev => (prev && prev !== QUICK_VIEW && !rootList.some(r => r.path === prev) ? '' : prev));
         } finally {
             setLoading(false);
         }
+    };
+
+    // The drive list is the slow part on a big library (it's worked out from every video), and only
+    // the drive dropdown and picker use it, so it loads in the background after the terms are up. A
+    // term's saved drives don't wait on it: they come with the terms above.
+    const loadRoots = async () => {
+        const rootList = await getWdbsRoots().catch(() => [] as WdbsRoot[]);
+        setRoots(rootList);
+        // A drive that no longer exists can't stay selected in the dropdown.
+        setView(prev => (prev && prev !== QUICK_VIEW && !rootList.some(r => r.path === prev) ? '' : prev));
     };
 
     const openAddModal = () => {
@@ -239,7 +249,9 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
         return a.localeCompare(b);
     });
 
-    if (loading) return null;
+    // The bottom panel exists even before there's anything to jump to, same as it does for an
+    // empty filtered view — no popping in once terms actually load.
+    if (loading) return <AlphabetJumpNav idPrefix="glossary-az" available={[]} />;
 
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
@@ -251,7 +263,8 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                         value={view}
                         onChange={e => setView(e.target.value)}
                         aria-label={`Show ${glossaryLower} entries: all terms, all tags, or by ${labels.aliasDriveName}`}
-                        className="px-3 py-1.5 bg-[#272727] hover:bg-[#3f3f3f] text-white rounded-md transition-colors text-[11px] font-semibold cursor-pointer outline-none"
+                        // A fixed width, so the drives arriving after the terms (see loadRoots) don't resize it.
+                        className="w-40 px-3 py-1.5 bg-[#272727] hover:bg-[#3f3f3f] text-white rounded-md transition-colors text-[11px] font-semibold cursor-pointer outline-none"
                     >
                         <option value="">All Terms</option>
                         {flags.showQuickTags && <option value={QUICK_VIEW}>All Tags</option>}
@@ -271,7 +284,10 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                 </div>
             </div>
 
-            <div className="px-4">
+            {/* pb-10: AlphabetJumpNav (below) is a true fixed panel, always present, no longer part
+                of this page's own scroll — its ~24px height has to be reserved here instead, or
+                it'd sit over the last section once scrolled all the way down. */}
+            <div className="px-4 pb-10">
                 {terms.length === 0 ? (
                     <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                         <p className="text-xl font-bold text-white mb-2">No glossary terms have been added</p>
@@ -295,7 +311,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                     <div className="space-y-8">
                         {groupKeys.map(char => (
                             <div key={char}>
-                                <h3 className="text-xl font-bold text-[#aaaaaa] border-b border-[#333] pb-2 mb-4">{char}</h3>
+                                <h3 id={`glossary-az-${char}`} className="text-xl font-bold text-[#aaaaaa] border-b border-[#333] pb-2 mb-4 scroll-mt-4">{char}</h3>
                                 <ul className="space-y-1.5 pl-2">
                                     {groupedTerms[char].map(t => (
                                         <li key={t.term} className="text-gray-300 flex items-center group">
@@ -336,6 +352,8 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                                   </div>
                               )}
                          </div>
+
+            <AlphabetJumpNav idPrefix="glossary-az" available={groupKeys} />
 
             {/* Add Modal */}
             {showAddModal && (
@@ -502,6 +520,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, allowModification
                     term={selectedTerm}
                     onClose={() => setSelectedTerm(null)}
                     onSearch={onSearchInLibrary}
+                    onOpenVideo={onOpenVideo}
                 />
             )}
 

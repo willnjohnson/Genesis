@@ -13,6 +13,7 @@ pub mod attachments;
 pub mod links;
 pub mod tokens;
 pub mod workspace;
+pub mod sequences;
 
 pub use schema::*;
 pub use videos::*;
@@ -25,6 +26,7 @@ pub use custom_prompts::*;
 pub use wdbs::*;
 pub use export::*;
 pub use workspace::*;
+pub use sequences::*;
 
 #[cfg(test)]
 mod production_tests;

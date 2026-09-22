@@ -8,6 +8,7 @@ import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../lib/remark-highlight';
 import { markdownUrlTransform } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
+import { AlphabetJumpNav } from './AlphabetJumpNav';
 import { getBiographies, updateBiography, type BiographyEntry, fetchChannelVideosV3, openExternalUrl, getHandleDrives, type HandleDrive } from '../api';
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
@@ -184,6 +185,8 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
         }
     };
 
+    // The bottom panel exists even before there's anything to jump to, same as it does for an
+    // empty filtered view — no popping in once entries actually load.
     if (loading) return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
             <div className="flex justify-between items-center mb-6 px-4">
@@ -195,6 +198,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                     <p className="text-sm">Loading biographies...</p>
                 </div>
             </div>
+            <AlphabetJumpNav idPrefix="biography-az" available={[]} />
         </div>
     );
 
@@ -204,7 +208,10 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                 <h2 className="text-xl font-bold text-white">{labels.aliasBiography}</h2>
             </div>
 
-            <div className="px-4">
+            {/* pb-10: AlphabetJumpNav (below) is a true fixed panel, always present, no longer part
+                of this page's own scroll — its ~24px height has to be reserved here instead, or
+                it'd sit over the last section once scrolled all the way down. */}
+            <div className="px-4 pb-10">
                 {entries.length === 0 ? (
                     <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                         <p className="text-xl font-bold text-white mb-2">No people yet</p>
@@ -219,7 +226,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                     <div className="space-y-8">
                         {groupKeys.map((char) => (
                             <div key={char}>
-                                <h3 className="text-xl font-bold text-[#aaaaaa] border-b border-[#333] pb-2 mb-4">{char}</h3>
+                                <h3 id={`biography-az-${char}`} className="text-xl font-bold text-[#aaaaaa] border-b border-[#333] pb-2 mb-4 scroll-mt-4">{char}</h3>
                         <ul className="space-y-1.5 pl-2">
                             {grouped[char].map((person) => (
                                 <li key={person.handle} className="text-gray-300 group flex items-center">
@@ -254,6 +261,8 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                     </div>
                 )}
             </div>
+
+            <AlphabetJumpNav idPrefix="biography-az" available={groupKeys} />
 
             {selected && (
                 <BiographyModal

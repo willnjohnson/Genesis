@@ -36,6 +36,7 @@ use sha2::{Digest, Sha256};
 
 use crate::db;
 use crate::db::sync::open_sync_conn;
+use crate::drive_scope::{DriveScope, ScopePlan};
 
 pub const EXTENSION: &str = "kinpak";
 
@@ -73,6 +74,9 @@ pub struct ExportOptions {
     pub glossary: bool,
     pub biographies: bool,
     pub prompts: bool,
+    /// Per-Drive sequence membership and ordering (see db/sequences.rs).
+    #[serde(default = "yes")]
+    pub sequences: bool,
     /// Allowlisted settings (never API keys or paths), written as a policy line.
     pub settings: bool,
     /// The workspace's name and its section aliases.
@@ -84,6 +88,9 @@ pub struct ExportOptions {
     pub notes: bool,
     #[serde(default = "yes")]
     pub attachments: bool,
+    /// Drives to leave out, and what to do with what touches them (see drive_scope.rs).
+    #[serde(default)]
+    pub drives: DriveScope,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,6 +166,17 @@ fn count_rows(conn: &Connection, table: &str) -> u64 {
     conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64
 }
 
+/// Rows of a per-video table (`video_id` first) that belong to a video the export keeps.
+fn count_rows_kept(conn: &Connection, table: &str, plan: Option<&ScopePlan>) -> u64 {
+    let Some(plan) = plan else { return count_rows(conn, table) };
+    if !sqlite::table_exists(conn, table) {
+        return 0;
+    }
+    let Ok(mut stmt) = conn.prepare(&format!("SELECT video_id FROM {table}")) else { return 0 };
+    let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else { return 0 };
+    rows.filter_map(|r| r.ok()).filter(|id| plan.video_kept(id)).count() as u64
+}
+
 /// Reads up to `buf.len()` bytes (a `Read` may return fewer than asked for without being at the end).
 fn fill(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut n = 0;
@@ -226,14 +244,17 @@ fn write_pack(
     let path: PathBuf = path.to_path_buf();
 
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    // What the chosen Drives leave out, worked out once up front (None: nothing is left out).
+    let scope = ScopePlan::build(&conn, &opts.drives)?;
     let file = File::create(&path).map_err(|e| format!("Couldn't create {}: {e}", path.display()))?;
     let mut out = Out { writer: PackWriter::new(BufWriter::new(file), true), counts: BTreeMap::new() };
 
     // Which sync kinds to write, in the order an importer must apply them (taxonomy first).
-    let plan: [(bool, Kind, &str); 6] = [
+    let kinds: [(bool, Kind, &str); 7] = [
         (opts.taxonomy, Kind::Wdbs, "Exporting taxonomy…"),
         (opts.videos, Kind::Video, "Exporting videos…"),
         (opts.videos, Kind::VideoLink, ""),
+        (opts.sequences, Kind::DriveSequence, "Exporting sequences…"),
         (opts.glossary, Kind::Glossary, "Exporting glossary…"),
         (opts.biographies, Kind::Biography, "Exporting biographies…"),
         (opts.prompts, Kind::CustomPrompt, "Exporting custom prompts…"),
@@ -241,9 +262,21 @@ fn write_pack(
 
     // The header carries expected counts for progress UIs only; the reader never trusts them.
     let mut header = PackHeader::new(&chrono::Utc::now().to_rfc3339(), app_label, brand);
-    for (on, kind, _) in plan {
+    for (on, kind, _) in kinds {
         if on {
-            header.counts.insert(kind.as_str().to_string(), sqlite::count_kind(&conn, kind));
+            let count = match &scope {
+                None => sqlite::count_kind(&conn, kind),
+                // With Drives left out the total is what's kept, counted without the (large) transcripts.
+                Some(scope) => {
+                    let mut kept = 0u64;
+                    sqlite::for_each_item(&conn, kind, &ReadOptions { transcripts: false }, |key, data| {
+                        kept += u64::from(scope.keep_item(kind, key, &data));
+                        Ok(())
+                    })?;
+                    kept
+                }
+            };
+            header.counts.insert(kind.as_str().to_string(), count);
         }
     }
     if opts.workspace {
@@ -253,10 +286,10 @@ fn write_pack(
         header.counts.insert(K_HISTORY.into(), count_rows(&conn, "SearchHistory"));
     }
     if opts.notes {
-        header.counts.insert(K_NOTE.into(), count_rows(&conn, "VideoNotes"));
+        header.counts.insert(K_NOTE.into(), count_rows_kept(&conn, "VideoNotes", scope.as_ref()));
     }
     if opts.attachments {
-        header.counts.insert(K_ATTACHMENT.into(), count_rows(&conn, "VideoAttachments"));
+        header.counts.insert(K_ATTACHMENT.into(), count_rows_kept(&conn, "VideoAttachments", scope.as_ref()));
     }
     out.writer.write_header(&header).map_err(|e| e.to_string())?;
 
@@ -288,7 +321,7 @@ fn write_pack(
     } else {
         HashMap::new()
     };
-    for (on, kind, label) in plan {
+    for (on, kind, label) in kinds {
         if !on {
             continue;
         }
@@ -299,6 +332,12 @@ fn write_pack(
         }
         let mut done = 0u64;
         sqlite::for_each_item(&conn, kind, &read_opts, |key, mut data| {
+            if let Some(scope) = &scope {
+                if !scope.keep_item(kind, key, &data) {
+                    return Ok(());
+                }
+                scope.adjust(kind, key, &mut data);
+            }
             if kind == Kind::Video {
                 if let (Some(when), Some(obj)) = (added.get(key), data.as_object_mut()) {
                     obj.insert("date_added".into(), Value::String(when.clone()));
@@ -336,12 +375,17 @@ fn write_pack(
             .filter_map(|r| r.ok())
             .collect();
         for (video_id, note, updated_at) in rows {
+            let note = match &scope {
+                Some(scope) if !scope.video_kept(&video_id) => continue,
+                Some(scope) => scope.clean_note(&note),
+                None => note,
+            };
             out.item(K_NOTE, &video_id, json!({ "note": note, "updated_at": updated_at }))?;
         }
     }
 
     if opts.attachments && sqlite::table_exists(&conn, "VideoAttachments") && sqlite::table_exists(&conn, "AttachmentBlobs") {
-        export_attachments(&conn, &mut out, chunk_bytes, progress)?;
+        export_attachments(&conn, &mut out, chunk_bytes, scope.as_ref(), progress)?;
     }
 
     let mut settings_count = 0u64;
@@ -366,6 +410,7 @@ fn export_attachments<W: Write>(
     conn: &Connection,
     out: &mut Out<W>,
     chunk_bytes: usize,
+    scope: Option<&ScopePlan>,
     progress: &impl Fn(&str),
 ) -> Result<(), String> {
     let mut stmt = conn
@@ -380,6 +425,19 @@ fn export_attachments<W: Write>(
         .filter_map(|r| r.ok())
         .collect();
     drop(stmt);
+    // With Drives left out, only the files a kept video still points at are written.
+    let mut blobs = blobs;
+    if let Some(scope) = scope {
+        let mut stmt = conn.prepare("SELECT video_id, hash FROM VideoAttachments").map_err(|e| e.to_string())?;
+        let kept: std::collections::HashSet<String> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .filter(|(video_id, _)| scope.video_kept(video_id))
+            .map(|(_, hash)| hash)
+            .collect();
+        blobs.retain(|(_, hash, _, _)| kept.contains(hash));
+    }
 
     let total = blobs.len();
     let mut buf = vec![0u8; chunk_bytes.max(1)];
@@ -417,6 +475,9 @@ fn export_attachments<W: Write>(
         .filter_map(|r| r.ok())
         .collect();
     for (video_id, name, ext, hash, added_at) in rows {
+        if scope.is_some_and(|s| !s.video_kept(&video_id)) {
+            continue;
+        }
         out.item(
             K_ATTACHMENT,
             &format!("{video_id}|{hash}|{name}"),
@@ -875,11 +936,13 @@ mod tests {
             glossary: true,
             biographies: true,
             prompts: true,
+            sequences: true,
             settings: true,
             workspace: true,
             history: true,
             notes: true,
             attachments: true,
+            drives: DriveScope::default(),
         }
     }
 
@@ -897,13 +960,16 @@ mod tests {
         )
         .unwrap();
         conn.execute("INSERT INTO VideoWDBSLinks (video_id, wdbs) VALUES ('vid1', 'θψCRYPTO')", []).unwrap();
-        conn.execute("INSERT INTO Glossary (term, definition) VALUES ('term', 'def')", []).unwrap();
-        conn.execute("INSERT INTO GlossaryDrives (term, root) VALUES ('term', ':UAP'), ('term', ':FIN')", []).unwrap();
+        conn.execute("INSERT INTO DriveSequence (drive, video_id, position) VALUES (':UAP', 'vid1', 1)", []).unwrap();
+        conn.execute("INSERT INTO Glossary (term, definition, drives) VALUES ('term', 'def', ':UAP' || char(10) || ':FIN')", []).unwrap();
         conn.execute("INSERT OR REPLACE INTO Biographies (handle, display_name, bio, subscriber_count) VALUES ('@auth', 'Auth', 'Bio', 42)", []).unwrap();
         conn.execute("INSERT INTO CustomPrompts (handle, local_prompt_text, cloud_prompt_text) VALUES ('@auth', 'local', 'cloud')", []).unwrap();
         conn.execute("INSERT INTO WorkspaceLabels (key, value) VALUES ('workspaceName', 'Metabolic Warp Drive'), ('aliasLibrary', 'Portal')", []).unwrap();
         conn.execute("INSERT INTO SearchHistory (search_query, searched_at) VALUES ('first query', '2024-05-01 10:00:00'), ('second query', '2024-05-02 10:00:00')", []).unwrap();
         conn.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('showBiography', 'false')", []).unwrap();
+        // A permission, not just a display flag: proves Read-only itself (Settings > Workspace >
+        // Advanced > Permissions) travels through a pack the same way any other feature flag does.
+        conn.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('workspaceReadOnly', 'true')", []).unwrap();
         conn.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('venice_api_key', 'SECRET-VENICE')", []).unwrap();
         conn.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('api_key', 'SECRET-YT')", []).unwrap();
         conn.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('pixabay_api_key', 'SECRET-PIX')", []).unwrap();
@@ -954,6 +1020,7 @@ mod tests {
         assert_eq!(Path::new(&summary.path), out.as_path());
         assert_eq!(summary.counts.get("video"), Some(&1));
         assert_eq!(summary.counts.get("video_link"), Some(&1));
+        assert_eq!(summary.counts.get("drive_sequence"), Some(&1));
         assert_eq!(summary.counts.get("attachment"), Some(&2));
         assert_eq!(summary.counts.get("video_note"), Some(&1));
         assert_eq!(summary.counts.get("history"), Some(&2));
@@ -985,13 +1052,17 @@ mod tests {
         assert_eq!(alias, "Aliased");
         let links: i64 = conn.query_row("SELECT COUNT(*) FROM VideoWDBSLinks WHERE video_id='vid1'", [], |r| r.get(0)).unwrap();
         assert_eq!(links, 1);
-        let drives: String = conn
-            .query_row("SELECT group_concat(root) FROM (SELECT root FROM GlossaryDrives WHERE term='term' ORDER BY root)", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(drives, ":FIN,:UAP");
+        let position: i64 = conn.query_row("SELECT position FROM DriveSequence WHERE drive=':UAP' AND video_id='vid1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(position, 1);
+        let drives: String = conn.query_row("SELECT drives FROM Glossary WHERE term='term'", [], |r| r.get(0)).unwrap();
+        let mut roots: Vec<&str> = drives.split('\n').collect();
+        roots.sort();
+        assert_eq!(roots.join(","), ":FIN,:UAP");
         let prompt: String = conn.query_row("SELECT cloud_prompt_text FROM CustomPrompts WHERE handle='@auth'", [], |r| r.get(0)).unwrap();
         assert_eq!(prompt, "cloud");
         assert_eq!(db::get_setting(&dst, "showBiography").unwrap().as_deref(), Some("false"));
+        // The permission itself, not just an ordinary display flag, made the trip.
+        assert_eq!(db::get_setting(&dst, "workspaceReadOnly").unwrap().as_deref(), Some("true"));
         // Aliases came across, but the workspace's own name is left for the importer to decide.
         let labels = db::get_workspace_labels(&dst).unwrap();
         assert_eq!(labels["aliasLibrary"], "Portal");
@@ -1292,7 +1363,6 @@ mod tests {
             ("video", "SELECT video_id||'|'||IFNULL(title,'')||'|'||IFNULL(author,'')||'|'||handle||'|'||IFNULL(length_seconds,'')||'|'||IFNULL(transcript,'')||'|'||IFNULL(summary,'')||'|'||IFNULL(view_count,'')||'|'||IFNULL(published_at,'')||'|'||IFNULL(tags,'')||'|'||WDBS FROM Videos ORDER BY video_id"),
             ("bio", "SELECT handle||'|'||display_name||'|'||bio||'|'||website FROM Biographies ORDER BY handle"),
             ("glossary", "SELECT term||'|'||definition FROM Glossary ORDER BY term"),
-            ("drives", "SELECT term||'|'||root FROM GlossaryDrives ORDER BY term, root"),
             ("link", "SELECT video_id||'|'||WDBS FROM VideoWDBSLinks ORDER BY 1"),
             ("wdbs", "SELECT WDBS||'|'||lev||'|'||WDID||'|'||WDInfo||'|'||WDIcon FROM tblWDBS WHERE WDBS <> ':' ORDER BY WDBS"),
             ("prompt", "SELECT handle||'|'||IFNULL(local_prompt_text,'')||'|'||IFNULL(cloud_prompt_text,'') FROM CustomPrompts ORDER BY handle"),
@@ -1303,6 +1373,17 @@ mod tests {
             let mut stmt = conn.prepare(sql).unwrap();
             for row in stmt.query_map([], |r| r.get::<_, String>(0)).unwrap() {
                 out.push(format!("{label}: {}", row.unwrap()));
+            }
+        }
+        // drives: lives on Glossary itself now (newline-joined), expanded to one snapshot line
+        // per (term, root) pair so this still catches the same granularity of drift as before.
+        let mut stmt = conn.prepare("SELECT term, drives FROM Glossary WHERE drives != '' ORDER BY term").unwrap();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap() {
+            let (term, drives) = row.unwrap();
+            let mut roots: Vec<&str> = drives.split('\n').filter(|r| !r.is_empty()).collect();
+            roots.sort();
+            for root in roots {
+                out.push(format!("drives: {term}|{root}"));
             }
         }
         out
@@ -1348,5 +1429,159 @@ mod tests {
         assert_eq!(again.error_count, 0, "{:?}", again.errors);
         assert_eq!(snapshot(&prod_dst), want, "second import");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two Drives (:UAP and :FIN) with videos, links, terms, bios, notes and attachments touching both.
+    fn two_drive_library(db: &str) {
+        let conn = Connection::open(db).unwrap();
+        for (path, lev, id) in [(":UAP", 1, "UAP"), (":UAP-GERB", 2, "GERB"), (":FIN", 1, "FIN")] {
+            conn.execute("INSERT OR IGNORE INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon, WDDefault) VALUES (?1, ?2, ?3, '', '', 0)", params![path, lev, id]).unwrap();
+        }
+        let video = |id: &str, wdbs: &str, handle: &str, summary: &str| {
+            conn.execute(
+                "INSERT INTO Videos (video_id, title, author, handle, length_seconds, transcript, summary, view_count, published_at, tags, WDBS)
+                 VALUES (?1, ?1, 'A', ?2, 60, 'words', ?3, 1, '2024-01-01', '', ?4)",
+                params![id, handle, summary, wdbs],
+            )
+            .unwrap();
+        };
+        // a1 only in :UAP; f1 only in :FIN (and mentions a1 and two terms); m1 is homed in :UAP but also
+        // linked into :FIN; m2 is homed in :FIN and linked into :UAP; u1 has no category.
+        video("a1", "θψUAP_GERB", "@uapguy", "");
+        video("f1", "θψFIN", "@fingal", "See [a1](kinesis://video/a1), [only](kinesis://glossary/OnlyUap) and [both](kinesis://glossary/Both).");
+        video("m1", "θψUAP_GERB", "@mixed", "");
+        video("m2", "θψFIN", "@mixed", "");
+        video("u1", ":", "@free", "");
+        conn.execute("INSERT INTO VideoWDBSLinks (video_id, wdbs) VALUES ('m1', 'θψFIN'), ('m2', 'θψUAP_GERB')", []).unwrap();
+        for (term, drives) in [("OnlyUap", ":UAP"), ("Both", ":UAP\n:FIN"), ("Free", ""), ("OnlyFin", ":FIN")] {
+            conn.execute("INSERT INTO Glossary (term, definition, drives) VALUES (?1, 'defined', ?2)", params![term, drives]).unwrap();
+        }
+        for handle in ["@uapguy", "@fingal", "@mixed", "@free"] {
+            conn.execute("INSERT INTO Biographies (handle, display_name, bio) VALUES (?1, ?1, 'bio')", [handle]).unwrap();
+            conn.execute("INSERT INTO CustomPrompts (handle, local_prompt_text, cloud_prompt_text) VALUES (?1, 'l', 'c')", [handle]).unwrap();
+        }
+        drop(conn);
+        for (video, file, seed) in [("a1", "a.txt", 1u8), ("f1", "f.txt", 2u8)] {
+            db::attachments::add_attachment(db, video, file, vec![seed; 3000]).unwrap();
+            db::attachments::set_note(db, video, "a note").unwrap();
+        }
+    }
+
+    fn column(db: &str, sql: &str) -> Vec<String> {
+        let conn = Connection::open(db).unwrap();
+        let mut stmt = conn.prepare(sql).unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0)).unwrap().filter_map(|r| r.ok()).collect()
+    }
+
+    /// "TermRoot" for every (term, root) filing, sorted — drives lives on Glossary itself now
+    /// (newline-joined), so this expands it the way `column`'s single-SQL-column shape can't.
+    fn glossary_drive_pairs(db: &str) -> Vec<String> {
+        let conn = Connection::open(db).unwrap();
+        let mut stmt = conn.prepare("SELECT term, drives FROM Glossary WHERE drives != ''").unwrap();
+        let mut out: Vec<String> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .flat_map(|row| {
+                let (term, drives) = row.unwrap();
+                drives.split('\n').filter(|r| !r.is_empty()).map(move |root| format!("{term}{root}")).collect::<Vec<_>>()
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn export_and_import(src: &str, drives: DriveScope, name: &str) -> (String, ExportSummary) {
+        let dir = temp_dir(name);
+        let out = dir.join("scoped.kinpak");
+        let opts = ExportOptions { drives, ..all() };
+        let summary = export_pack_chunked(src, &out, "Kinesis 0.4.3", "Kinesis", &opts, 4096, |_| {}).unwrap();
+        let dst = temp_db(&format!("{name}_dst"));
+        let imported = import_pack(&dst, &out, import_all(), |_| {}).unwrap();
+        assert_eq!(imported.error_count, 0, "{:?}", imported.errors);
+        let _ = std::fs::remove_dir_all(&dir);
+        (dst, summary)
+    }
+
+    #[test]
+    fn leaving_a_drive_out_keeps_what_remains_consistent() {
+        let src = temp_db("scope_src");
+        two_drive_library(&src);
+        let (dst, summary) = export_and_import(&src, DriveScope { excluded: vec![":UAP".into()], ..DriveScope::default() }, "scope_keep");
+
+        // The Drive, its categories and its only-video are gone; a video also linked into :FIN stays and moves there.
+        assert_eq!(column(&dst, "SELECT video_id FROM Videos ORDER BY video_id"), ["f1", "m1", "m2", "u1"]);
+        assert_eq!(column(&dst, "SELECT WDBS FROM Videos WHERE video_id = 'm1'"), ["θψFIN"]);
+        assert_eq!(column(&dst, "SELECT WDBS FROM Videos WHERE video_id = 'u1'"), [":"], "videos with no category are untouched");
+        assert!(column(&dst, "SELECT WDBS FROM tblWDBS WHERE WDBS LIKE ':UAP%'").is_empty(), "the left-out Drive must not come back on import");
+        assert!(!column(&dst, "SELECT WDBS FROM tblWDBS WHERE WDBS = ':FIN'").is_empty());
+        // m2's link into :UAP has nothing to point at, and m1's link into :FIN is now its home (not listed twice).
+        assert!(column(&dst, "SELECT video_id FROM VideoWDBSLinks").is_empty());
+
+        // Terms are kept, without the left-out Drive.
+        assert_eq!(column(&dst, "SELECT term FROM Glossary ORDER BY term"), ["Both", "Free", "OnlyFin", "OnlyUap"]);
+        assert_eq!(glossary_drive_pairs(&dst), ["Both:FIN", "OnlyFin:FIN"]);
+
+        // A creator whose only video went is left out with their prompt; the others stay.
+        assert_eq!(column(&dst, "SELECT handle FROM Biographies ORDER BY handle"), ["@fingal", "@free", "@mixed"]);
+        assert_eq!(column(&dst, "SELECT handle FROM CustomPrompts ORDER BY handle"), ["@fingal", "@free", "@mixed"]);
+
+        // Notes and attachments follow their video; the unused file isn't written.
+        assert_eq!(column(&dst, "SELECT video_id FROM VideoNotes"), ["f1"]);
+        assert_eq!(column(&dst, "SELECT video_id FROM VideoAttachments"), ["f1"]);
+        assert_eq!(column(&dst, "SELECT CAST(COUNT(*) AS TEXT) FROM AttachmentBlobs"), ["1"]);
+
+        // Links in kept text to what was left out become plain text; links to what stayed remain.
+        let summary_text = column(&dst, "SELECT summary FROM Videos WHERE video_id = 'f1'").remove(0);
+        assert!(summary_text.starts_with("See a1, "), "{summary_text}");
+        assert!(summary_text.contains("[only](kinesis://glossary/OnlyUap)"), "{summary_text}");
+        assert!(summary_text.contains("[both](kinesis://glossary/Both)"), "{summary_text}");
+
+        // The summary reports what was actually written.
+        assert_eq!(summary.counts.get("video"), Some(&4));
+        assert_eq!(summary.counts.get("biography"), Some(&3));
+        assert_eq!(summary.counts.get("attachment"), Some(&1));
+    }
+
+    #[test]
+    fn a_video_with_no_link_into_a_kept_drive_can_stay_uncategorized() {
+        let src = temp_db("scope_src3");
+        two_drive_library(&src);
+        // a1 is based only in :UAP (no link into :FIN); m1 is based there too but linked into :FIN.
+        let scope = DriveScope { excluded: vec![":UAP".into()], keep_unlinked_videos: true, ..DriveScope::default() };
+        let (dst, _) = export_and_import(&src, scope, "scope_orphans");
+        assert_eq!(column(&dst, "SELECT video_id FROM Videos ORDER BY video_id"), ["a1", "f1", "m1", "m2", "u1"]);
+        assert_eq!(column(&dst, "SELECT WDBS FROM Videos WHERE video_id = 'a1'"), [":"], "no kept link: uncategorized");
+        assert_eq!(column(&dst, "SELECT WDBS FROM Videos WHERE video_id = 'm1'"), ["θψFIN"], "a kept link still becomes the home");
+        assert!(column(&dst, "SELECT WDBS FROM tblWDBS WHERE WDBS LIKE ':UAP%'").is_empty());
+        // Its creator stays, since a video of theirs does.
+        assert_eq!(column(&dst, "SELECT handle FROM Biographies ORDER BY handle"), ["@fingal", "@free", "@mixed", "@uapguy"]);
+
+        // Keeping everything but not promoting: m1 is uncategorized too, and keeps its link into :FIN.
+        let scope = DriveScope { excluded: vec![":UAP".into()], keep_linked_videos: false, keep_unlinked_videos: true, ..DriveScope::default() };
+        let (dst, _) = export_and_import(&src, scope, "scope_orphans2");
+        assert_eq!(column(&dst, "SELECT WDBS FROM Videos WHERE video_id = 'm1'"), [":"]);
+        assert_eq!(column(&dst, "SELECT video_id || wdbs FROM VideoWDBSLinks"), ["m1θψFIN"]);
+    }
+
+    #[test]
+    fn the_other_choices_when_leaving_a_drive_out() {
+        let src = temp_db("scope_src2");
+        two_drive_library(&src);
+        let scope = DriveScope { excluded: vec![":UAP".into()], terms: crate::drive_scope::TermsMode::Drop, keep_linked_videos: false, keep_unlinked_videos: false, unlink_text: false };
+        let (dst, _) = export_and_import(&src, scope, "scope_drop");
+
+        // m1 is homed in the left-out Drive, so it goes too; terms filed only there go; mixed ones stay.
+        assert_eq!(column(&dst, "SELECT video_id FROM Videos ORDER BY video_id"), ["f1", "m2", "u1"]);
+        assert_eq!(column(&dst, "SELECT term FROM Glossary ORDER BY term"), ["Both", "Free", "OnlyFin"]);
+        assert_eq!(glossary_drive_pairs(&dst), ["Both:FIN", "OnlyFin:FIN"]);
+        // Links in text are left exactly as they were when asked to.
+        let summary_text = column(&dst, "SELECT summary FROM Videos WHERE video_id = 'f1'").remove(0);
+        assert!(summary_text.contains("[a1](kinesis://video/a1)"), "{summary_text}");
+
+        // Nothing left out means nothing changes.
+        let everything = temp_db("scope_all");
+        let (all_dst, _) = export_and_import(&src, DriveScope::default(), "scope_none");
+        assert_eq!(column(&all_dst, "SELECT video_id FROM Videos ORDER BY video_id"), ["a1", "f1", "m1", "m2", "u1"]);
+        let _ = std::fs::remove_file(&everything);
     }
 }

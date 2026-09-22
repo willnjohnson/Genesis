@@ -84,6 +84,26 @@ pub async fn add_attachments(app: AppHandle, video_id: String, paths: Vec<String
     .map_err(|e| e.to_string())
 }
 
+/// Adds a web link, shown under `title`. Only http and https addresses are accepted.
+#[command]
+pub async fn add_attachment_link(app: AppHandle, video_id: String, title: String, url: String) -> Result<AttachmentInfo, String> {
+    let db_path = get_db_path(&app);
+    require_edit(&db_path)?;
+    tokio::task::spawn_blocking(move || attachments::add_link(&db_path, &video_id, &title, &url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// A link's address, for showing it to the user before it's opened. The link itself is opened by the
+/// frontend once they've confirmed.
+#[command]
+pub async fn get_attachment_link(app: AppHandle, id: i64) -> Result<String, String> {
+    let db_path = get_db_path(&app);
+    tokio::task::spawn_blocking(move || attachments::read_link(&db_path, id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[command]
 pub async fn remove_attachment(app: AppHandle, id: i64) -> Result<(), String> {
     let db_path = get_db_path(&app);
@@ -106,6 +126,7 @@ pub fn clear_attachment_temp() {
 pub async fn open_attachment(app: AppHandle, id: i64) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     let db_path = get_db_path(&app);
+    attachments::ensure_file(&db_path, id)?;
     let (name, bytes) = tokio::task::spawn_blocking(move || attachments::read_attachment(&db_path, id))
         .await
         .map_err(|e| e.to_string())??;
@@ -124,6 +145,7 @@ pub async fn open_attachment(app: AppHandle, id: i64) -> Result<(), String> {
 pub async fn save_attachment_as(app: AppHandle, id: i64) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
     let db_path = get_db_path(&app);
+    attachments::ensure_file(&db_path, id)?;
     let (name, bytes) = tokio::task::spawn_blocking(move || attachments::read_attachment(&db_path, id))
         .await
         .map_err(|e| e.to_string())??;

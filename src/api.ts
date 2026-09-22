@@ -145,6 +145,11 @@ export async function searchLibrary(query: string, opts?: LibraryQueryOptions): 
     });
 }
 
+/** A Quick Tag's newest videos and how many carry it (`totalCount`), for the Glossary's tag preview. */
+export async function getTagVideosPreview(tag: string, limit?: number): Promise<SearchResponse> {
+    return await invoke("get_tag_videos_preview", { tag, limit });
+}
+
 export async function deleteVideo(id: string): Promise<void> {
     await invoke("delete_video", { videoId: id });
 }
@@ -354,10 +359,47 @@ export interface ExportSummary {
     folder_path: string;
 }
 
+/** Which Drives an export leaves out, and what happens to what touches them. */
+export interface DriveScopeOptions {
+    /** Drive paths to leave out, e.g. ":UAP". Empty exports everything. */
+    excluded: string[];
+    /** Terms filed under a left-out Drive: keep them without it, or leave out those filed only there. */
+    terms: "keep" | "drop";
+    /** A video homed in a left-out Drive but linked into a kept one stays, and moves its home there. */
+    keepLinkedVideos: boolean;
+    /** A video homed in a left-out Drive with no link into a kept one stays, uncategorized. */
+    keepUnlinkedVideos: boolean;
+    /** Links in kept text to anything left out become plain text (kinpak only; a vault always does this). */
+    unlinkText: boolean;
+}
+
+export const DEFAULT_DRIVE_SCOPE: DriveScopeOptions = { excluded: [], terms: "keep", keepLinkedVideos: true, keepUnlinkedVideos: false, unlinkText: true };
+
+/** One Drive as the export pickers list it. */
+export interface ExportDrive {
+    path: string;
+    segment: string;
+    alias: string | null;
+    /** Videos whose home is in this Drive. */
+    videos: number;
+}
+
+export async function getExportDrives(): Promise<ExportDrive[]> {
+    return await invoke("get_export_drives");
+}
+
+export interface ObsidianOptions {
+    videos: boolean;
+    transcripts: boolean;
+    glossary: boolean;
+    biographies: boolean;
+    drives: DriveScopeOptions;
+}
+
 /** Exports the library as an Obsidian vault into `vaultPath`, a NEW folder: if that name is already
  *  taken the export writes to "name (2)" etc. instead. The summary's `folder_path` is where it went. */
-export async function exportToObsidian(vaultPath: string): Promise<ExportSummary> {
-    return await invoke("export_to_obsidian", { vaultPath });
+export async function exportToObsidian(vaultPath: string, options?: ObsidianOptions): Promise<ExportSummary> {
+    return await invoke("export_to_obsidian", { vaultPath, options });
 }
 
 /** Save As dialog whose chosen name is the vault folder itself; null if cancelled. */
@@ -437,6 +479,104 @@ export async function getWdbsRoots(): Promise<WdbsRoot[]> {
     return await invoke("get_wdbs_roots");
 }
 
+// ── Drive sequences (see db/sequences.rs) ────────────────────────────────────
+// One ordered watch-through list per Drive. `drive` is always the display path (":CS-DSA").
+
+/** Where a video stands in one Drive's sequence. */
+export interface DriveSequenceState {
+    drive: string;
+    /** Videos in the sequence (0 = the Drive has none yet). */
+    total: number;
+    /** The video's place counted from 1; null when it isn't in this sequence. */
+    position: number | null;
+    first: string | null;
+    prev: string | null;
+    next: string | null;
+}
+
+export interface SequenceEntry {
+    videoId: string;
+    title: string;
+    position: number;
+}
+
+export interface AddToSequenceOutcome {
+    added: number;
+    /** Skipped: already in the sequence. */
+    alreadyIn: number;
+    /** Skipped: not filed at or beneath the Drive. */
+    notInDrive: number;
+}
+
+/** A video that could be added to a Drive's sequence. */
+export interface DriveVideo {
+    videoId: string;
+    title: string;
+    author: string | null;
+    publishedAt: string | null;
+}
+
+export interface DriveVideoPage {
+    videos: DriveVideo[];
+    /** How many match across all pages. */
+    total: number;
+}
+
+/** What to order videos by: upload date, when added to the library, or title (natural: "2" before "10"). */
+export type SequenceSort = 'published' | 'added' | 'title';
+
+/** Videos filed at or beneath `drive` (home or "Also in") that aren't in its sequence yet, in `sort` order. */
+export async function listDriveVideosForSequence(drive: string, query: string, sort: SequenceSort, descending: boolean, limit: number, offset: number): Promise<DriveVideoPage> {
+    return await invoke("list_drive_videos_for_sequence", { drive, query, sort, descending, limit, offset });
+}
+
+/** Adds every video the picker lists for `query` (all pages) in `sort` order, except `excluded`. `tail`
+ *  is for ones unticked and ticked again: they go after all the rest, in the order given (they're in
+ *  `excluded` too, so the ordered pass skips them). */
+export async function addMatchingToDriveSequence(drive: string, query: string, sort: SequenceSort, descending: boolean, excluded: string[], tail: string[] = []): Promise<AddToSequenceOutcome> {
+    return await invoke("add_matching_to_drive_sequence", { drive, query, sort, descending, excluded, tail });
+}
+
+export async function getVideoSequences(videoId: string, drives: string[]): Promise<DriveSequenceState[]> {
+    return await invoke("get_video_sequences", { videoId, drives });
+}
+
+/** A Drive one level beneath another. */
+export interface ChildDrive {
+    /** Display path, e.g. ":DUPED-FRW-PND". */
+    drive: string;
+    /** Videos filed at or beneath it. */
+    videos: number;
+    /** How many videos its sequence has (0 = none yet). */
+    sequenceTotal: number;
+}
+
+/** The sub-drives one level beneath `drive`, in name order. */
+export async function getChildDrives(drive: string): Promise<ChildDrive[]> {
+    return await invoke("get_child_drives", { drive });
+}
+
+export async function getDriveSequence(drive: string): Promise<SequenceEntry[]> {
+    return await invoke("get_drive_sequence", { drive });
+}
+
+/** Appends videos to the end of a Drive's sequence: in the order given, or ordered by `order` when set. */
+export async function addToDriveSequence(drive: string, videoIds: string[], order?: { sort: SequenceSort; descending: boolean }): Promise<AddToSequenceOutcome> {
+    return await invoke("add_to_drive_sequence", { drive, videoIds, sort: order?.sort, descending: order?.descending });
+}
+
+export async function removeFromDriveSequence(drive: string, videoId: string): Promise<void> {
+    await invoke("remove_from_drive_sequence", { drive, videoId });
+}
+
+export async function setDriveSequenceOrder(drive: string, videoIds: string[]): Promise<void> {
+    await invoke("set_drive_sequence_order", { drive, videoIds });
+}
+
+export async function clearDriveSequence(drive: string): Promise<void> {
+    await invoke("clear_drive_sequence", { drive });
+}
+
 /** A Drive that some of a channel's saved videos are filed under. */
 export interface HandleDrive {
     /** Storage form, e.g. "θψCRYPTO_DOAC". */
@@ -489,6 +629,17 @@ export async function pickAttachmentFiles(): Promise<string[]> {
 /** Stores the files at `paths` (read by the backend) on the video, reporting each one's result. */
 export async function addAttachments(videoId: string, paths: string[]): Promise<AddAttachmentOutcome[]> {
     return await invoke("add_attachments", { videoId, paths });
+}
+
+/** Adds a web link to a saved video, shown under `title` (the site's name when blank). It comes back as an
+ *  attachment whose `ext` is "url". Only http and https addresses are accepted; the reason is thrown otherwise. */
+export async function addAttachmentLink(videoId: string, title: string, url: string): Promise<AttachmentInfo> {
+    return await invoke("add_attachment_link", { videoId, title, url });
+}
+
+/** A link attachment's address, checked again on the way out. Shown to the user before it's opened. */
+export async function getAttachmentLink(id: number): Promise<string> {
+    return await invoke("get_attachment_link", { id });
 }
 
 export async function removeAttachment(id: number): Promise<void> {
@@ -1004,12 +1155,15 @@ export interface KinpakOptions {
     glossary: boolean;
     biographies: boolean;
     prompts: boolean;
+    /** Per-Drive sequence membership and ordering. */
+    sequences: boolean;
     settings: boolean;
     /** The workspace's name and its section aliases. */
     workspace: boolean;
     history: boolean;
     notes: boolean;
     attachments: boolean;
+    drives: DriveScopeOptions;
 }
 
 export interface KinpakExportSummary {

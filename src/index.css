@@ -397,6 +397,35 @@ mark {
     background: transparent;
 }
 
+/* The little square where a vertical and horizontal scrollbar meet is unstyled by default, which
+   renders as a plain white square regardless of theme — transparent lets whatever's actually
+   behind it (the themed page/panel background) show through instead. */
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* Tab-focusing something without its own focus treatment (a checkbox, a plain row, a button)
+   otherwise falls back to the browser's native outline — a stark black/blue rectangle that clashes
+   with every theme here. This replaces it everywhere with a themed ring instead of removing it
+   outright (focus indication matters for keyboard use). Only :focus-visible, not plain :focus, so
+   clicking with a mouse doesn't show a ring that Tab navigation should.
+   Wrapped in `@layer utilities` (Tailwind's own utilities land in this same layer) so it's compared
+   fairly against a class like `outline-none` instead of always winning as unlayered CSS would;
+   `:where(...)` on top of that drops its specificity to zero, so a *bare* `outline-none` (0,1,0,
+   same as plain `:focus-visible` — several inputs across the app use exactly this alongside their
+   own `focus:border-*` color change) doesn't lose a same-specificity, same-layer tie just because
+   this rule happens to sit later in the file. `outline-none`/`focus:outline-none` isn't "no focus
+   feedback" — it means focus is already shown another way (a border color change, or, for
+   SearchBar's input, its container's own rounded focus-within ring — this rule used to draw an
+   extra square outline over the top of that). Zero specificity still beats the browser's own
+   unlayered-but-lowest-priority default for everything with no such opt-out at all. */
+@layer utilities {
+    :where(:focus-visible) {
+        outline: 2px solid var(--k-accent);
+        outline-offset: 2px;
+    }
+}
+
 .custom-scrollbar::-webkit-scrollbar {
     width: 16px;
 }

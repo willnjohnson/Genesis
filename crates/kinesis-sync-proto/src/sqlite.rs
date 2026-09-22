@@ -11,7 +11,8 @@ use serde_json::Value;
 
 use crate::settings::is_syncable_setting;
 use crate::types::{
-    link_key, split_link_key, BiographyData, CustomPromptData, GlossaryData, Kind, VideoData, VideoLinkData, WdbsData,
+    link_key, sequence_key, split_link_key, split_sequence_key, BiographyData, CustomPromptData, GlossaryData, Kind,
+    SequenceData, VideoData, VideoLinkData, WdbsData,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -85,17 +86,22 @@ fn build_link(row: &Row, _: &ReadOptions) -> Built {
     to_value(link_key(&v, &w), &VideoLinkData { video_id: v, wdbs: w })
 }
 
+fn build_sequence(row: &Row, _: &ReadOptions) -> Built {
+    let (d, v) = (key(row, 0)?, key(row, 1)?);
+    let position = oi(row, 2)?;
+    to_value(sequence_key(&d, &v), &SequenceData { drive: d, video_id: v, position })
+}
+
 fn build_glossary(row: &Row, _: &ReadOptions) -> Built {
     let k = key(row, 0)?;
-    // Column 2 is the newline-joined Drive roots, "" when the term has none, and NULL on a
-    // database that predates GlossaryDrives (then `None`: "unknown", not "cleared").
-    let drives = os(row, 2).map(|joined| {
-        let mut roots: Vec<String> = joined.split('\n').filter(|r| !r.is_empty()).map(String::from).collect();
-        roots.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then(a.cmp(b)));
-        roots.dedup();
-        roots
-    });
-    to_value(k, &GlossaryData { definition: os(row, 1), drives })
+    // Column 2 is Glossary's own `drives` column (newline-joined roots, "" when the term has
+    // none) — always present, so this is always `Some`, never the "sender doesn't know" `None`
+    // GlossaryData still allows for (an old pack that predates this field entirely).
+    let joined = os(row, 2).unwrap_or_default();
+    let mut roots: Vec<String> = joined.split('\n').filter(|r| !r.is_empty()).map(String::from).collect();
+    roots.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then(a.cmp(b)));
+    roots.dedup();
+    to_value(k, &GlossaryData { definition: os(row, 1), drives: Some(roots) })
 }
 
 fn build_biography(row: &Row, _: &ReadOptions) -> Built {
@@ -126,24 +132,6 @@ fn build_biography(row: &Row, _: &ReadOptions) -> Built {
 fn build_prompt(row: &Row, _: &ReadOptions) -> Built {
     let k = key(row, 0)?;
     to_value(k, &CustomPromptData { local_prompt_text: os(row, 1), cloud_prompt_text: os(row, 2) })
-}
-
-const GLOSSARY_ALL: &str = "SELECT g.term, g.definition,
-        COALESCE((SELECT group_concat(d.root, char(10)) FROM GlossaryDrives d WHERE d.term = g.term), '')
-     FROM Glossary g ORDER BY g.term";
-const GLOSSARY_ONE: &str = "SELECT g.term, g.definition,
-        COALESCE((SELECT group_concat(d.root, char(10)) FROM GlossaryDrives d WHERE d.term = g.term), '')
-     FROM Glossary g WHERE g.term = ?1";
-// For databases without GlossaryDrives: same shape, with NULL for the drives column.
-const GLOSSARY_ALL_PLAIN: &str = "SELECT term, definition, NULL FROM Glossary ORDER BY term";
-const GLOSSARY_ONE_PLAIN: &str = "SELECT term, definition, NULL FROM Glossary WHERE term = ?1";
-
-/// The SQL for `kind`, falling back for glossaries whose database has no `GlossaryDrives` table.
-fn sql_for(conn: &Connection, kind: Kind, spec: &Spec, one: bool) -> &'static str {
-    if kind == Kind::Glossary && !table_exists(conn, "GlossaryDrives") {
-        return if one { GLOSSARY_ONE_PLAIN } else { GLOSSARY_ALL_PLAIN };
-    }
-    if one { spec.one } else { spec.all }
 }
 
 struct Spec {
@@ -177,10 +165,16 @@ fn spec(kind: Kind) -> Spec {
             one: "SELECT video_id, wdbs FROM VideoWDBSLinks WHERE video_id = ?1 AND wdbs = ?2",
             build: build_link,
         },
+        Kind::DriveSequence => Spec {
+            table: "DriveSequence",
+            all: "SELECT drive, video_id, position FROM DriveSequence ORDER BY drive, position, video_id",
+            one: "SELECT drive, video_id, position FROM DriveSequence WHERE drive = ?1 AND video_id = ?2",
+            build: build_sequence,
+        },
         Kind::Glossary => Spec {
             table: "Glossary",
-            all: GLOSSARY_ALL,
-            one: GLOSSARY_ONE,
+            all: "SELECT term, definition, drives FROM Glossary ORDER BY term",
+            one: "SELECT term, definition, drives FROM Glossary WHERE term = ?1",
             build: build_glossary,
         },
         Kind::Biography => Spec {
@@ -228,7 +222,7 @@ pub fn for_each_item(
     if !table_exists(conn, spec.table) {
         return Ok(0);
     }
-    let mut stmt = conn.prepare(sql_for(conn, kind, &spec, false)).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(spec.all).map_err(|e| e.to_string())?;
     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
     let mut n = 0;
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
@@ -251,10 +245,15 @@ pub fn load_item(conn: &Connection, kind: Kind, item_key: &str, opts: &ReadOptio
             Some((v, w)) => vec![v, w],
             None => return Ok(None),
         }
+    } else if kind == Kind::DriveSequence {
+        match split_sequence_key(item_key) {
+            Some((d, v)) => vec![d, v],
+            None => return Ok(None),
+        }
     } else {
         vec![item_key]
     };
-    let mut stmt = conn.prepare(sql_for(conn, kind, &spec, true)).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(spec.one).map_err(|e| e.to_string())?;
     let built = stmt
         .query_row(params_from_iter(parts.iter()), |row| Ok((spec.build)(row, opts)))
         .optional()
@@ -294,9 +293,11 @@ mod tests {
             "CREATE TABLE Videos (video_id TEXT PRIMARY KEY, title TEXT, author TEXT, handle TEXT, length_seconds INTEGER,
                 transcript TEXT, summary TEXT, view_count INTEGER, published_at TEXT, tags TEXT, WDBS TEXT);
              CREATE TABLE VideoWDBSLinks (video_id TEXT NOT NULL, wdbs TEXT NOT NULL, PRIMARY KEY (video_id, wdbs));
+             CREATE TABLE DriveSequence (drive TEXT NOT NULL, video_id TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY (drive, video_id));
              CREATE TABLE Settings (key TEXT PRIMARY KEY, value TEXT);
              INSERT INTO Videos VALUES ('v1', 'T', 'A', '@a', 60, 'words', NULL, 5, '2024-01-01', 'x,y', 'θψUAP');
              INSERT INTO VideoWDBSLinks VALUES ('v1', 'θψCRYPTO');
+             INSERT INTO DriveSequence VALUES (':CS-DSA', 'v1', 1);
              INSERT INTO Settings VALUES ('showDrive', 'false'), ('api_key', 'SECRET'), ('venice_api_key', 'SECRET2');",
         )
         .unwrap();
@@ -341,27 +342,41 @@ mod tests {
     }
 
     #[test]
-    fn glossary_terms_carry_their_drives_and_older_databases_report_unknown() {
+    fn sequence_items_use_composite_keys() {
         let conn = db();
+        let key = sequence_key(":CS-DSA", "v1");
+        let loaded = load_item(&conn, Kind::DriveSequence, &key, &ReadOptions::default()).unwrap().unwrap();
+        assert_eq!((loaded["drive"].as_str(), loaded["video_id"].as_str(), loaded["position"].as_i64()), (Some(":CS-DSA"), Some("v1"), Some(1)));
+        assert!(load_item(&conn, Kind::DriveSequence, "nope", &ReadOptions::default()).unwrap().is_none());
+        assert!(load_item(&conn, Kind::DriveSequence, ":CS-DSA|other", &ReadOptions::default()).unwrap().is_none());
+        assert_eq!(count_kind(&conn, Kind::DriveSequence), 1);
+        let mut streamed = vec![];
+        for_each_item(&conn, Kind::DriveSequence, &ReadOptions::default(), |k, v| {
+            streamed.push((k.to_string(), v));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(streamed, vec![(key, loaded)]);
+    }
+
+    #[test]
+    fn glossary_terms_carry_their_drives() {
+        let conn = db();
+        // `drives` lives directly on Glossary (see src-tauri/src/db/glossary.rs) — no separate
+        // join table to read, so this reader always knows a term's filings, never "unknown".
         conn.execute_batch(
-            "CREATE TABLE Glossary (term TEXT PRIMARY KEY, definition TEXT NOT NULL);
-             INSERT INTO Glossary VALUES ('Halving', 'Supply cut'), ('Loose', 'No drive'), ('qt', '');",
+            "CREATE TABLE Glossary (term TEXT PRIMARY KEY, definition TEXT NOT NULL, drives TEXT NOT NULL DEFAULT '');
+             INSERT INTO Glossary VALUES
+                 ('Halving', 'Supply cut', ':FIN' || char(10) || ':CRYPTO'),
+                 ('Loose', 'No drive', ''),
+                 ('qt', '', '');",
         )
         .unwrap();
 
-        // No GlossaryDrives table yet: drives are unknown (None), not "cleared" (Some([])).
-        let old = load_item(&conn, Kind::Glossary, "Halving", &ReadOptions::default()).unwrap().unwrap();
-        assert_eq!(old["drives"], Value::Null);
-
-        conn.execute_batch(
-            "CREATE TABLE GlossaryDrives (term TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (term, root));
-             INSERT INTO GlossaryDrives VALUES ('Halving', ':FIN'), ('Halving', ':CRYPTO');",
-        )
-        .unwrap();
         let halving = load_item(&conn, Kind::Glossary, "Halving", &ReadOptions::default()).unwrap().unwrap();
         assert_eq!(halving["drives"], serde_json::json!([":CRYPTO", ":FIN"]), "sorted, so the hash is stable");
         let loose = load_item(&conn, Kind::Glossary, "Loose", &ReadOptions::default()).unwrap().unwrap();
-        assert_eq!(loose["drives"], serde_json::json!([]), "a known-empty set, distinct from unknown");
+        assert_eq!(loose["drives"], serde_json::json!([]), "empty is a known, empty set");
 
         let mut streamed = std::collections::BTreeMap::new();
         for_each_item(&conn, Kind::Glossary, &ReadOptions::default(), |k, v| {

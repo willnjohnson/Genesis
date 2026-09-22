@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
 import { advance, newBoard, paintLine, randomPattern, stamp, type Board } from "../../lib/life";
 
+// ↑↑↓↓←→←→BA. Letters are matched case-insensitively so Caps Lock doesn't break the streak.
+const KONAMI = ["ArrowUp", "ArrowUp", "ArrowDown", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowLeft", "ArrowRight", "b", "a"];
+
 /**
  * An endless Conway's Game of Life, drawn faintly behind the Workspaces screen.
  *
@@ -19,6 +22,10 @@ import { advance, newBoard, paintLine, randomPattern, stamp, type Board } from "
  * Colors come from the active theme (its text color and accent), at low opacity, so it reads as
  * texture and never competes with what's on the screen. For people who ask their system for reduced
  * motion it draws one still frame, doesn't animate and doesn't react to the pointer.
+ *
+ * The Konami code (↑↑↓↓←→←→BA) swaps every square cell for a circle (and back again, entered a
+ * second time) — a change to the whole board at once rather than something added to it, so it
+ * reads immediately instead of needing to be picked out among everything already moving.
  */
 
 const CELL = 12; // css pixels per cell, including its gap
@@ -55,6 +62,19 @@ export function LifeBackground() {
         let dragged = false;
         let downCell = { x: 0, y: 0 };
         let lastCell = { x: 0, y: 0 };
+        // The Konami code toggles this. Read by fillCell below; nothing else about the simulation
+        // or the interaction changes, just how a filled-in cell is drawn.
+        let circles = false;
+
+        const fillCell = (x: number, y: number, size: number) => {
+            if (circles) {
+                ctx.beginPath();
+                ctx.arc(x * CELL + size / 2, y * CELL + size / 2, size / 2, 0, Math.PI * 2);
+                ctx.fill();
+            } else {
+                ctx.fillRect(x * CELL, y * CELL, size, size);
+            }
+        };
 
         const draw = (dt: number) => {
             const b = board;
@@ -77,12 +97,12 @@ export function LifeBackground() {
                     if (s >= 0.03) {
                         ctx.globalAlpha = s * MAX_ALPHA;
                         ctx.fillStyle = fg;
-                        ctx.fillRect(x * CELL, y * CELL, size, size);
+                        fillCell(x, y, size);
                     }
                     if (b.glow[i] >= 0.05) {
                         ctx.globalAlpha = b.glow[i] * GLOW_ALPHA;
                         ctx.fillStyle = accent;
-                        ctx.fillRect(x * CELL, y * CELL, size, size);
+                        fillCell(x, y, size);
                     }
                 }
             }
@@ -90,7 +110,7 @@ export function LifeBackground() {
             if (hover && hover.x < b.cols && hover.y < b.rows) {
                 ctx.globalAlpha = 0.16;
                 ctx.fillStyle = accent;
-                ctx.fillRect(hover.x * CELL, hover.y * CELL, size, size);
+                fillCell(hover.x, hover.y, size);
             }
             ctx.globalAlpha = 1;
         };
@@ -173,12 +193,32 @@ export function LifeBackground() {
             hover = null;
         };
 
+        // The Konami code. Global (not scoped to the background, unlike click-to-stamp above) so it
+        // still works while a card or button has focus; never preventDefault/stopPropagation, so it
+        // never interferes with normal typing or navigation, on the off chance those ten keys are
+        // ever pressed in this exact order for an unrelated reason.
+        let progress = 0;
+        const onKeyDown = (e: KeyboardEvent) => {
+            const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+            const want = KONAMI[progress];
+            progress = key === want ? progress + 1 : key === KONAMI[0] ? 1 : 0;
+            if (progress === KONAMI.length) {
+                progress = 0;
+                circles = !circles;
+            }
+        };
+
         resize();
         const observer = new ResizeObserver(resize);
         observer.observe(holder);
         if (!still) {
+            // Gated the same as the pointer listeners just below: reduced-motion mode draws one
+            // still frame and never runs the draw loop again, so toggling circles here would have
+            // nothing left to ever repaint — consistent with that mode already turning off all
+            // interactivity, not just the animation itself.
             last = performance.now();
             raf = requestAnimationFrame(frame);
+            window.addEventListener("keydown", onKeyDown);
             holder.addEventListener("pointerdown", onDown);
             holder.addEventListener("pointermove", onMove);
             holder.addEventListener("pointerup", onUp);
@@ -188,6 +228,7 @@ export function LifeBackground() {
         return () => {
             cancelAnimationFrame(raf);
             observer.disconnect();
+            window.removeEventListener("keydown", onKeyDown);
             holder.removeEventListener("pointerdown", onDown);
             holder.removeEventListener("pointermove", onMove);
             holder.removeEventListener("pointerup", onUp);

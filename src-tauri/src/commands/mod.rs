@@ -13,6 +13,7 @@ pub mod attachments;
 pub mod workspace;
 pub mod workspaces;
 pub mod kinpak;
+pub mod sequences;
 
 pub use settings::*;
 pub use youtube::*;
@@ -29,3 +30,4 @@ pub use attachments::*;
 pub use workspace::*;
 pub use workspaces::*;
 pub use kinpak::*;
+pub use sequences::*;
