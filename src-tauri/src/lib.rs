@@ -8,7 +8,7 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.4.4";
+const VERSION: &str = "0.4.5";
 
 /// The smallest the window can be dragged to (logical pixels). The width matches the smallest size
 /// offered under Settings > Display (600x600), so every choice there still fits; below this the header
