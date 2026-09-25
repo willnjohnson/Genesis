@@ -350,6 +350,7 @@ pub fn run() {
             }
             window_state::track(&window);
             let _ = window.show();
+            window_state::settle_position(&window, plan.position);
             
             Ok(())
         })
