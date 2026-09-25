@@ -96,10 +96,14 @@ export function LinkPicker() {
             switch (tab) {
                 case 'glossary': {
                     const terms = await getGlossaryTerms();
+                    // A link is by name alone, so a term with a definition per Drive is listed once
+                    // (the first row's text; which Drive's opens is decided when the link is followed).
+                    const seen = new Set<string>();
                     return terms
                         // Quick Tags have no definition, so there is nothing to open.
-                        .filter(([term, def]) => def.trim() !== '' && matches(query, term, def))
-                        .map(([term, def]) => ({ key: term, label: term, sub: def.replace(/\s+/g, ' ').slice(0, 90) }));
+                        .filter(({ term, definition }) => definition.trim() !== '' && matches(query, term, definition))
+                        .filter(({ term }) => !seen.has(term) && seen.add(term))
+                        .map(({ term, definition }) => ({ key: term, label: term, sub: definition.replace(/\s+/g, ' ').slice(0, 90) }));
                 }
                 case 'bio': {
                     const bios = await getBiographies();

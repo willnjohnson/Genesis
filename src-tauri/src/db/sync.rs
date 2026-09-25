@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use kinesis_sync_proto::{
-    content_hash, is_syncable_setting, link_key, sequence_key, split_link_key, split_sequence_key,
+    content_hash, is_syncable_setting, link_key, sequence_key, split_glossary_key, split_link_key, split_sequence_key,
     validate_key, BiographyData, CustomPromptData, GlossaryData, Item, Kind, Policy, SequenceData,
     Tombstone, VideoData, VideoLinkData, WdbsData, MAX_ITEM_BYTES,
 };
@@ -297,24 +297,41 @@ fn apply_video_link(conn: &Connection, item: &Item) -> R<bool> {
 
 fn apply_glossary(conn: &Connection, item: &Item) -> R<bool> {
     let d: GlossaryData = parse(item)?;
-    upsert_coalesce(
-        conn,
-        "Glossary",
-        "term",
-        &item.key,
-        &[("definition", s(&d.definition))],
-        &[("definition", Sql::Text(String::new()))],
+    // One item per definition: the key is `first Drive|term` (see kinesis-sync-proto's
+    // glossary_key), the payload carries the whole Drive list.
+    let (key_drive, term) = split_glossary_key(&item.key).ok_or_else(|| "glossary key must be drive|term".to_string())?;
+    let listed = d.drives.clone().unwrap_or_else(|| if key_drive.is_empty() { Vec::new() } else { vec![key_drive.to_string()] });
+    let drives = super::glossary::validated_drives(&listed).map_err(|e| e.to_string())?;
+    if drives.first().map(String::as_str).unwrap_or("") != key_drive {
+        return Err("glossary key doesn't match its drives".into());
+    }
+    // A Quick Tag (empty definition) is never filed under a Drive.
+    if !drives.is_empty() && d.definition.as_deref().is_some_and(|def| def.trim().is_empty()) {
+        return Err("a Quick Tag can't be filed under a Drive".into());
+    }
+    for root in &drives {
+        ensure_wdbs_path_exists_with_conn(conn, root).map_err(db)?;
+    }
+    let encoded = super::glossary::encode_drives(&drives);
+    // A Drive belongs to one definition of a term: another local row claiming one of these Drives
+    // (say, this definition's old, shorter list) gives way to the server's.
+    let others: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT drives FROM Glossary WHERE term = ?1 AND drives <> ?2").map_err(db)?;
+        let rows = stmt.query_map(params![term, encoded], |r| r.get::<_, String>(0)).map_err(db)?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    for other in others {
+        if super::glossary::decode_drives(&other).iter().any(|o| drives.contains(o)) {
+            conn.execute("DELETE FROM Glossary WHERE term = ?1 AND drives = ?2", params![term, other]).map_err(db)?;
+        }
+    }
+    // A null definition leaves an existing row's alone; a new row starts with ''.
+    conn.execute(
+        "INSERT INTO Glossary (term, definition, drives) VALUES (?1, COALESCE(?2, ''), ?3)
+         ON CONFLICT(term, drives) DO UPDATE SET definition = COALESCE(?2, definition)",
+        params![term, d.definition, encoded],
     )
     .map_err(db)?;
-    // `Some` is the complete set of top-level drives (an empty list uncategorizes the term);
-    // `None` means the sender predates drive assignments, so the local ones stay as they are.
-    if let Some(drives) = &d.drives {
-        let roots = super::glossary::validated_roots(drives).map_err(|e| e.to_string())?;
-        for root in &roots {
-            ensure_wdbs_path_exists_with_conn(conn, root).map_err(db)?;
-        }
-        super::glossary::set_glossary_drives(conn, &item.key, &roots).map_err(db)?;
-    }
     Ok(true)
 }
 
@@ -523,9 +540,14 @@ fn apply_delete(conn: &Connection, t: &Tombstone) -> R<DeleteOutcome> {
             DeleteOutcome::Deleted
         }
         Kind::Glossary => {
-            // Drives lives on the same row now (see db/glossary.rs), so this one delete is
-            // everything — no second table to clean up alongside it any more.
-            conn.execute("DELETE FROM Glossary WHERE term = ?1", params![t.key]).map_err(db)?;
+            // The key's drive is the row's first one: the whole value, or the front of its list.
+            if let Some((drive, term)) = split_glossary_key(&t.key) {
+                conn.execute(
+                    "DELETE FROM Glossary WHERE term = ?1 AND (drives = ?2 OR substr(drives, 1, length(?2) + 1) = ?2 || char(10))",
+                    params![term, drive],
+                )
+                .map_err(db)?;
+            }
             DeleteOutcome::Deleted
         }
         Kind::Biography => {
@@ -707,6 +729,7 @@ pub fn policy_count(conn: &Connection) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kinesis_sync_proto::glossary_key;
     use crate::db::init_db;
     use serde_json::{json, Value};
 
@@ -772,7 +795,7 @@ mod tests {
     fn unchanged_content_is_skipped_unless_forced() {
         let db_path = temp_db("hash");
         let mut conn = open_sync_conn(&db_path).unwrap();
-        let it = item("glossary", "term", json!({"definition": "d"}));
+        let it = item("glossary", "|term", json!({"definition": "d"}));
         assert_eq!(apply_page(&mut conn, &[it.clone()], &[], false).unwrap().upserted, 1);
         assert_eq!(apply_page(&mut conn, &[it.clone()], &[], false).unwrap().unchanged, 1);
 
@@ -791,9 +814,9 @@ mod tests {
         let db_path = temp_db("tomb");
         let mut conn = open_sync_conn(&db_path).unwrap();
         conn.execute("INSERT INTO Glossary (term, definition) VALUES ('mine', 'local')", []).unwrap();
-        apply_page(&mut conn, &[item("glossary", "theirs", json!({"definition": "server"}))], &[], false).unwrap();
+        apply_page(&mut conn, &[item("glossary", "|theirs", json!({"definition": "server"}))], &[], false).unwrap();
 
-        let stats = apply_page(&mut conn, &[], &[tomb("glossary", "mine"), tomb("glossary", "theirs")], false).unwrap();
+        let stats = apply_page(&mut conn, &[], &[tomb("glossary", "|mine"), tomb("glossary", "|theirs")], false).unwrap();
         assert_eq!(stats.deleted, 1);
         assert_eq!(stats.skipped, 1);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='mine'"), 1, "local row must survive");
@@ -844,34 +867,62 @@ mod tests {
     }
 
     fn drives_of(conn: &Connection, term: &str) -> Vec<String> {
-        let raw: String = conn
-            .query_row("SELECT drives FROM Glossary WHERE term = ?1", [term], |r| r.get(0))
-            .unwrap_or_default();
-        let mut roots: Vec<String> = raw.split('\n').filter(|r| !r.is_empty()).map(str::to_string).collect();
-        roots.sort();
-        roots
+        let mut stmt = conn.prepare("SELECT drives FROM Glossary WHERE term = ?1 ORDER BY drives").unwrap();
+        stmt.query_map([term], |r| r.get::<_, String>(0)).unwrap().filter_map(|r| r.ok()).collect()
     }
 
     #[test]
-    fn glossary_drive_assignments_follow_the_server_and_only_when_it_sends_them() {
+    fn a_term_has_one_row_per_drive_each_with_its_own_definition() {
         let db_path = temp_db("gdrives");
         let mut conn = open_sync_conn(&db_path).unwrap();
-        let with = |drives: Value| item("glossary", "Halving", json!({"definition": "Supply cut", "drives": drives}));
+        let magnesium = |drive: &str, def: &str| item("glossary", &glossary_key(drive, "Magnesium"), json!({ "definition": def }));
 
-        apply_page(&mut conn, &[with(json!([":CRYPTO", ":FIN"]))], &[], false).unwrap();
-        assert_eq!(drives_of(&conn, "Halving"), vec![":CRYPTO", ":FIN"]);
+        apply_page(&mut conn, &[magnesium(":PRIV", "An element."), magnesium(":UAP", "A supplement.")], &[], false).unwrap();
+        assert_eq!(drives_of(&conn, "Magnesium"), vec![":PRIV", ":UAP"]);
+        assert_eq!(text(&conn, "SELECT definition FROM Glossary WHERE term='Magnesium' AND drives=':UAP'").as_deref(), Some("A supplement."));
         // The root gets registered as a taxonomy node too, so it exists locally.
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM tblWDBS WHERE WDBS = ':CRYPTO' AND lev = 1"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM tblWDBS WHERE WDBS = ':PRIV' AND lev = 1"), 1);
 
-        // An older server that says nothing about drives leaves the assignments alone...
-        apply_page(&mut conn, &[item("glossary", "Halving", json!({"definition": "Supply cut, revised"}))], &[], false).unwrap();
-        assert_eq!(drives_of(&conn, "Halving"), vec![":CRYPTO", ":FIN"]);
+        // Updating one Drive's definition leaves the other's alone.
+        apply_page(&mut conn, &[magnesium(":PRIV", "Atomic number 12.")], &[], false).unwrap();
+        assert_eq!(text(&conn, "SELECT definition FROM Glossary WHERE term='Magnesium' AND drives=':PRIV'").as_deref(), Some("Atomic number 12."));
+        assert_eq!(text(&conn, "SELECT definition FROM Glossary WHERE term='Magnesium' AND drives=':UAP'").as_deref(), Some("A supplement."));
 
-        // ...while an explicit list replaces them, and an empty one uncategorizes.
-        apply_page(&mut conn, &[with(json!([":FIN"]))], &[], false).unwrap();
-        assert_eq!(drives_of(&conn, "Halving"), vec![":FIN"]);
-        apply_page(&mut conn, &[with(json!([]))], &[], false).unwrap();
-        assert!(drives_of(&conn, "Halving").is_empty());
+        // A tombstone removes just that Drive's row.
+        apply_page(&mut conn, &[], &[tomb("glossary", &glossary_key(":PRIV", "Magnesium"))], false).unwrap();
+        assert_eq!(drives_of(&conn, "Magnesium"), vec![":UAP"]);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn a_definition_arrives_as_one_row_holding_all_its_drives() {
+        let db_path = temp_db("glist");
+        let mut conn = open_sync_conn(&db_path).unwrap();
+        let health = |drives: Value| item("glossary", &glossary_key(":HEALTH", "Magnesium"), json!({"definition": "Health.", "drives": drives}));
+
+        apply_page(&mut conn, &[health(json!([":HEALTH", ":SLEEP"]))], &[], false).unwrap();
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='Magnesium'"), 1);
+        assert_eq!(text(&conn, "SELECT replace(drives, char(10), ',') FROM Glossary WHERE term='Magnesium'").as_deref(), Some(":HEALTH,:SLEEP"));
+        // Both Drives are registered locally too.
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM tblWDBS WHERE WDBS = ':SLEEP' AND lev = 1"), 1);
+
+        // The definition later loses a Drive: the same row is replaced, not joined by a second one.
+        apply_page(&mut conn, &[health(json!([":HEALTH"]))], &[], false).unwrap();
+        assert_eq!(text(&conn, "SELECT drives FROM Glossary WHERE term='Magnesium'").as_deref(), Some(":HEALTH"));
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='Magnesium'"), 1);
+
+        // Another definition of the term, under other Drives, is a second row.
+        let chem = item("glossary", &glossary_key(":CHEM", "Magnesium"), json!({"definition": "An element.", "drives": [":CHEM"]}));
+        apply_page(&mut conn, &[chem], &[], false).unwrap();
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='Magnesium'"), 2);
+
+        // A tombstone removes the row whose first Drive it names, and only that one.
+        apply_page(&mut conn, &[], &[tomb("glossary", &glossary_key(":HEALTH", "Magnesium"))], false).unwrap();
+        assert_eq!(text(&conn, "SELECT drives FROM Glossary WHERE term='Magnesium'").as_deref(), Some(":CHEM"));
+
+        // The key's Drive must be the list's first.
+        let stats = apply_page(&mut conn, &[item("glossary", &glossary_key(":OTHER", "Bad"), json!({"definition": "d", "drives": [":FIN"]}))], &[], false).unwrap();
+        assert_eq!(stats.errors.len(), 1, "{:?}", stats.errors);
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -881,36 +932,45 @@ mod tests {
         let mut conn = open_sync_conn(&db_path).unwrap();
         let stats = apply_page(
             &mut conn,
-            &[item("glossary", "Bad", json!({"definition": "d", "drives": [":CRYPTO-DOAC"]}))],
+            &[item("glossary", &glossary_key(":CRYPTO-DOAC", "Bad"), json!({"definition": "d"}))],
             &[],
             false,
         )
         .unwrap();
         assert_eq!(stats.upserted, 0);
         assert_eq!(stats.errors.len(), 1, "{:?}", stats.errors);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term = 'Bad'"), 0, "the term itself was rolled back too");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term = 'Bad'"), 0, "nothing was stored");
         let _ = std::fs::remove_file(&db_path);
     }
 
     #[test]
-    fn quick_tags_from_a_server_never_get_drives_and_deleting_a_term_drops_its_drives() {
+    fn a_key_without_a_drive_separator_is_refused() {
+        let db_path = temp_db("gnokey");
+        let mut conn = open_sync_conn(&db_path).unwrap();
+        let stats = apply_page(&mut conn, &[item("glossary", "Halving", json!({"definition": "d"}))], &[], false).unwrap();
+        assert_eq!(stats.upserted, 0);
+        assert_eq!(stats.errors.len(), 1, "{:?}", stats.errors);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn quick_tags_from_a_server_are_never_filed_under_a_drive() {
         let db_path = temp_db("gquick");
         let mut conn = open_sync_conn(&db_path).unwrap();
-        apply_page(
+        let stats = apply_page(
             &mut conn,
             &[
-                item("glossary", "qt", json!({"definition": "", "drives": [":CRYPTO"]})),
-                item("glossary", "Std", json!({"definition": "d", "drives": [":CRYPTO"]})),
+                item("glossary", &glossary_key(":CRYPTO", "qt"), json!({"definition": ""})),
+                item("glossary", &glossary_key("", "qt2"), json!({"definition": ""})),
             ],
             &[],
             false,
         )
         .unwrap();
+        assert_eq!(stats.upserted, 1, "{:?}", stats.errors);
+        assert_eq!(stats.errors.len(), 1, "{:?}", stats.errors);
         assert!(drives_of(&conn, "qt").is_empty());
-        assert_eq!(drives_of(&conn, "Std"), vec![":CRYPTO"]);
-
-        apply_page(&mut conn, &[], &[tomb("glossary", "Std")], false).unwrap();
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term = 'Std'"), 0, "no orphaned row left behind");
+        assert_eq!(drives_of(&conn, "qt2"), vec![""]);
         let _ = std::fs::remove_file(&db_path);
     }
 
@@ -921,7 +981,7 @@ mod tests {
         let stats = apply_page(
             &mut conn,
             &[
-                item("glossary", "good", json!({"definition": "ok"})),
+                item("glossary", "|good", json!({"definition": "ok"})),
                 item("wdbs", "no-leading-colon", json!({})),
             ],
             &[],
@@ -942,8 +1002,8 @@ mod tests {
         apply_page(
             &mut conn,
             &[
-                item("glossary", "keep", json!({"definition": "k"})),
-                item("glossary", "stale", json!({"definition": "s"})),
+                item("glossary", "|keep", json!({"definition": "k"})),
+                item("glossary", "|stale", json!({"definition": "s"})),
             ],
             &[],
             false,
@@ -952,7 +1012,7 @@ mod tests {
 
         begin_full_resync(&conn).unwrap();
         // The snapshot only contains `keep` (unchanged content, so this exercises the seen-marking).
-        apply_page(&mut conn, &[item("glossary", "keep", json!({"definition": "k"}))], &[], false).unwrap();
+        apply_page(&mut conn, &[item("glossary", "|keep", json!({"definition": "k"}))], &[], false).unwrap();
         let stats = sweep_unseen(&mut conn).unwrap();
         assert_eq!(stats.deleted, 1);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='stale'"), 0);
@@ -1029,13 +1089,13 @@ mod tests {
     fn disconnect_can_keep_or_remove_synced_rows() {
         let db_path = temp_db("disconnect");
         let mut conn = open_sync_conn(&db_path).unwrap();
-        apply_page(&mut conn, &[item("glossary", "g", json!({"definition": "d"}))], &[], false).unwrap();
+        apply_page(&mut conn, &[item("glossary", "|g", json!({"definition": "d"}))], &[], false).unwrap();
         assert_eq!(owned_counts(&conn).unwrap().get("glossary"), Some(&1));
 
         assert_eq!(disown_all(&conn).unwrap(), 1);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='g'"), 1, "keep: row becomes local");
 
-        apply_page(&mut conn, &[item("glossary", "h", json!({"definition": "d"}))], &[], false).unwrap();
+        apply_page(&mut conn, &[item("glossary", "|h", json!({"definition": "d"}))], &[], false).unwrap();
         let stats = remove_all_owned(&mut conn).unwrap();
         assert_eq!(stats.deleted, 1);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM Glossary WHERE term='h'"), 0);

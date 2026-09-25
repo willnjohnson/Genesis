@@ -76,4 +76,9 @@ mod tests {
         assert_eq!(crate::db::get_setting(&db, "showTabTheme").unwrap().as_deref(), Some("false"));
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn sort_control_accessibility_flag_is_present_and_default_off() {
+        assert!(FEATURE_FLAGS.iter().any(|(key, default)| *key == "showSortControlButtons" && *default == "false"));
+    }
 }

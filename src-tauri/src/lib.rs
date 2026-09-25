@@ -8,12 +8,12 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.4.5";
+const VERSION: &str = "0.4.6";
 
-/// The smallest the window can be dragged to (logical pixels). The width matches the smallest size
-/// offered under Settings > Display (600x600), so every choice there still fits; below this the header
+/// The smallest the window can be dragged to (logical pixels). 800 is also the smallest size
+/// offered under Settings > Display, so every choice there still fits; below this the header
 /// and the workspace screen start to overlap themselves.
-const MIN_WINDOW_WIDTH: f64 = 600.0;
+const MIN_WINDOW_WIDTH: f64 = 800.0;
 const MIN_WINDOW_HEIGHT: f64 = 500.0;
 
 /// Windows and macOS: "<Workspace name> - Kinesis v0.4.2", the workspace's own name (see
@@ -57,6 +57,8 @@ mod sync;
 mod workspaces;
 mod kinpak;
 mod drive_scope;
+mod global_settings;
+mod window_state;
 
 pub use types::{Video, ChannelInfo, VideoResponse, DisplaySettings, DbDetails};
 pub use types::{parse_view_count, extract_handle_from_url};
@@ -91,28 +93,25 @@ pub(crate) fn get_db_path(app: &tauri::AppHandle) -> String {
     guard.clone().unwrap_or_default()
 }
 
-/// The window size and fullscreen choice saved in a workspace's settings (defaults when there's no
-/// workspace open yet or the value is unreadable).
-fn window_prefs(db_path: &str) -> (f64, f64, bool) {
-    if db_path.is_empty() {
-        return (1440.0, 900.0, false);
-    }
-    let resolution = db::get_setting(db_path, "resolution").unwrap_or(None).unwrap_or_else(|| "1440x900".to_string());
-    let fullscreen = db::get_setting(db_path, "fullscreen").unwrap_or(None).map(|s| s == "true").unwrap_or(false);
-    let parts: Vec<&str> = resolution.split('x').collect();
+/// The machine-global window size and fullscreen choice (defaults when the value is unreadable).
+fn window_prefs(app: &tauri::AppHandle) -> (f64, f64, bool) {
+    let settings = global_settings::load(app);
+    let parts: Vec<&str> = settings.resolution.split('x').collect();
     let (w, h) = match (parts.get(0).and_then(|p| p.parse::<f64>().ok()), parts.get(1).and_then(|p| p.parse::<f64>().ok())) {
         (Some(w), Some(h)) if parts.len() == 2 => (w, h),
         _ => (1440.0, 900.0),
     };
-    (w, h, fullscreen)
+    (w, h, settings.fullscreen)
 }
 
-/// After switching workspaces: the new one's own window size and fullscreen choice take effect.
+/// After switching workspaces: the machine-global window size and fullscreen choice take effect
+/// (these no longer vary per workspace).
 pub(crate) fn apply_window_prefs(app: &tauri::AppHandle) {
-    let (w, h, fullscreen) = window_prefs(&get_db_path(app));
+    let (w, h, fullscreen) = window_prefs(app);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_fullscreen(fullscreen);
-        if !fullscreen {
+        // A maximized window stays maximized; resizing it would un-maximize it for nothing.
+        if !fullscreen && !window.is_maximized().unwrap_or(false) {
             let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(w, h)));
         }
     }
@@ -200,6 +199,8 @@ pub fn run() {
             commands::update_wdbs,
             commands::get_wdbs_tree,
             commands::fetch_videos_by_wdbs,
+            commands::get_unsorted_video_count,
+            commands::fetch_unsorted_videos,
             commands::get_wdbs_suggestions,
             commands::get_video_wdbs,
             commands::get_video_wdbs_links,
@@ -261,7 +262,6 @@ pub fn run() {
             commands::get_glossary_terms,
             commands::delete_glossary_term,
             commands::save_glossary_term,
-            commands::get_glossary_drive_links,
             commands::get_wdbs_roots,
             commands::get_handle_drives,
             commands::get_wdbs_aliases,
@@ -327,19 +327,29 @@ pub fn run() {
             // Attachments opened in other apps are temporary copies; start clean.
             commands::clear_attachment_temp();
 
-            let (width, height, fullscreen) = window_prefs(&db_path);
+            let (_, _, fullscreen) = window_prefs(app_handle);
+            // Opens where it was left (size, position, maximized), corrected first when that no
+            // longer fits the screens; hidden until it's in place so it doesn't flash at the default spot.
+            let plan = window_state::plan_for_launch(app_handle);
 
 
             // Load from bundled index.html
             let url = WebviewUrl::App("index.html".into());
             
             // Create the main window
-            WebviewWindowBuilder::new(app_handle, "main", url)
+            let window = WebviewWindowBuilder::new(app_handle, "main", url)
                 .title(&get_window_title(&db_path))
-                .inner_size(width, height)
+                .inner_size(plan.width, plan.height)
                 .min_inner_size(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
                 .fullscreen(fullscreen)
+                .maximized(plan.maximized)
+                .visible(false)
                 .build()?;
+            if let Some((x, y)) = plan.position {
+                let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+            }
+            window_state::track(&window);
+            let _ = window.show();
             
             Ok(())
         })

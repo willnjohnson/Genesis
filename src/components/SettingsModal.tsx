@@ -53,11 +53,12 @@ const TAB_CONFIG: { id: Tab; label: string; Icon: React.ElementType; badge?: str
 export function SettingsModal({
     isOpen, onClose, onStatusChange, onThemeChange,
     onVideoListModeChange, currentVideoListMode,
-    onNavigationOrientationChange, currentNavigationOrientation, onPluginsChange, onSyncComplete,
+    onNavigationOrientationChange, currentNavigationOrientation,
+    onPluginsChange, onSyncComplete,
     showSummarizeOllama = true, showSummarizeVenice = true,
     showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true
 }: Props) {
-    const { flags } = useFlags();
+    const { flags, reload: reloadFlags } = useFlags();
     // Tabs a DB owner has hidden are left out (see lib/flags.ts for how they depend on each other).
     // Sync is still in development, so it only shows in dev mode, never in a built app.
     const visibleTabs = TAB_CONFIG.filter(t => flags.tabVisible[t.id] && (import.meta.env.DEV || t.id !== 'sync'));
@@ -71,8 +72,9 @@ export function SettingsModal({
     const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
     const [dbDetails, setDbDetails] = useState<DbDetails | null>(null);
     const [displaySettings, setDisplaySettingsState] = useState<DisplaySettings>({
-        resolution: '1440x900', fullscreen: false, theme: 'dark', videoListMode: 'grid', navigationOrientation: 'horizontal'
+        resolution: '1440x900', fullscreen: false, theme: 'dark', videoListMode: 'grid', navigationOrientation: 'horizontal',
     });
+    const [showSortControlButtons, setShowSortControlButtons] = useState(false);
     const [history, setHistory] = useState<HistoryEntry[]>([]);
     const [plugins, setPlugins] = useState([
         { id: 'summarize', name: 'Summarize Transcripts', enabled: false, description: 'Adds AI-powered summarization for transcripts using Local (Ollama) or Cloud (Venice) models.' },
@@ -95,12 +97,14 @@ export function SettingsModal({
             getSearchHistory(100),
             getSetting('plugin_summarize_enabled'),
             getSetting('plugin_photosynthesis_enabled'),
+            getSetting('showSortControlButtons'),
             getKeyStatus().catch(() => null),
-        ]).then(([key, db, display, hist, summarizeEnabled, photoEnabled, keys]) => {
+        ]).then(([key, db, display, hist, summarizeEnabled, photoEnabled, showSortButtons, keys]) => {
             setHasApiKey(!!key);
             setKeyStatus(keys);
             setDbDetails(db);
             setDisplaySettingsState(display);
+            setShowSortControlButtons(showSortButtons === 'true');
             setHistory(hist);
             setPlugins(prev => prev.map(p => {
                 if (p.id === 'summarize') return { ...p, enabled: summarizeEnabled === 'true' };
@@ -128,6 +132,18 @@ export function SettingsModal({
             if (updates.theme) onThemeChange?.(updates.theme);
         } catch (e) {
             console.error("Failed to apply display settings", e);
+        }
+    };
+
+    const handleToggleSortControlButtons = async () => {
+        const next = !showSortControlButtons;
+        setShowSortControlButtons(next);
+        try {
+            await setSetting('showSortControlButtons', next.toString());
+            await reloadFlags();
+        } catch (e) {
+            console.error('Failed to update sort control buttons setting', e);
+            setShowSortControlButtons(!next);
         }
     };
 
@@ -240,9 +256,11 @@ export function SettingsModal({
                         {!loading && activeTab === 'display' && (
                             <DisplayTab
                                 settings={displaySettings}
+                                showSortControlButtons={showSortControlButtons}
                                 currentVideoListMode={currentVideoListMode}
                                 currentNavigationOrientation={currentNavigationOrientation}
                                 onUpdate={handleUpdateDisplay}
+                                onToggleSortControlButtons={handleToggleSortControlButtons}
                             />
                         )}
                         {!loading && activeTab === 'theme' && (

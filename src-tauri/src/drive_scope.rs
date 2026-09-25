@@ -8,9 +8,10 @@
 //!   one linked into a kept Drive can stay, with that link becoming its new home (`keep_linked_videos`);
 //!   one with no such link goes, or stays uncategorized (`keep_unlinked_videos`);
 //! - a link from a kept video into a left-out Drive is dropped, since there's nothing to point at;
-//! - a glossary term filed under left-out Drives stays without them (they'd otherwise bring the
-//!   Drive back on import), or is left out when every Drive it was filed under is (`terms`); terms
-//!   filed under no Drive are never affected;
+//! - a glossary row holds one definition and all its Drives, so left-out Drives come off its list
+//!   (they'd otherwise bring the Drive back on import) and a row left with none goes; a term left
+//!   with no row at all is then left out (`terms` = drop) or survives as one uncategorized row
+//!   (keep). Uncategorized rows are never affected;
 //! - a creator whose videos were all left out goes too (a bio with no videos is what deleting the
 //!   last video removes anyway), along with their custom prompt;
 //! - links inside kept text that point at anything left out become plain text (`unlink_text`).
@@ -19,7 +20,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use kinesis_sync_proto::Kind;
+use kinesis_sync_proto::{glossary_key, split_glossary_key, Kind};
+use crate::db::glossary::{decode_drives, encode_drives};
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
@@ -31,7 +33,8 @@ use crate::db::wdbs::{is_unassigned_sentinel, storage_to_display_path};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TermsMode {
-    /// Keep them, without the left-out Drives.
+    /// Keep them: a term's rows in left-out Drives go, but a term whose every row was in a left-out
+    /// Drive survives as one uncategorized row (its first Drive's definition).
     #[default]
     Keep,
     /// Leave out a term when every Drive it's filed under is left out.
@@ -56,6 +59,15 @@ pub struct DriveScope {
 impl Default for DriveScope {
     fn default() -> Self {
         DriveScope { excluded: Vec::new(), terms: TermsMode::Keep, keep_linked_videos: true, keep_unlinked_videos: false, unlink_text: true }
+    }
+}
+
+/// The Drives a glossary item is filed under: its payload's list, or (an older sender) just the
+/// key's own Drive.
+fn glossary_drives(key: &str, data: &Value) -> Vec<String> {
+    match data.get("drives").and_then(Value::as_array) {
+        Some(list) => list.iter().filter_map(|d| d.as_str().map(str::to_string)).collect(),
+        None => split_glossary_key(key).map(|(d, _)| d).filter(|d| !d.is_empty()).map(|d| vec![d.to_string()]).unwrap_or_default(),
     }
 }
 
@@ -86,7 +98,10 @@ pub struct ScopePlan {
     /// Videos kept although their home Drive is left out: id -> the storage WDBS that becomes their home.
     promoted: HashMap<String, String>,
     dropped_handles: HashSet<String>,
+    /// Terms with no surviving row (Drop mode), whose links become plain text.
     dropped_terms: HashSet<String>,
+    /// Keep mode: term -> the left-out Drive whose row survives, as uncategorized.
+    rehomed_terms: HashMap<String, String>,
     unlink_text: bool,
 }
 
@@ -151,23 +166,38 @@ impl ScopePlan {
             handles.into_iter().filter(|(h, (total, kept))| !h.is_empty() && *total > 0 && *kept == 0).map(|(h, _)| h).collect();
 
         // Glossary is Kinesis-owned and always exists, so no table_exists guard is needed here
-        // (unlike the tblWDBS/handles work above) — just whether there's any filing to look at.
+        // (unlike the tblWDBS/handles work above). A row holds one definition and all its Drives:
+        // left-out Drives come off its list, and a row with none left goes — so what's decided here
+        // is what happens to a term with no row surviving at all: dropped (Drop), or kept as its
+        // first such row, uncategorized (Keep).
         let mut dropped_terms = HashSet::new();
-        if scope.terms == TermsMode::Drop {
-            let mut filed: HashMap<String, (u32, u32)> = HashMap::new(); // term -> (drives, left-out drives)
-            let mut stmt = conn.prepare("SELECT term, drives FROM Glossary WHERE drives != ''").map_err(e)?;
+        let mut rehomed_terms = HashMap::new();
+        {
+            let mut rows_by_term: HashMap<String, (bool, Vec<String>)> = HashMap::new(); // term -> (has a surviving row, all-left-out rows' keys)
+            let mut stmt = conn.prepare("SELECT term, drives FROM Glossary ORDER BY term, drives").map_err(e)?;
             let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(e)?;
-            for (term, raw) in rows.filter_map(|r| r.ok()) {
-                for root in raw.split('\n').filter(|r| !r.is_empty()) {
-                    let counts = filed.entry(term.clone()).or_default();
-                    counts.0 += 1;
-                    counts.1 += u32::from(excluded.contains(root.trim()));
+            for (term, key) in rows.filter_map(|r| r.ok()) {
+                let drives = decode_drives(&key);
+                let entry = rows_by_term.entry(term).or_default();
+                if drives.is_empty() || drives.iter().any(|d| !excluded.contains(d.trim())) {
+                    entry.0 = true;
+                } else {
+                    entry.1.push(key);
                 }
             }
-            dropped_terms = filed.into_iter().filter(|(_, (all, out))| *all > 0 && all == out).map(|(t, _)| t).collect();
+            for (term, (survives, left_out)) in rows_by_term {
+                if survives || left_out.is_empty() {
+                    continue;
+                }
+                if scope.terms == TermsMode::Drop {
+                    dropped_terms.insert(term);
+                } else {
+                    rehomed_terms.insert(term, left_out[0].clone());
+                }
+            }
         }
 
-        Ok(Some(ScopePlan { excluded, dropped_videos, promoted, dropped_handles, dropped_terms, unlink_text: scope.unlink_text }))
+        Ok(Some(ScopePlan { excluded, dropped_videos, promoted, dropped_handles, dropped_terms, rehomed_terms, unlink_text: scope.unlink_text }))
     }
 
     pub fn root_kept(&self, root: &str) -> bool {
@@ -200,8 +230,30 @@ impl ScopePlan {
         !self.dropped_handles.contains(&normalize_handle(handle))
     }
 
-    pub fn term_kept(&self, term: &str) -> bool {
-        !self.dropped_terms.contains(term)
+    /// The Drives a glossary row ends up filed under — `None` when the row is left out. Left-out
+    /// Drives come off its list; a row left with none is left out, except the single row that keeps
+    /// a Keep-mode term alive, which becomes uncategorized (an empty list).
+    pub fn glossary_row(&self, term: &str, drives: &[String]) -> Option<Vec<String>> {
+        if drives.is_empty() {
+            return Some(Vec::new());
+        }
+        let kept: Vec<String> = drives.iter().filter(|d| self.root_kept(d)).cloned().collect();
+        if !kept.is_empty() {
+            return Some(kept);
+        }
+        (self.rehomed_terms.get(term).map(String::as_str) == Some(encode_drives(drives).as_str())).then(Vec::new)
+    }
+
+    /// The item key a kept item is written under, given its (already adjusted) payload — the same as
+    /// `key` except for a glossary row whose first Drive changed or that was re-homed.
+    pub fn item_key(&self, kind: Kind, key: &str, data: &Value) -> String {
+        if kind == Kind::Glossary {
+            if let Some((_, term)) = split_glossary_key(key) {
+                let first = glossary_drives(key, data).into_iter().next().unwrap_or_default();
+                return glossary_key(&first, term);
+            }
+        }
+        key.to_string()
     }
 
     /// Whether a sync item is part of the export. Judged on the item as read, before `adjust`.
@@ -217,7 +269,7 @@ impl ScopePlan {
                 let field = |name: &str| data.get(name).and_then(Value::as_str).unwrap_or("");
                 self.video_kept(field("video_id")) && self.category_kept(field("drive"))
             }
-            Kind::Glossary => self.term_kept(key),
+            Kind::Glossary => split_glossary_key(key).is_some_and(|(_, term)| self.glossary_row(term, &glossary_drives(key, data)).is_some()),
             Kind::Biography | Kind::CustomPrompt => self.handle_kept(key),
         }
     }
@@ -264,8 +316,12 @@ impl ScopePlan {
                 self.clean_field(data, "transcript");
             }
             Kind::Glossary => {
-                if let Some(drives) = data.get_mut("drives").and_then(Value::as_array_mut) {
-                    drives.retain(|d| d.as_str().map_or(true, |root| self.root_kept(root)));
+                if let Some((_, term)) = split_glossary_key(key) {
+                    if let Some(new_drives) = self.glossary_row(term, &glossary_drives(key, data)) {
+                        if let Some(obj) = data.as_object_mut() {
+                            obj.insert("drives".into(), Value::Array(new_drives.into_iter().map(Value::String).collect()));
+                        }
+                    }
                 }
                 self.clean_field(data, "definition");
             }

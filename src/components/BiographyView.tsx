@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { ElementType } from 'react';
+import type { ElementType, RefObject } from 'react';
 import { Pencil, X, Globe, BookOpen, FileText } from 'lucide-react';
 import { BsTwitterX, BsInstagram, BsFacebook, BsYoutube, BsTiktok, BsThreads, BsTwitch, BsReddit, BsDiscord } from 'react-icons/bs';
 import { SiWikipedia } from 'react-icons/si';
@@ -55,7 +55,121 @@ const socialTabConfig: Record<SocialTab, { icon: ElementType; label: string; pla
 
 const socialTabs: SocialTab[] = ['website', 'wikipedia', 'twitter', 'instagram', 'facebook', 'threads', 'youtube', 'tiktok', 'twitch', 'reddit', 'discord'];
 
-export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore, onDriveSelect, allowEditBio }: { searchQuery: string; onChange?: () => void; onVideoSelect?: (video: Video) => void; onViewMore?: (handle: string) => void; onDriveSelect?: (path: string, label: string) => void; allowEditBio?: boolean }) {
+const normalizeSocialValue = (key: SocialTab, value: string): string => {
+    if (!value) return '';
+    if (key === 'website' || key === 'wikipedia') {
+        return value.startsWith('http') ? value : `https://${value}`;
+    } else {
+        // If value is already a full URL, return as-is
+        if (value.startsWith('http://') || value.startsWith('https://')) {
+            return value;
+        }
+        // Platform handles: strip leading @ and build full URL
+        const handle = value.startsWith('@') ? value.slice(1) : value;
+        const prefixes: Record<SocialTab, string> = {
+            twitter: 'https://twitter.com/',
+            instagram: 'https://instagram.com/',
+            facebook: 'https://facebook.com/',
+            threads: 'https://threads.net/@',
+            youtube: 'https://youtube.com/@',
+            tiktok: 'https://tiktok.com/@',
+            twitch: 'https://twitch.tv/',
+            reddit: 'https://reddit.com/',
+            discord: 'https://discord.gg/',
+            website: '',
+            wikipedia: '',
+        };
+        return prefixes[key] + handle;
+    }
+};
+
+/** A social a line of pasted bio text can be auto-detected as, e.g. "Instagram: @handle" or
+ *  "Twitter: https://x.com/handle". "X" is an alias for the same `twitter` field the UI already
+ *  labels "X". youtube/reddit/discord aren't offered here — no line-prefix convention was given
+ *  for them and the existing socials UI already covers adding them by hand. */
+type DetectableSocial = 'twitter' | 'instagram' | 'facebook' | 'wikipedia' | 'threads' | 'tiktok' | 'twitch' | 'website';
+
+const DETECTABLE_LABELS: Record<string, DetectableSocial> = {
+    x: 'twitter',
+    twitter: 'twitter',
+    instagram: 'instagram',
+    facebook: 'facebook',
+    wikipedia: 'wikipedia',
+    threads: 'threads',
+    tiktok: 'tiktok',
+    twitch: 'twitch',
+    website: 'website',
+};
+
+// A URL only counts as a match when it's on the platform's own domain AND has a path beyond the
+// bare domain (e.g. x.com/handle, not just x.com) — a naked domain isn't a link to anyone.
+const PLATFORM_URL_PATTERNS: Partial<Record<DetectableSocial, RegExp>> = {
+    twitter: /^(https?:\/\/)?(www\.)?(x\.com|twitter\.com)\/\S+/i,
+    instagram: /^(https?:\/\/)?(www\.)?instagram\.com\/\S+/i,
+    facebook: /^(https?:\/\/)?(www\.)?facebook\.com\/\S+/i,
+    wikipedia: /^(https?:\/\/)?([a-z0-9-]+\.)?wikipedia\.org\/\S+/i,
+    threads: /^(https?:\/\/)?(www\.)?threads\.(net|com)\/\S+/i,
+    tiktok: /^(https?:\/\/)?(www\.)?tiktok\.com\/\S+/i,
+    twitch: /^(https?:\/\/)?(www\.)?twitch\.tv\/\S+/i,
+};
+
+// Facebook and Wikipedia only make sense as a link (no bare "@handle" convention for either);
+// the rest also accept a plain handle or @handle.
+const URL_ONLY: ReadonlySet<DetectableSocial> = new Set(['facebook', 'wikipedia']);
+const HANDLE_PATTERN = /^@?[A-Za-z0-9._-]{1,30}$/;
+const WEBSITE_PATTERN = /^(https?:\/\/)?[a-z0-9-]+(\.[a-z0-9-]+)+(\/\S*)?$/i;
+
+// A pasted description links a social with actual markdown, not a bare URL — "[Site.com](https://
+// site.com/)" or "<https://site.com/>" rather than plain text. Unwrap those down to the URL itself
+// before matching a platform's domain, or a real link would look like it failed the domain check.
+const extractLinkTarget = (value: string): string => {
+    const trimmed = value.trim();
+    const mdLink = trimmed.match(/^\[[^\]]*\]\((\S+?)\)$/);
+    if (mdLink) return mdLink[1];
+    const autoLink = trimmed.match(/^<(\S+?)>$/);
+    if (autoLink) return autoLink[1];
+    return trimmed;
+};
+
+/** Validates `value` for `platform`, returning the piece to normalize/pin, or null if it doesn't
+ *  look like a real handle/link for that platform. */
+const matchSocialValue = (platform: DetectableSocial, value: string): string | null => {
+    const trimmed = extractLinkTarget(value);
+    if (!trimmed) return null;
+    const urlPattern = PLATFORM_URL_PATTERNS[platform];
+    if (urlPattern && urlPattern.test(trimmed)) return trimmed;
+    if (platform === 'website') return WEBSITE_PATTERN.test(trimmed) ? trimmed : null;
+    if (URL_ONLY.has(platform)) return null;
+    return HANDLE_PATTERN.test(trimmed) ? trimmed : null;
+};
+
+interface DetectedSocial {
+    platform: DetectableSocial;
+    normalized: string;
+}
+
+/** Scans pasted/typed bio text for "Label: value" lines and returns the socials worth offering to
+ *  pin — one per platform (first match wins), skipping anything that already matches what's
+ *  already saved for that platform. */
+const detectSocialCandidates = (bio: string, current: BiographyEntry): DetectedSocial[] => {
+    const seen = new Set<DetectableSocial>();
+    const candidates: DetectedSocial[] = [];
+    for (const rawLine of bio.split('\n')) {
+        const match = rawLine.trim().match(/^([A-Za-z]+)\s*:\s*(.+)$/);
+        if (!match) continue;
+        const platform = DETECTABLE_LABELS[match[1].toLowerCase()];
+        if (!platform || seen.has(platform)) continue;
+        const value = matchSocialValue(platform, match[2]);
+        if (!value) continue;
+        const normalized = normalizeSocialValue(platform, value);
+        if ((current[platform] || '').trim() === normalized) continue;
+        seen.add(platform);
+        candidates.push({ platform, normalized });
+    }
+    return candidates;
+};
+
+export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore, onDriveSelect, allowEditBio, scrollContainerRef }: { searchQuery: string; onChange?: () => void; onVideoSelect?: (video: Video) => void; onViewMore?: (handle: string) => void; onDriveSelect?: (path: string, label: string) => void; allowEditBio?: boolean; scrollContainerRef: RefObject<HTMLDivElement | null> }) {
     const { labels } = useWorkspace();
     const [entries, setEntries] = useState<BiographyEntry[]>([]);
     const [loading, setLoading] = useState(true);
@@ -64,6 +178,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
     const [activeSocialTab, setActiveSocialTab] = useState<SocialTab>('website');
     const [selectedVideos, setSelectedVideos] = useState<Video[]>([]);
     const [videosLoading, setVideosLoading] = useState(false);
+    const [pendingSocialPins, setPendingSocialPins] = useState<DetectedSocial[] | null>(null);
 
     const loadEntries = async () => {
         try {
@@ -125,14 +240,11 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
         }
     }, [selected]);
 
-    const saveEdit = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!editing) return;
-
+    const commitSave = async (entry: BiographyEntry) => {
         // Normalize social fields: convert handles to full URLs where needed
-        const normalized = { ...editing };
+        const normalized = { ...entry };
         (socialTabs as SocialTab[]).forEach((key) => {
-            const val = editing[key];
+            const val = entry[key];
             if (val && val.trim()) {
                 normalized[key] = normalizeSocialValue(key, val.trim());
             }
@@ -140,8 +252,21 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
 
         await updateBiography(normalized);
         setEditing(null);
+        setPendingSocialPins(null);
         await loadEntries();
         onChange?.();
+    };
+
+    const saveEdit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!editing) return;
+
+        const candidates = detectSocialCandidates(editing.bio || '', editing);
+        if (candidates.length > 0) {
+            setPendingSocialPins(candidates);
+            return;
+        }
+        await commitSave(editing);
     };
 
     const fetchVideosForHandle = async (handle: string) => {
@@ -157,61 +282,35 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
         }
     };
 
-    const normalizeSocialValue = (key: SocialTab, value: string): string => {
-        if (!value) return '';
-        if (key === 'website' || key === 'wikipedia') {
-            return value.startsWith('http') ? value : `https://${value}`;
-        } else {
-            // If value is already a full URL, return as-is
-            if (value.startsWith('http://') || value.startsWith('https://')) {
-                return value;
-            }
-            // Platform handles: strip leading @ and build full URL
-            const handle = value.startsWith('@') ? value.slice(1) : value;
-            const prefixes: Record<SocialTab, string> = {
-                twitter: 'https://twitter.com/',
-                instagram: 'https://instagram.com/',
-                facebook: 'https://facebook.com/',
-                threads: 'https://threads.net/@',
-                youtube: 'https://youtube.com/@',
-                tiktok: 'https://tiktok.com/@',
-                twitch: 'https://twitch.tv/',
-                reddit: 'https://reddit.com/',
-                discord: 'https://discord.gg/',
-                website: '',
-                wikipedia: '',
-            };
-            return prefixes[key] + handle;
-        }
-    };
-
     // The bottom panel exists even before there's anything to jump to, same as it does for an
     // empty filtered view — no popping in once entries actually load.
     if (loading) return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
-            <div className="flex justify-between items-center mb-6 px-4">
+            <div className="flex justify-between items-center min-h-9 mb-4 px-2">
                 <h2 className="text-xl font-bold text-white">{labels.aliasBiography}</h2>
             </div>
-            <div className="px-4">
+            <div className="px-2">
                 <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mx-auto mb-4" />
                     <p className="text-sm">Loading biographies...</p>
                 </div>
             </div>
-            <AlphabetJumpNav idPrefix="biography-az" available={[]} />
+            <AlphabetJumpNav idPrefix="biography-az" available={[]} scrollContainerRef={scrollContainerRef} />
         </div>
     );
 
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
-            <div className="flex justify-between items-center mb-4 px-4">
+            {/* sticky top-0 (solid bg — this scrolls within App.tsx's shared content pane) keeps
+                the heading visible instead of scrolling past with the list beneath it. */}
+            <div className="sticky top-0 z-10 bg-[#0f0f0f] flex justify-between items-center min-h-9 mb-4 px-2">
                 <h2 className="text-xl font-bold text-white">{labels.aliasBiography}</h2>
             </div>
 
             {/* pb-10: AlphabetJumpNav (below) is a true fixed panel, always present, no longer part
                 of this page's own scroll — its ~24px height has to be reserved here instead, or
                 it'd sit over the last section once scrolled all the way down. */}
-            <div className="px-4 pb-10">
+            <div className="px-2 pb-10">
                 {entries.length === 0 ? (
                     <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                         <p className="text-xl font-bold text-white mb-2">No people yet</p>
@@ -262,7 +361,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                 )}
             </div>
 
-            <AlphabetJumpNav idPrefix="biography-az" available={groupKeys} />
+            <AlphabetJumpNav idPrefix="biography-az" available={groupKeys} scrollContainerRef={scrollContainerRef} />
 
             {selected && (
                 <BiographyModal
@@ -354,10 +453,47 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                         </div>
 
                         <div className="px-6 py-4 border-t border-[#303030] flex justify-end gap-3 bg-[#141414]">
-                            <button type="button" onClick={() => setEditing(null)} className="px-4 py-2 rounded-lg bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] cursor-pointer text-white text-sm font-semibold transition-colors">Cancel</button>
+                            <button type="button" onClick={() => { setEditing(null); setPendingSocialPins(null); }} className="px-4 py-2 rounded-lg bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] cursor-pointer text-white text-sm font-semibold transition-colors">Cancel</button>
                             <button type="submit" className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 transition-all text-sm font-bold cursor-pointer">Save {labels.aliasBiographyItem}</button>
                         </div>
                     </form>
+
+                    {pendingSocialPins && (
+                        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200" onClick={() => setPendingSocialPins(null)}>
+                            <div onClick={(e) => e.stopPropagation()} className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+                                <div className="px-6 py-4 border-b border-[#303030] bg-[#141414]">
+                                    <h3 className="text-base font-bold text-white">Social{pendingSocialPins.length > 1 ? 's' : ''} detected</h3>
+                                    <p className="text-xs text-gray-400 mt-1">Would you like to pin the following?</p>
+                                </div>
+                                <ul className="px-6 py-4 space-y-2.5 max-h-64 overflow-y-auto">
+                                    {pendingSocialPins.map((p) => {
+                                        const Icon = socialConfig[p.platform].icon;
+                                        return (
+                                            <li key={p.platform} className="flex items-center gap-2.5 text-sm">
+                                                <Icon className="w-4 h-4 text-gray-400 shrink-0" />
+                                                <span className="font-semibold text-white shrink-0">{socialConfig[p.platform].label}:</span>
+                                                <span className="text-gray-400 truncate">{p.normalized}</span>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                                <div className="px-6 py-4 border-t border-[#303030] flex justify-end gap-3 bg-[#141414]">
+                                    <button type="button" onClick={() => commitSave(editing)} className="px-4 py-2 rounded-lg bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] cursor-pointer text-white text-sm font-semibold transition-colors">Just Save</button>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const merged = { ...editing };
+                                            pendingSocialPins.forEach((p) => { merged[p.platform] = p.normalized; });
+                                            commitSave(merged);
+                                        }}
+                                        className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 transition-all text-sm font-bold cursor-pointer"
+                                    >
+                                        Pin & Save
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
         </div>
@@ -557,10 +693,11 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                      </div>
                 </div>
 
-                {/* Sticky Footer: Social Icons */}
+                {/* Sticky Footer: Social Icons — kept small and low-emphasis so the bio itself is
+                    the thing that draws the eye, not the row of links below it. */}
                 {activeSocials.length > 0 && (
-                    <div className="flex-shrink-0 border-t border-[#272727] bg-[#0f0f0f] px-6 py-4">
-                        <div className="flex flex-wrap gap-2">
+                    <div className="flex-shrink-0 border-t border-[#272727] bg-[#0f0f0f] px-6 py-2">
+                        <div className="flex flex-wrap gap-1.5">
                             {activeSocials.map((key) => {
                                 const config = socialConfig[key];
                                 const Icon = config.icon;
@@ -570,9 +707,9 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                                          key={key}
                                          onClick={() => openExternalUrl(rawValue)}
                                          title={config.label}
-                                         className="flex items-center justify-center w-10 h-10 rounded-lg bg-[#1b1b1b] border border-[#333] text-gray-400 hover:text-white hover:bg-[#262626] hover:border-blue-600/50 transition-all cursor-pointer"
+                                         className="flex items-center justify-center w-7 h-7 rounded-md bg-[#1b1b1b] border border-[#333] text-gray-400 hover:text-white hover:bg-[#262626] hover:border-blue-600/50 transition-all cursor-pointer"
                                      >
-                                        <Icon className="w-5 h-5" />
+                                        <Icon className="w-3.5 h-3.5" />
                                     </button>
                                 );
                             })}

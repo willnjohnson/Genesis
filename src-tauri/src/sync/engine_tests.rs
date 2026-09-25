@@ -144,7 +144,7 @@ async fn syncs_pages_then_deltas_then_recovers_from_a_pruned_cursor() {
         let mut m = mock.lock().unwrap();
         m.token = Some("sekret".into());
         for n in 1..=5 {
-            m.upsert("glossary", &format!("term{n}"), json!({"definition": format!("def {n}")}));
+            m.upsert("glossary", &format!("|term{n}"), json!({"definition": format!("def {n}")}));
         }
         m.policy.settings.insert("showBiography".into(), "false".into());
         m.policy.settings.insert("venice_api_key".into(), "stolen".into());
@@ -181,9 +181,9 @@ async fn syncs_pages_then_deltas_then_recovers_from_a_pruned_cursor() {
     // Delta: one edit, one delete, one addition.
     {
         let mut m = mock.lock().unwrap();
-        m.upsert("glossary", "term1", json!({"definition": "edited"}));
-        m.delete("glossary", "term2");
-        m.upsert("glossary", "term6", json!({"definition": "def 6"}));
+        m.upsert("glossary", "|term1", json!({"definition": "edited"}));
+        m.delete("glossary", "|term2");
+        m.upsert("glossary", "|term6", json!({"definition": "def 6"}));
     }
     let r = run_core(&db_path, &state, false, |_| {}).await.unwrap();
     assert!(!r.full, "an up-to-date cursor should sync incrementally");
@@ -201,7 +201,7 @@ async fn syncs_pages_then_deltas_then_recovers_from_a_pruned_cursor() {
     // client falls back to a snapshot and sweeps what is gone.
     {
         let mut m = mock.lock().unwrap();
-        m.delete("glossary", "term3");
+        m.delete("glossary", "|term3");
         m.retention = m.head();
     }
     let r = run_core(&db_path, &state, false, |_| {}).await.unwrap();

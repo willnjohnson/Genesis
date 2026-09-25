@@ -90,8 +90,9 @@ fn kinesis_works_end_to_end_on_the_production_schema() {
     assert!(!wdbs::get_wdbs_tree(&path).unwrap().is_empty());
 
     // Glossary with drives, custom prompts, biography edits.
-    glossary::save_glossary_term(&path, None, "Halving", "Supply cut", &[":FIN".to_string()]).unwrap();
-    assert_eq!(glossary::get_glossary_drive_links(&path).unwrap(), vec![("Halving".to_string(), ":FIN".to_string())]);
+    glossary::save_glossary_term(&path, None, "Halving", "Supply cut", ":FIN").unwrap();
+    let entries = glossary::get_glossary_terms(&path).unwrap();
+    assert_eq!(entries.iter().map(|e| (e.term.as_str(), e.drives.clone())).collect::<Vec<_>>(), vec![("Halving", vec![":FIN".to_string()])]);
     custom_prompts::set_custom_prompt(&path, "@creator", Some("local"), Some("cloud")).unwrap();
     assert_eq!(biography::get_biographies(&path).unwrap().len(), 1);
 

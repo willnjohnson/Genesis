@@ -1,6 +1,6 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
-import { ChevronRight, ChevronDown } from 'lucide-react';
-import { getWdbsTree, setWdbsAlias, setWdbsIcon, type WdbsNode } from '../api';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { ChevronRight, ChevronDown, Inbox } from 'lucide-react';
+import { getWdbsTree, setWdbsAlias, setWdbsIcon, getUnsortedVideoCount, UNSORTED_WDBS_FILTER, type WdbsNode } from '../api';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { WdbsAliasMenu } from './WdbsAliasMenu';
 import { WdbsIconMenu } from './WdbsIconMenu';
@@ -10,7 +10,11 @@ interface WdbsTreePanelProps {
     // `undefined` means nothing is selected; a real path selects that node (and its descendants
     // — see db/wdbs.rs::list_videos_by_wdbs) elsewhere in whatever's consuming the selection.
     selectedPath: string | undefined;
-    onSelect: (path: string, label: string) => void;
+    // `alias` is the node's own curated alias (null when it doesn't have one) — the caller shows
+    // it alongside the path/label, e.g. App.tsx's "Drive: X (alias)" bottom-bar chip, rather than
+    // this panel rendering its own alias display (it used to, directly below the tree; removed in
+    // favor of that one shared spot).
+    onSelect: (path: string, label: string, alias: string | null) => void;
     className?: string;
     // Bumped by the caller (App.tsx) whenever a video's WDBS assignment or symlinks change
     // elsewhere (Sidebar's editor, bulk assign) so the tree's counts stay in sync — those
@@ -21,10 +25,6 @@ interface WdbsTreePanelProps {
     // Gates the right-click "Edit Alias"/"Edit Icon" menu, same settings flag (allowEditWDBS)
     // that gates Bulk Assign Mode and the Sidebar's Warp Drive editor — see App.tsx.
     allowEditAlias?: boolean;
-    // While the selected category's alias would be scrolled out of view it is pinned to the
-    // bottom-left of the window. With the vertical navigation rail (16 wide) on the left it has to
-    // start to the right of it.
-    clearNavRail?: boolean;
 }
 
 /** The paths of the nodes above `path` (root first), or null when `path` isn't in the tree. */
@@ -35,15 +35,6 @@ function ancestorPaths(nodes: WdbsNode[], path: string, trail: string[] = []): s
         if (found) return found;
     }
     return null;
-}
-
-function findNodeByPath(nodes: WdbsNode[], path: string): WdbsNode | undefined {
-    for (const node of nodes) {
-        if (node.path === path) return node;
-        const found = findNodeByPath(node.children, path);
-        if (found) return found;
-    }
-    return undefined;
 }
 
 // The right-click menu itself — just picks which editor (WdbsAliasMenu/WdbsIconMenu) to open next,
@@ -94,9 +85,14 @@ function NodeContextMenu({ x, y, onEditAlias, onEditIcon, onClose }: {
  * (see App.tsx's Drive panel button). Owns fetching and expand/collapse state; selection itself
  * is controlled by the caller (App.tsx wires it into the Library's own search/filter state).
  */
-export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, allowEditAlias = false, clearNavRail = false }: WdbsTreePanelProps) {
+export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, allowEditAlias = false }: WdbsTreePanelProps) {
     const [tree, setTree] = useState<WdbsNode[]>([]);
     const [loading, setLoading] = useState(true);
+    // The synthetic "Unsorted" entry's count (see UnsortedRow below) — videos with no home Warp
+    // Drive at all, not a real taxonomy node so it isn't part of `tree`. Refetched on the same
+    // trigger as the tree itself, since a video landing here or leaving is exactly the kind of
+    // WDBS-assignment change refreshKey already exists to catch.
+    const [unsortedCount, setUnsortedCount] = useState(0);
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: WdbsNode } | null>(null);
     const [aliasMenu, setAliasMenu] = useState<{ x: number; y: number; path: string; segment: string; alias: string } | null>(null);
@@ -119,32 +115,11 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
 
     useEffect(() => fetchTree(), [fetchTree, refreshKey]);
 
-    // Looks up the currently-selected node's alias directly from the already-fetched tree, so the
-    // one-line alias strip below doesn't need App.tsx (or any other caller) to thread it through
-    // its own selection state on top of the plain path/label onSelect already reports.
-    const selectedAlias = selectedPath ? findNodeByPath(tree, selectedPath)?.alias : undefined;
-
-    // The alias strip sits under the tree at the panel's width. Only when that spot isn't fully on
-    // screen (a long, expanded tree) does it pin to the window's bottom-left, sized to its text; back
-    // in view, it returns to its normal place and width. The slot keeps the strip's height while it is
-    // pinned, so nothing below it shifts and the two states can't flip back and forth.
-    const slotRef = useRef<HTMLDivElement>(null);
-    const stripRef = useRef<HTMLDivElement>(null);
-    const [pinned, setPinned] = useState(false);
-    const [stripHeight, setStripHeight] = useState(0);
     useEffect(() => {
-        const slot = slotRef.current;
-        if (!slot || !selectedAlias) { setPinned(false); return; }
-        const observer = new IntersectionObserver(
-            ([entry]) => setPinned(entry.intersectionRatio < 0.98),
-            { threshold: 0.98 },
-        );
-        observer.observe(slot);
-        return () => observer.disconnect();
-    }, [selectedAlias]);
-    useLayoutEffect(() => {
-        if (!pinned && stripRef.current) setStripHeight(stripRef.current.offsetHeight);
-    }, [pinned, selectedAlias]);
+        let cancelled = false;
+        getUnsortedVideoCount().then(c => { if (!cancelled) setUnsortedCount(c); }).catch(() => { if (!cancelled) setUnsortedCount(0); });
+        return () => { cancelled = true; };
+    }, [refreshKey]);
 
     // A selection made from outside the tree (e.g. a Biography's "In Drive" list) may sit inside
     // collapsed branches, so open the ones above it.
@@ -200,46 +175,50 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
 
     return (
         <div className={className}>
-            <h2 className="text-xl font-bold text-white mb-4 px-1">{label}</h2>
-            {loading ? (
-                <div className="text-center text-gray-500 py-16 bg-[#121212] rounded-xl border border-[#272727]">
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-                    <p className="text-sm">Loading {label}...</p>
-                </div>
-            ) : tree.length === 0 ? (
-                <div className="text-center text-gray-500 py-16 bg-[#121212] rounded-xl border border-[#272727] px-4">
-                    <p className="text-sm">No videos yet. They'll show up here once tagged with a {label} designator.</p>
-                </div>
-            ) : (
-                <div className="bg-[#121212] rounded-xl border border-[#272727] p-2 space-y-0.5 lg:sticky lg:top-4 lg:max-h-[75vh] lg:overflow-y-auto custom-scrollbar">
-                    {tree.map(node => (
-                        <TreeBranch
-                            key={node.path}
-                            node={node}
-                            depth={0}
-                            expanded={expanded}
-                            onToggleExpanded={toggleExpanded}
-                            selectedPath={selectedPath}
-                            onSelect={onSelect}
-                            allowEditAlias={allowEditAlias}
-                            onContextMenu={handleContextMenu}
-                        />
-                    ))}
-                </div>
-            )}
-            {selectedAlias && (
-                <div ref={slotRef} className="mt-2" style={pinned ? { minHeight: stripHeight } : undefined}>
-                    <div
-                        ref={stripRef}
-                        className={`border border-[#272727] rounded-lg px-3 py-1.5 text-xs truncate ${pinned
-                            ? `fixed bottom-4 ${clearNavRail ? 'left-20' : 'left-4'} z-30 w-fit max-w-[min(28rem,calc(100vw-2rem))] shadow-lg text-gray-300 bg-[#121212]/75`
-                            : 'text-gray-400 bg-[#121212]'}`}
-                        title={selectedAlias}
-                    >
-                        {selectedAlias}
+            {/* shrink-0: stays visible above the tree's own scroll below, same as every other
+                view's heading (see VideoList.tsx/GlossaryView.tsx/BiographyView.tsx). */}
+            <h2 className="shrink-0 flex items-center min-h-9 text-xl font-bold text-white mb-4 px-1">{label}</h2>
+            {/* This panel gets its own independent scroll (App.tsx no longer shares
+                scrollContainerRef with it) — scrolling the video grid shouldn't move the Drive
+                tree, and vice versa. */}
+            <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable] custom-scrollbar">
+                {loading ? (
+                    <div className="text-center text-gray-500 py-16 bg-[#121212] rounded-xl border border-[#272727]">
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+                        <p className="text-sm">Loading {label}...</p>
                     </div>
-                </div>
-            )}
+                ) : tree.length === 0 && unsortedCount === 0 ? (
+                    <div className="text-center text-gray-500 py-16 bg-[#121212] rounded-xl border border-[#272727] px-4">
+                        <p className="text-sm">No videos yet. They'll show up here once tagged with a {label} designator.</p>
+                    </div>
+                ) : (
+                    <div className="bg-[#121212] rounded-xl border border-[#272727] p-2 space-y-0.5">
+                        {unsortedCount > 0 && (
+                            <>
+                                <UnsortedRow
+                                    count={unsortedCount}
+                                    selected={selectedPath === UNSORTED_WDBS_FILTER}
+                                    onSelect={() => onSelect(UNSORTED_WDBS_FILTER, 'Unsorted', null)}
+                                />
+                                {tree.length > 0 && <div className="my-1 border-t border-[#272727]" />}
+                            </>
+                        )}
+                        {tree.map(node => (
+                            <TreeBranch
+                                key={node.path}
+                                node={node}
+                                depth={0}
+                                expanded={expanded}
+                                onToggleExpanded={toggleExpanded}
+                                selectedPath={selectedPath}
+                                onSelect={onSelect}
+                                allowEditAlias={allowEditAlias}
+                                onContextMenu={handleContextMenu}
+                            />
+                        ))}
+                    </div>
+                )}
+            </div>
             {contextMenu && (
                 <NodeContextMenu
                     x={contextMenu.x}
@@ -291,7 +270,7 @@ function TreeBranch({ node, depth, expanded, onToggleExpanded, selectedPath, onS
     expanded: Set<string>;
     onToggleExpanded: (path: string) => void;
     selectedPath: string | undefined;
-    onSelect: (path: string, label: string) => void;
+    onSelect: (path: string, label: string, alias: string | null) => void;
     allowEditAlias: boolean;
     onContextMenu: (node: WdbsNode, x: number, y: number) => void;
 }) {
@@ -310,7 +289,7 @@ function TreeBranch({ node, depth, expanded, onToggleExpanded, selectedPath, onS
                 selected={selectedPath === node.path}
                 editable={allowEditAlias}
                 onToggle={() => onToggleExpanded(node.path)}
-                onSelect={() => onSelect(node.path, node.segment)}
+                onSelect={() => onSelect(node.path, node.segment, node.alias)}
                 onContextMenu={(x, y) => onContextMenu(node, x, y)}
             />
             {hasChildren && isExpanded && node.children.map(child => (
@@ -327,6 +306,26 @@ function TreeBranch({ node, depth, expanded, onToggleExpanded, selectedPath, onS
                 />
             ))}
         </>
+    );
+}
+
+// The tree's synthetic entry for videos with no home Warp Drive at all (see
+// db::count_unsorted_videos/list_unsorted_videos) — rendered above the real taxonomy, not part of
+// `tree` itself, so it has none of TreeRow's expand/context-menu/alias machinery: it can't have
+// children and there's nothing about it to curate.
+function UnsortedRow({ count, selected, onSelect }: { count: number; selected: boolean; onSelect: () => void }) {
+    return (
+        <div
+            className={`flex items-center gap-1 rounded-lg cursor-pointer group transition-colors ${selected ? 'bg-red-600 text-white' : 'text-gray-300 hover:bg-[#272727]'}`}
+            style={{ paddingLeft: '4px' }}
+            onClick={onSelect}
+        >
+            {/* Invisible spacer matching TreeRow's toggle button, so the icon/label line up with every real node's. */}
+            <span className="p-1.5 shrink-0 invisible"><ChevronRight className="w-3.5 h-3.5" /></span>
+            <Inbox className={`w-3.5 h-3.5 shrink-0 ${selected ? 'text-white/80' : 'text-gray-500'}`} />
+            <span className="flex-1 min-w-0 text-sm py-1.5 truncate italic">Unsorted</span>
+            <span className={`text-[11px] font-medium px-2 shrink-0 ${selected ? 'text-white/80' : 'text-gray-500'}`}>{count}</span>
+        </div>
     );
 }
 
@@ -360,7 +359,7 @@ function TreeRow({ label, alias, icon, count, depth, hasChildren, expanded, sele
                 {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
             </button>
             {Icon && <Icon className={`w-3.5 h-3.5 shrink-0 ${selected ? 'text-white/80' : 'text-gray-500'}`} />}
-            <span className="flex-1 text-sm py-1.5 truncate" title={alias ?? undefined}>{label}</span>
+            <span className="flex-1 min-w-0 text-sm py-1.5 truncate" title={alias ?? undefined}>{label}</span>
             <span className={`text-[11px] font-medium px-2 shrink-0 ${selected ? 'text-white/80' : 'text-gray-500'}`}>{count}</span>
         </div>
     );

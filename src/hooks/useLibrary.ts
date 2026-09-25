@@ -1,7 +1,7 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, type RefObject } from "react";
 import {
     getSavedVideos, searchLibrary, saveVideo, deleteVideo, bulkSaveVideos,
-    summarizeAllVideos, getSummarizedCount, getVideosByWdbs,
+    summarizeAllVideos, getSummarizedCount, getVideosByWdbs, getUnsortedVideos, UNSORTED_WDBS_FILTER,
     type Video, type LibrarySortField, type LibrarySortOrder, type LibraryFilterKind
 } from "../api";
 import { type NotificationType } from "../components/Notification";
@@ -53,6 +53,9 @@ export function useLibrary(
     pluginSummarizeEnabled: boolean,
     filteredSearchVideos: Video[],
     setNotification: (n: { message: string; type: NotificationType } | null) => void,
+    // App.tsx's one scrollable content pane — the page-1 reload below resets scroll to its top
+    // (not window position 0, since the whole page no longer scrolls; see App.tsx/VideoList.tsx).
+    scrollContainerRef: RefObject<HTMLDivElement | null>,
 ) {
     // Read through a ref so renaming the Library in Settings doesn't rebuild the callbacks below
     // (or, worse, re-trigger the page-1 reload).
@@ -69,7 +72,7 @@ export function useLibrary(
     // only explicitly clearing the category (setWdbsFilter(null), e.g. the toggle button turning
     // the panel off) resets back to the plain, unfiltered Library/Portal view.
     const [wdbsFilter, setWdbsFilterState] = useState<string | null>(null);
-    const [sortField, setSortField] = useState<LibrarySortField>('date');
+    const [sortField, setSortField] = useState<LibrarySortField>('added');
     const [sortOrder, setSortOrder] = useState<LibrarySortOrder>('desc');
     const [filterKind, setFilterKind] = useState<LibraryFilterKind>('all');
     const [loading, setLoading] = useState(false);
@@ -106,6 +109,7 @@ export function useLibrary(
         const opts = { filterKind, sortField, sortOrder, limit: PAGE_SIZE, offset };
         // Search text always narrows *within* the selected category when one's active, rather
         // than escaping to a library-wide search — see wdbsFilter above.
+        if (wdbsFilter === UNSORTED_WDBS_FILTER) return getUnsortedVideos(librarySearch, opts);
         if (wdbsFilter) return getVideosByWdbs(wdbsFilter, librarySearch, opts);
         return librarySearch.trim()
             ? searchLibrary(librarySearch, opts)
@@ -191,7 +195,7 @@ export function useLibrary(
             // otherwise staying scrolled deep into the old (possibly much longer) result set
             // can make the infinite-scroll trigger in VideoList fire several "load more"
             // calls back-to-back just to catch up to where the page happened to be.
-            window.scrollTo({ top: 0 });
+            scrollContainerRef.current?.scrollTo({ top: 0 });
         };
         if (cached) {
             show(cached);

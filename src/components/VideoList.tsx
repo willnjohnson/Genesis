@@ -1,10 +1,11 @@
-import { Save, Trash2, Bookmark, ArrowDown, ArrowUp, Calendar, Users, Sparkles, FileText } from 'lucide-react';
+import { Save, Trash2, Bookmark, ArrowDown, ArrowUp, Calendar, Users, Sparkles, FileText, ListVideo } from 'lucide-react';
 import { type Video } from '../api';
-import { useState, useMemo, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
-import { useWindowVirtualizer } from '@tanstack/react-virtual';
+import { useState, useMemo, useRef, useEffect, useLayoutEffect, useCallback, type RefObject } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { format } from 'date-fns';
 import { saveImageAs } from '../lib/save-image-as';
 import { useFlags } from '../hooks/useFlags';
+import { BottomBar } from './BottomBar';
 
 // Mirrors the Tailwind breakpoints used by the grid className below (sm/md/lg/xl/2xl at
 // Tailwind's default 640/768/1024/1280/1536px) so the virtualizer knows how many cards land in
@@ -59,6 +60,12 @@ interface Props {
     loading?: boolean;
     emptyTitle?: string;
     emptyMessage?: string;
+    // Search only: a failed fetch (e.g. "Failed to fetch. Check your connection or the URL/
+    // handle.") — shown in the same content-section slot as emptyTitle, in its place, since
+    // there's nothing else to show there anyway. Muted red rather than a separate alert box: a
+    // recoverable, often routine failure (a typo'd handle, a dropped connection) doesn't need to
+    // shout, just needs to visibly not be "you just haven't searched yet."
+    error?: string | null;
     // Sort/filter are "controlled" when these are passed (Library mode, where sorting/filtering
     // happens server-side and the buttons must survive a new search — see hooks/useLibrary.ts).
     // Left uncontrolled (internal state) for the plain YouTube-search view, whose results are
@@ -89,6 +96,21 @@ interface Props {
     // *shrinks* the selection back down instead of leaving 6-19 stuck on from the earlier click.
     onBulkSelectRange?: (nextSelectedIds: Set<string>) => void;
     onBulkContextMenu?: (video: Video, x: number, y: number) => void;
+    // Library mode only, and only while its Drive panel is open: "All"/"Unsorted" or the selected
+    // node's own label (plus curated alias). Shown as a "<prefix>: X" chip in the bottom bar (see
+    // BottomBar.tsx) — there's no room for it in the in-flow heading, and Search never has a
+    // Drive to report.
+    driveLabel?: string;
+    // The chip's prefix — "Drive" for All/Unsorted, "L<depth>" for a real node (App.tsx computes
+    // this from library.wdbsFilter's segment count). Defaults to "Drive" if omitted.
+    driveLabelPrefix?: string;
+    // Hover text for the prefix itself: the ancestor path above the selected node (e.g. "L3" on
+    // :CRYPTO-BITCOIN-INFO tooltips ":CRYPTO-BITCOIN") — omitted for "Drive" (All/Unsorted) or a
+    // root (L1) node, neither of which has a meaningful ancestor path to show.
+    driveLabelPrefixTooltip?: string;
+    // App.tsx's one scrollable content pane — the grid virtualizes against this instead of the
+    // window (there's no window-level scroll anymore; see App.tsx).
+    scrollContainerRef: RefObject<HTMLDivElement | null>;
 }
 
 export function VideoList({
@@ -97,7 +119,8 @@ export function VideoList({
     sortField: sortFieldProp, onSortFieldChange, sortOrder: sortOrderProp, onToggleSortOrder,
     filterKind: filterProp, onFilterKindChange,
     onLoadMore, loadingMore = false, hasMore = false,
-    loading = false, emptyTitle, emptyMessage,
+    loading = false, emptyTitle, emptyMessage, error,
+    driveLabel, driveLabelPrefix = 'Drive', driveLabelPrefixTooltip, scrollContainerRef,
     bulkAssignMode = false, bulkSelectedIds, onToggleBulkSelect, onBulkSelectRange, onBulkContextMenu,
 }: Props) {
     // A DB owner can hide the sort and filter controls (see lib/flags.ts).
@@ -241,17 +264,67 @@ export function VideoList({
         onToggleBulkSelect?.(video);
     }, [videoIndexById, sortedVideos, onBulkSelectRange, onToggleBulkSelect, bulkSelectedIds]);
 
+    // The grid isn't the scroll pane's first child (the "Videos" heading + Save All row precedes
+    // it, and in Library mode WdbsTreePanel sits beside it), so the virtualizer still needs to
+    // know how far down the pane it starts — same idea as before switching off
+    // useWindowVirtualizer, just measured from the pane's own origin instead of the document's.
+    // gridRef.offsetTop resolves correctly against it since App.tsx's scroll pane has
+    // position: relative (making it gridRef's offsetParent) and nothing in between sets its own
+    // position.
     const gridRef = useRef<HTMLDivElement>(null);
     const [scrollMargin, setScrollMargin] = useState(0);
     useLayoutEffect(() => {
         setScrollMargin(gridRef.current?.offsetTop ?? 0);
     }, [compact, isLibrary]);
 
-    const rowVirtualizer = useWindowVirtualizer({
+    // Heading row: swap the sort/filter buttons to icon-only once their labelled width would no
+    // longer fit beside "Videos" (and Save All). The labelled width is only measurable while the
+    // labels are showing, so it's remembered while they are and compared against the room left
+    // over — the room doesn't depend on which mode is showing, so this can't flip-flop.
+    const showBookmarkedSort = isLibrary || videos.some(v => v.dateAdded);
+    const headerRowRef = useRef<HTMLDivElement>(null);
+    const headingRef = useRef<HTMLHeadingElement>(null);
+    const headerControlsRef = useRef<HTMLDivElement>(null);
+    const [headerIconOnly, setHeaderIconOnly] = useState(false);
+    const headerIconOnlyRef = useRef(false);
+    const labeledControlsWidthRef = useRef(0);
+    const measureHeader = useCallback(() => {
+        const row = headerRowRef.current;
+        const heading = headingRef.current;
+        const controls = headerControlsRef.current;
+        if (!row || !heading || !controls) return;
+        if (!headerIconOnlyRef.current) labeledControlsWidthRef.current = controls.offsetWidth;
+        const style = getComputedStyle(row);
+        const padX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+        const gap = parseFloat(style.columnGap) || 0;
+        const available = row.clientWidth - padX - heading.offsetWidth - gap;
+        const next = labeledControlsWidthRef.current > available;
+        if (next !== headerIconOnlyRef.current) {
+            headerIconOnlyRef.current = next;
+            setHeaderIconOnly(next);
+        }
+    }, []);
+    // Anything that changes what the controls contain invalidates the remembered labelled width:
+    // show the labels again so the next measure (below, after every render) reads a fresh one.
+    useLayoutEffect(() => {
+        headerIconOnlyRef.current = false;
+        setHeaderIconOnly(false);
+    }, [isLibrary, showBookmarkedSort, saveProgress, flags.showSortControls, flags.showFilterControls, flags.showSortControlButtons]);
+    useLayoutEffect(() => { measureHeader(); });
+    useEffect(() => {
+        const row = headerRowRef.current;
+        if (!row) return;
+        const observer = new ResizeObserver(measureHeader);
+        observer.observe(row);
+        return () => observer.disconnect();
+    }, [measureHeader]);
+
+    const rowVirtualizer = useVirtualizer({
         count: rows.length,
         estimateSize: () => (compact ? 210 : 270),
         overscan: 4,
         scrollMargin,
+        getScrollElement: () => scrollContainerRef.current,
     });
 
     const toggleSortOrder = () => {
@@ -278,118 +351,279 @@ export function VideoList({
         }
     }, [isLibrary, onLoadMore, hasMore, loadingMore, lastVirtualIndex, rows.length]);
 
-    // Library mode keeps rendering (header + sort/filter buttons) even with zero results, so the
-    // buttons stay usable to back out of a too-narrow filter/search. The plain search view keeps
-    // its old behavior of rendering nothing until there's something to show.
-    if (!isLibrary && videos.length === 0) return null;
+    // Shown only while Library's Drive panel is actually open (App.tsx computes driveLabel from
+    // that) — Search never has a Drive to report. `w-80` is the same width Tailwind token the
+    // Drive panel itself uses (App.tsx), so the chip lines up directly under the panel at typical
+    // widths; `min-w-0` + `truncate` on the value (an alias can be long) make this the bar's
+    // pressure-release valve — no shrink-0 here, unlike the buttons below — so a long Drive name
+    // or alias gives up space and ellipsizes well before anything interactive would ever need to.
+    const driveChip = driveLabel ? (
+        <div className="w-80 min-w-0 shrink flex items-center gap-2 text-[11px] text-gray-400">
+            <span className="shrink-0" title={driveLabelPrefixTooltip}>{driveLabelPrefix}:</span>
+            <span className="text-white font-semibold truncate" title={driveLabel}>{driveLabel}</span>
+        </div>
+    ) : null;
+
+    // Sort/filter buttons match AlphabetJumpNav's own flat, small-text style (same font size, no
+    // boxed group background, no border radius, no gap between them — each button's own small
+    // padding is the only spacing, exactly like the A-Z letters). A plain border (no fill, no
+    // radius) still marks each group's edges, so "these buttons are one group" stays visible
+    // without a filled pill background. The active/selected button gets a secondary-surface
+    // background (the same #303030 tone Settings' own cards/toggles use) — understated rather
+    // than a stark white pill, matching AlphabetJumpNav's own plain-text look.
+    const groupWrapClass = "flex items-center border border-[#272727] px-1";
+    const btnClass = (active: boolean) =>
+        `px-1.5 py-0.5 text-[11px] transition-colors cursor-pointer flex items-center gap-1 ${active ? 'bg-[#303030] text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`;
+    const toggleClass = "px-1.5 py-0.5 text-gray-400 hover:text-white hover:bg-[#272727] transition-all cursor-pointer group flex items-center gap-1";
+    // Every sort/filter button pairs an icon with a text label. The label hides below a
+    // container-query threshold (each button keeps its icon, plus a `title` tooltip for the
+    // now-hidden text) rather than getting invisibly clipped by BottomBar's overflow-hidden once
+    // it runs out of room — this is the bar's last line of defense after driveChip/the count have
+    // already given up all the space they can. Keyed off the bar's own width (BottomBar.tsx's
+    // `@container`), not the viewport's: the window can be plenty wide while the bar itself has
+    // little room left (nav rail + an open Drive panel already spoken for), which is exactly what
+    // let buttons get clipped before ever reaching this fallback. @3xl (48rem/768px of the bar's
+    // own width, not the window's) is roughly what the sort + filter groups' text actually needs
+    // at once with no Drive chip in the mix (~640px of buttons plus the title) — tune this if
+    // it's still switching earlier or later than it should; there's no way to derive it exactly
+    // since it depends on this workspace's own label lengths (a curated Drive alias, etc.), not
+    // just a fixed pixel count.
+    const btnLabel = (text: string) => <span className="hidden @3xl:inline">{text}</span>;
+
+    // Rendered next to the bare "Videos" heading up top — it's a save action, not something to
+    // bury in a bar meant to be small (see the return below for exactly where each thing goes).
+    const saveAllButton = onSaveAll ? (
+        <button
+            onClick={onSaveAll}
+            disabled={!!saveProgress}
+            className={`px-3 py-1.5 bg-white text-black hover:bg-[#e5e5e5] rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center gap-2 ${!saveProgress ? 'cursor-pointer' : 'cursor-default'}`}
+        >
+            {saveProgress ? (
+                <>
+                    <div className="w-3 h-3 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                    {saveProgress}
+                </>
+            ) : (
+                <>
+                    <Save className="w-4 h-4" />
+                    Save All
+                </>
+            )}
+        </button>
+    ) : null;
+
+    // The bottom bar's own content — count, sort group, filter group. The count shrinks/truncates
+    // to match AlphabetJumpNav's own text-[11px] scale — the bar is meant to read as small as that
+    // one — and is second in line (after driveChip) to give up space when it's too narrow: it
+    // truncates rather than wrapping/scrolling, but only once driveChip has nothing left to give;
+    // the count itself is normally short, so this is mostly a safety net for very narrow windows,
+    // not something that visibly kicks in day to day.
+    const sortControls = (
+        <div className="flex items-center gap-2 shrink-0 ml-auto">
+            {flags.showSortControls && (
+                <div className={groupWrapClass}>
+                    <div className="flex">
+                        {(isLibrary || videos.some(v => v.dateAdded)) && (
+                            <button
+                                onClick={() => handleSortField('added')}
+                                className={btnClass(sortField === 'added')}
+                                title="Date Bookmarked"
+                            >
+                                <Bookmark className="w-3 h-3" />
+                                {btnLabel("Date Bookmarked")}
+                            </button>
+                        )}
+                        <button
+                            onClick={() => handleSortField('date')}
+                            className={btnClass(sortField === 'date')}
+                            title="Date Added"
+                        >
+                            <Calendar className="w-3 h-3" />
+                            {btnLabel("Date Added")}
+                        </button>
+                        <button
+                            onClick={() => handleSortField('popularity')}
+                            className={btnClass(sortField === 'popularity')}
+                            title="Views"
+                        >
+                            <Users className="w-3 h-3" />
+                            {btnLabel("Views")}
+                        </button>
+                    </div>
+
+                    <div className="w-px h-3 bg-[#272727] mx-0.5" />
+
+                    <button
+                        onClick={toggleSortOrder}
+                        className={toggleClass}
+                        title='Sort Order ↑ ↓'
+                    >
+                        {sortOrder === 'desc' ? (
+                            <ArrowDown className="w-3.5 h-3.5 group-active:translate-y-0.5 transition-transform" />
+                        ) : (
+                            <ArrowUp className="w-3.5 h-3.5 group-active:-translate-y-0.5 transition-transform" />
+                        )}
+                    </button>
+                </div>
+            )}
+
+            {isLibrary && flags.showFilterControls && (
+                <div className={groupWrapClass}>
+                    <button
+                        onClick={() => handleFilter('all')}
+                        className={btnClass(filter === 'all')}
+                        title="All Videos"
+                    >
+                        <ListVideo className="w-3 h-3" />
+                        {btnLabel("All Videos")}
+                    </button>
+                    <button
+                        onClick={() => handleFilter('transcript')}
+                        className={btnClass(filter === 'transcript')}
+                        title="Transcript Only"
+                    >
+                        <FileText className="w-3 h-3" />
+                        {btnLabel("Transcript Only")}
+                    </button>
+                    <button
+                        onClick={() => handleFilter('summary')}
+                        className={btnClass(filter === 'summary')}
+                        title="With AI Summary"
+                    >
+                        <Sparkles className="w-3 h-3" />
+                        {btnLabel("With AI Summary")}
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+
+    // The heading's own sort/filter buttons (Settings > Display > Sort Controls Accessibility),
+    // styled like v0.4.4's: each group its own boxed pill, white active button, muted inactive ones.
+    // Labels drop to icon-only (tooltips keep the names) once the full-label row would run into the
+    // "Videos" heading — measured (see headerIconOnly below), not a viewport breakpoint, since the
+    // width needed depends on which buttons this view has (Library adds the filter group).
+    const headerGroupClass = "flex items-center bg-[#1a1a1a] p-0.5 rounded-lg border border-[#272727] gap-0.5";
+    const headerBtnClass = (active: boolean) =>
+        `px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${active ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`;
+    const headerToggleClass = "p-1 rounded text-[#777] hover:text-white hover:bg-white/5 transition-all cursor-pointer group flex items-center gap-1";
+    const headerLabel = (text: string) => (headerIconOnly ? null : text);
+
+    const headerSortControls = (
+        <div className="flex items-center gap-3 shrink-0">
+            {flags.showSortControls && (
+                <div className={headerGroupClass}>
+                    <div className="flex gap-0.5">
+                        {showBookmarkedSort && (
+                            <button
+                                onClick={() => handleSortField('added')}
+                                className={headerBtnClass(sortField === 'added')}
+                                title="Date Bookmarked"
+                            >
+                                <Bookmark className="w-3 h-3" />
+                                {headerLabel("Date Bookmarked")}
+                            </button>
+                        )}
+                        <button
+                            onClick={() => handleSortField('date')}
+                            className={headerBtnClass(sortField === 'date')}
+                            title="Date Added"
+                        >
+                            <Calendar className="w-3 h-3" />
+                            {headerLabel("Date Added")}
+                        </button>
+                        <button
+                            onClick={() => handleSortField('popularity')}
+                            className={headerBtnClass(sortField === 'popularity')}
+                            title="Views"
+                        >
+                            <Users className="w-3 h-3" />
+                            {headerLabel("Views")}
+                        </button>
+                    </div>
+
+                    <div className="w-px h-3 bg-[#272727] mx-0.5" />
+
+                    <button
+                        onClick={toggleSortOrder}
+                        className={headerToggleClass}
+                        title='Sort Order ↑ ↓'
+                    >
+                        {sortOrder === 'desc' ? (
+                            <ArrowDown className="w-3.5 h-3.5 group-active:translate-y-0.5 transition-transform" />
+                        ) : (
+                            <ArrowUp className="w-3.5 h-3.5 group-active:-translate-y-0.5 transition-transform" />
+                        )}
+                    </button>
+                </div>
+            )}
+
+            {isLibrary && flags.showFilterControls && (
+                <div className={headerGroupClass}>
+                    <button
+                        onClick={() => handleFilter('all')}
+                        className={headerBtnClass(filter === 'all')}
+                        title="All Videos"
+                    >
+                        <ListVideo className="w-3 h-3" />
+                        {headerLabel("All Videos")}
+                    </button>
+                    <button
+                        onClick={() => handleFilter('transcript')}
+                        className={headerBtnClass(filter === 'transcript')}
+                        title="Transcript Only"
+                    >
+                        <FileText className="w-3 h-3" />
+                        {headerLabel("Transcript Only")}
+                    </button>
+                    <button
+                        onClick={() => handleFilter('summary')}
+                        className={headerBtnClass(filter === 'summary')}
+                        title="With AI Summary"
+                    >
+                        <Sparkles className="w-3 h-3" />
+                        {headerLabel("With AI Summary")}
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+
+    const headerContent = (
+        <>
+            <div className="flex items-baseline gap-1.5 min-w-0">
+                {(() => {
+                    const countText = typeof totalCount === 'number' && totalCount > filteredVideos.length
+                        ? `${filteredVideos.length} of ${totalCount} results`
+                        : `${filteredVideos.length} results`;
+                    return <span className="min-w-0 truncate text-[11px] text-gray-500" title={countText}>{countText}</span>;
+                })()}
+            </div>
+
+            {sortControls}
+        </>
+    );
 
     return (
         <div className="w-full">
-            {/* Header Row 1: Title and Actions */}
-            <div className="flex flex-col lg:flex-row justify-between items-center mb-4 gap-4 px-2">
-                <div className="flex items-baseline gap-1.5 flex-shrink-0">
-                    <h3 className="text-xl font-bold text-white">Videos</h3>
-                    <span className="text-[#aaaaaa] text-sm font-medium">
-                        {typeof totalCount === 'number' && totalCount > filteredVideos.length
-                            ? `(${filteredVideos.length} of ${totalCount} results)`
-                            : `(${filteredVideos.length} results)`}
-                    </span>
-                </div>
+            {/* Bare heading (plus Save All) — same convention as Glossary/Biography's own top
+                heading — while the rest (count, sort, filter) lives in the fixed bar below the
+                grid, always (see BottomBar.tsx). sticky top-0 (with a solid bg, since this scrolls
+                within App.tsx's shared content pane) keeps it visible instead of scrolling past
+                with the grid beneath it. */}
+            <div ref={headerRowRef} className="sticky top-0 z-10 bg-[#0f0f0f] flex items-center gap-4 min-h-9 mb-4 px-2">
+                <h3 ref={headingRef} className="text-xl font-bold text-white shrink-0">Videos</h3>
 
-                <div className="flex flex-wrap items-center justify-end gap-3 w-full lg:w-auto">
-                    {onSaveAll && (
-                        <button
-                            onClick={onSaveAll}
-                            disabled={!!saveProgress}
-                            className={`px-3 py-1.5 bg-white text-black hover:bg-[#e5e5e5] rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center gap-2 ${!saveProgress ? 'cursor-pointer' : 'cursor-default'}`}
-                        >
-                            {saveProgress ? (
-                                <>
-                                    <div className="w-3 h-3 border-2 border-black border-t-transparent rounded-full animate-spin" />
-                                    {saveProgress}
-                                </>
-                            ) : (
-                                <>
-                                    <Save className="w-4 h-4" />
-                                    Save All
-                                </>
-                            )}
-                        </button>
-                    )}
-
-                    {flags.showSortControls && (
-                    <div className="flex items-center bg-[#1a1a1a] p-0.5 rounded-lg border border-[#272727] gap-0.5">
-                        <div className="flex gap-0.5">
-                            <button
-                                onClick={() => handleSortField('date')}
-                                className={`px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${sortField === 'date' ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`}
-                            >
-                                <Calendar className="w-3 h-3" />
-                                Date Added
-                            </button>
-                            {(isLibrary || videos.some(v => v.dateAdded)) && (
-                                <button
-                                    onClick={() => handleSortField('added')}
-                                    className={`px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${sortField === 'added' ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`}
-                                >
-                                    <Bookmark className="w-3 h-3" />
-                                    Date Bookmarked
-                                </button>
-                            )}
-                            <button
-                                onClick={() => handleSortField('popularity')}
-                                className={`px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${sortField === 'popularity' ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`}
-                            >
-                                <Users className="w-3 h-3" />
-                                Views
-                            </button>
-                        </div>
-
-                        <div className="w-px h-3 bg-[#272727] mx-0.5" />
-
-                        <button
-                            onClick={toggleSortOrder}
-                            className="p-1 rounded text-[#777] hover:text-white hover:bg-white/5 transition-all cursor-pointer group flex items-center gap-1"
-                            title='Sort Order ↑ ↓'
-                        >
-                            {sortOrder === 'desc' ? (
-                                <ArrowDown className="w-3.5 h-3.5 group-active:translate-y-0.5 transition-transform" />
-                            ) : (
-                                <ArrowUp className="w-3.5 h-3.5 group-active:-translate-y-0.5 transition-transform" />
-                            )}
-                        </button>
-                    </div>
-                    )}
-
-                    {isLibrary && flags.showFilterControls && (
-                        <div className="flex items-center bg-[#1a1a1a] p-0.5 rounded-lg border border-[#272727] gap-0.5">
-                            <button
-                                onClick={() => handleFilter('all')}
-                                className={`px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${filter === 'all' ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`}
-                            >
-                                All Videos
-                            </button>
-                            <button
-                                onClick={() => handleFilter('transcript')}
-                                className={`px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${filter === 'transcript' ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`}
-                            >
-                                <FileText className="w-3 h-3" />
-                                Transcript Only
-                            </button>
-                            <button
-                                onClick={() => handleFilter('summary')}
-                                className={`px-2 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${filter === 'summary' ? 'bg-white text-black' : 'text-[#777] hover:text-white hover:bg-white/5'}`}
-                            >
-                                <Sparkles className="w-3 h-3" />
-                                With AI Summary
-                            </button>
-                        </div>
-                    )}
+                <div ref={headerControlsRef} className="ml-auto flex items-center justify-end gap-3 shrink-0">
+                    {flags.showSortControlButtons && headerSortControls}
+                    {saveAllButton}
                 </div>
             </div>
 
-
-            {isLibrary && videos.length === 0 ? (
+            {/* A resultless Search reaches this with videos.length === 0 same as an empty Library
+                does — the empty-state message and the bottom bar (BottomBar.tsx) both always show
+                regardless of view, rather than the whole component rendering nothing. */}
+            {videos.length === 0 ? (
                 loading ? (
                     <div className="flex flex-col items-center justify-center py-24 text-gray-400 space-y-4">
                         <div className="w-8 h-8 border-4 border-[#303030] border-t-red-600 rounded-full animate-spin" />
@@ -397,8 +631,10 @@ export function VideoList({
                     </div>
                 ) : (
                     <div className="text-center text-gray-500 py-24">
-                        <p className="text-xl font-bold text-white mb-2">{emptyTitle ?? "No results"}</p>
-                        {emptyMessage && <p className="text-sm">{emptyMessage}</p>}
+                        <p className="text-xl text-white mb-2">
+                            {error || emptyTitle || (isLibrary ? "No results" : "No search results")}
+                        </p>
+                        {!error && emptyMessage && <p className="text-sm">{emptyMessage}</p>}
                     </div>
                 )
             ) : (
@@ -447,6 +683,13 @@ export function VideoList({
                     )}
                 </>
             )}
+
+            <BottomBar>
+                <div className="flex items-center gap-6 flex-1 min-w-0">
+                    {driveChip}
+                    {headerContent}
+                </div>
+            </BottomBar>
         </div>
     );
 }

@@ -27,6 +27,7 @@ pub const FEATURE_FLAGS: &[(&str, &str)] = &[
     ("defaultView", "search"),
     // ── Library and search results
     ("showSortControls", "true"),
+    ("showSortControlButtons", "false"),
     ("showFilterControls", "true"),
     ("showListModeToggle", "true"),
     ("hideShortsInSearch", "true"),
@@ -52,6 +53,12 @@ pub const FEATURE_FLAGS: &[(&str, &str)] = &[
     ("allowEditTranscript", "true"),
     ("allowEditTranscriptOnNA", "true"),
     ("allowEditWDBS", "true"),
+    // Off (default) reverts the maintainer-owned production trigger's "<channel's established
+    // prefix>_PND" guess for a newly saved video back to plain unassigned, right after save (see
+    // db/videos.rs::save_video) — a silent guess a user didn't ask for, replaced by the Drive
+    // picker's own Suggested section and its Unsorted entry, both of which need a person to
+    // actually decide instead of a trigger guessing on the app's behalf.
+    ("allowAutoPendingDriveByChannel", "false"),
     // Off = the sequence bar's pencil (editing the Primary Drive / "Also In" links) and Bulk Assign
     // Mode are both hidden outright, even when allowEditWDBS is on.
     ("allowEditDriveLinking", "true"),
@@ -129,11 +136,10 @@ pub const SYNCABLE_SETTINGS: &[&str] = &[
     // Behaviour
     "hideShortsInSearch",
     "setTranscriptAfterSummarizeToNA",
-    // Display / theme (resolution and fullscreen are machine specific and intentionally absent)
+    // Display / theme (resolution, fullscreen, video_list_mode and navigation_orientation are
+    // machine specific and intentionally absent)
     "theme",
     "customThemes",
-    "video_list_mode",
-    "navigation_orientation",
     // AI behaviour (never the keys)
     "summarize_provider",
     "ollama_model",

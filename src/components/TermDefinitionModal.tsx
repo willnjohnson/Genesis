@@ -7,13 +7,8 @@ import { markdownUrlTransform } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
-import { getTagVideosPreview, type Video } from '../api';
+import { getTagVideosPreview, type Video, type GlossaryTerm } from '../api';
 import { TagVideosPreview } from './TagVideosPreview';
-
-interface GlossaryTerm {
-    term: string;
-    definition: string;
-}
 
 interface Props {
     term: GlossaryTerm;
@@ -27,6 +22,7 @@ interface Props {
 const TAG_PREVIEW_LIMIT = 12;
 
 export function TermDefinitionModal({ term, onClose, onSearch, onOpenVideo }: Props) {
+    const shownDrives = term.drives;
     // Which "search" buttons this modal offers is up to the DB owner (see lib/flags.ts).
     const { flags } = useFlags();
     const { labels } = useWorkspace();
@@ -68,6 +64,12 @@ export function TermDefinitionModal({ term, onClose, onSearch, onOpenVideo }: Pr
                             ? <FileText className="w-5 h-5 text-gray-400 shrink-0" />
                             : <Hash className="w-5 h-5 text-gray-400 shrink-0" />}
                         <h2 className="text-xl font-bold text-white truncate">{term.term}</h2>
+                        {/* Each Drive can define a term differently, so say whose definition this is. */}
+                        {shownDrives.length > 0 && (
+                            <span className="min-w-0 truncate px-2 py-0.5 rounded-md bg-[#222] border border-[#333] text-[11px] font-bold text-gray-300" title={shownDrives.join(', ')}>
+                                {shownDrives.map(d => d.replace(/^:/, '')).join(', ')}
+                            </span>
+                        )}
                     </div>
                     <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
                         <X className="w-5 h-5" />
@@ -106,8 +108,9 @@ export function TermDefinitionModal({ term, onClose, onSearch, onOpenVideo }: Pr
                     )}
                 </div>
 
-                {/* Footer */}
-                <div className="px-6 py-4 border-t border-[#303030] flex justify-between items-center gap-4 bg-[#141414]">
+                {/* Footer — kept small and low-emphasis, same treatment as BiographyModal's social
+                    row, so the definition/videos above stay the focus, not the controls below. */}
+                <div className="px-6 py-2 border-t border-[#303030] flex justify-between items-center gap-4 bg-[#141414]">
                     {showSearch ? (
                         // One button for both kinds. It runs the exact Term (^) or Tag (#) search, not a free-text one.
                         <button
@@ -115,14 +118,14 @@ export function TermDefinitionModal({ term, onClose, onSearch, onOpenVideo }: Pr
                                 onSearch(`"${term.term}"`, isTerm ? 'term' : 'tag');
                                 onClose();
                             }}
-                            className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-xs font-bold cursor-pointer border border-[#333] hover:border-[#444]"
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-[11px] font-bold cursor-pointer border border-[#333] hover:border-[#444]"
                         >
-                            <Search className="w-3.5 h-3.5" />
+                            <Search className="w-3 h-3" />
                             Search in {labels.aliasLibrary}
                         </button>
                     ) : <span />}
                     {!isTerm && tagVideos && (
-                        <span className="shrink-0 px-2 py-0.5 rounded-md bg-[#222] border border-[#333] text-[11px] font-bold text-gray-300">
+                        <span className="shrink-0 px-2 py-0.5 rounded-md bg-[#222] border border-[#333] text-[10px] font-bold text-gray-300">
                             {tagTotal.toLocaleString()} {tagTotal === 1 ? 'video' : 'videos'}
                         </span>
                     )}

@@ -186,7 +186,7 @@ async fn content_flows_as_snapshot_then_delta_with_tombstones() {
         }
     }
     kinds.sort();
-    assert_eq!(kinds, vec!["glossary:alpha", "glossary:beta", "glossary:gamma", "video:vid1", "wdbs::UAP"]);
+    assert_eq!(kinds, vec!["glossary:|alpha", "glossary:|beta", "glossary:|gamma", "video:vid1", "wdbs::UAP"]);
     assert_eq!(cursor, 5);
 
     // Edit one, delete one.
@@ -195,10 +195,10 @@ async fn content_flows_as_snapshot_then_delta_with_tombstones() {
     h.scan();
     let page: ChangesPage = h.get(&format!("/api/v1/changes?since={cursor}"), Some(TOKEN)).send().await.unwrap().json().await.unwrap();
     assert_eq!(page.upserts.len(), 1);
-    assert_eq!(page.upserts[0].key, "alpha");
+    assert_eq!(page.upserts[0].key, "|alpha");
     assert_eq!(page.upserts[0].data["definition"], "FIRST");
     assert_eq!(page.deletes.len(), 1);
-    assert_eq!(page.deletes[0].key, "beta");
+    assert_eq!(page.deletes[0].key, "|beta");
     assert_eq!(page.revision, 7);
 }
 

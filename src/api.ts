@@ -420,9 +420,13 @@ export async function getEmbedServerPort(): Promise<number | null> {
     return await invoke("get_embed_server_port");
 }
 
+/** One Glossary row: a definition of a term and every top-level Drive (":PRIV") it's filed under.
+ *  Empty `drives` means uncategorized (which is also where Quick Tags live). The same term can have
+ *  a different definition in different Drives, but a Drive belongs to one definition of a term. */
 export interface GlossaryTerm {
     term: string;
     definition: string;
+    drives: string[];
 }
 
 export interface BiographyEntry {
@@ -445,12 +449,14 @@ export async function addGlossaryTerm(term: string, definition: string): Promise
     await invoke("add_glossary_term", { term, definition });
 }
 
-export async function getGlossaryTerms(): Promise<[string, string][]> {
+/** Every row, sorted by term. A term with several definitions appears once per definition. */
+export async function getGlossaryTerms(): Promise<GlossaryTerm[]> {
     return await invoke("get_glossary_terms");
 }
 
-export async function deleteGlossaryTerm(term: string): Promise<void> {
-    await invoke("delete_glossary_term", { term });
+/** Deletes one entry: the row of `term` filed under exactly `drives` (empty = the uncategorized row). */
+export async function deleteGlossaryTerm(term: string, drives: string[]): Promise<void> {
+    await invoke("delete_glossary_term", { term, drives });
 }
 
 /** A top-level Drive (level 1) a Standard Glossary Tag can be filed under. */
@@ -463,16 +469,12 @@ export interface WdbsRoot {
     alias: string | null;
 }
 
-/** Adds or edits a term and the top-level Drives it's filed under, in one step. `originalTerm` is
- *  the term's current name when editing (a different `term` renames it). Quick Tags (empty
- *  definition) never keep drives. */
-export async function saveGlossaryTerm(originalTerm: string | null, term: string, definition: string, drives: string[]): Promise<void> {
-    await invoke("save_glossary_term", { originalTerm, term, definition, drives });
-}
-
-/** Every (term, drive root) assignment, e.g. ["Halving", ":CRYPTO"]. */
-export async function getGlossaryDriveLinks(): Promise<[string, string][]> {
-    return await invoke("get_glossary_drive_links");
+/** Adds or edits one definition and the top-level Drives it's filed under (one row).
+ *  `original` is the entry being edited (its term and Drives): its row is replaced, and filing under
+ *  a Drive where the term already has a different definition is refused. Quick Tags (empty
+ *  definition) are always uncategorized; no Drives = uncategorized. */
+export async function saveGlossaryTerm(original: { term: string; drives: string[] } | null, term: string, definition: string, drives: string[]): Promise<void> {
+    await invoke("save_glossary_term", { originalTerm: original?.term ?? null, originalDrives: original?.drives ?? null, term, definition, drives });
 }
 
 export async function getWdbsRoots(): Promise<WdbsRoot[]> {
@@ -799,8 +801,10 @@ export async function updateVideoWdbs(videoId: string, wdbs: string): Promise<vo
 // One node of the Warp Drive taxonomy tree (see components/WdbsTreePanel.tsx). `path` is the
 // storage-encoded prefix to pass to getVideosByWdbs; `count` includes every distinct video at
 // this node and everywhere beneath it (canonical assignment or symlink — see
-// add/removeVideoWdbsLink). There is deliberately no "Universe"/unassigned node — that's what
-// the Library/Portal grid is already for.
+// add/removeVideoWdbsLink). The tree itself never contains an unassigned/"Unsorted" node — that's
+// a synthetic entry the panel renders on top, backed by getUnsortedVideos/UNSORTED_WDBS_FILTER,
+// since it isn't a real taxonomy node and a video's assignment to it isn't something to alias/
+// icon-edit the way a real one is.
 export interface WdbsNode {
     segment: string;
     path: string;
@@ -859,6 +863,30 @@ export async function getVideosByWdbs(wdbsPath: string, query: string, opts?: Li
         limit: opts?.limit,
         offset: opts?.offset,
     });
+}
+
+// A synthetic wdbsFilter value — never a real storage-encoded path (those always start with
+// "θψ") — meaning "videos with no home Warp Drive at all". See WdbsTreePanel's Unsorted entry and
+// getUnsortedVideos below; hooks/useLibrary.ts branches on this instead of sending it to the backend.
+export const UNSORTED_WDBS_FILTER = '__UNSORTED__';
+
+// Every video with no home Warp Drive (WDBS empty, ':', or the raw production placeholder) — the
+// Drive tree's synthetic "Unsorted" entry, not a real taxonomy node. `query` narrows within it the
+// same way getVideosByWdbs's does.
+export async function getUnsortedVideos(query: string, opts?: LibraryQueryOptions): Promise<SearchResponse> {
+    return await invoke("fetch_unsorted_videos", {
+        query,
+        filterKind: opts?.filterKind,
+        sortField: opts?.sortField,
+        sortOrder: opts?.sortOrder,
+        limit: opts?.limit,
+        offset: opts?.offset,
+    });
+}
+
+// How many videos are currently Unsorted — the tree entry's count badge.
+export async function getUnsortedVideoCount(): Promise<number> {
+    return await invoke("get_unsorted_video_count");
 }
 
 // Every Warp Drive path currently assigned to at least one video (storage-encoded) — decode with

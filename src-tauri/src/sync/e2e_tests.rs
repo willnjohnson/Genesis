@@ -146,8 +146,9 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
         m.execute("UPDATE Videos SET title = 'Video 1 (revised)' WHERE video_id = 'vid1'", []).unwrap();
         m.execute("DELETE FROM Videos WHERE video_id = 'vid4'", []).unwrap();
         m.execute("INSERT INTO Glossary (term, definition) VALUES ('orb', 'a sphere')", []).unwrap();
-        // The admin refiles a term: only the assignment changes, and the client must follow.
-        m.execute("UPDATE Glossary SET drives = ':FIN' || char(10) || ':CRYPTO' WHERE term = 'saucer'", []).unwrap();
+        // The admin refiles a term to another Drive: only its Drive changes (so its key does), and
+        // the client must follow — the old row goes, the new one arrives.
+        m.execute("UPDATE Glossary SET drives = ':FIN' WHERE term = 'saucer'", []).unwrap();
         m.execute("UPDATE Settings SET value = 'true' WHERE key = 'showBiography'", []).unwrap();
     }
     scan_once(&server).unwrap();
@@ -158,10 +159,11 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
     assert_eq!(n(&client, "SELECT COUNT(*) FROM Videos WHERE video_id='vid4'"), 0);
     assert_eq!(n(&client, "SELECT COUNT(*) FROM Videos WHERE video_id='mine'"), 1, "the user's video survives the sync");
     assert_eq!(q(&client, "SELECT definition FROM Glossary WHERE term='orb'").as_deref(), Some("a sphere"));
+    assert_eq!(n(&client, "SELECT COUNT(*) FROM Glossary WHERE term='saucer'"), 1, "the refiled term isn't duplicated");
     assert_eq!(
         q(&client, "SELECT drives FROM Glossary WHERE term='saucer'").as_deref(),
-        Some(":CRYPTO\n:FIN"),
-        "a change that only touches drive assignments still syncs"
+        Some(":FIN"),
+        "a change that only touches which Drive a definition is filed under still syncs"
     );
     assert_eq!(db::get_setting(&client, "showBiography").unwrap().as_deref(), Some("true"), "policy updates follow the master");
 

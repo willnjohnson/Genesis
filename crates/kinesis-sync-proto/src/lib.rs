@@ -16,10 +16,10 @@ pub use pack::{PackLine, PackReader, PackWriter};
 pub use settings::{is_denied_setting, is_syncable_setting, FEATURE_FLAGS, SYNCABLE_SETTINGS};
 pub use types::*;
 
-/// Wire protocol version spoken over HTTP. Bumped only on breaking changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Wire protocol version spoken over HTTP. Bumped only on breaking changes (2: glossary items are keyed by drive|term).
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Version of the on-disk pack format (NDJSON export/import).
-pub const PACK_VERSION: u32 = 1;
+pub const PACK_VERSION: u32 = 2;
 /// Identifier written into every pack header.
 pub const PACK_FORMAT: &str = "kinesis-sync-pack";
 

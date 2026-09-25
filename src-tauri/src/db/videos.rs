@@ -88,6 +88,19 @@ pub fn save_video(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![video_id, title, author, length, transcript, view_count, published_at, handle, summary],
         )?;
+        // The production database's own INSERT trigger (trgVideosBeforeINS_Videos_SyncBioHandle,
+        // maintainer-owned — we don't create or edit it) can guess a "<this channel's established
+        // prefix>_PND" Drive when every other video already saved under this handle agrees on one.
+        // Reverted here rather than left alone, unless explicitly allowed: a silent guess nobody
+        // asked for is worse than leaving the video properly unassigned (and easy to find via the
+        // Drive picker's Unsorted entry) — this only ever runs right after an INSERT, since the
+        // trigger (BEFORE INSERT) never fires on the UPDATE path above.
+        if !get_setting_bool(&conn, "allowAutoPendingDriveByChannel") {
+            let _ = conn.execute(
+                "UPDATE Videos SET WDBS = 'θψ' WHERE video_id = ?1 AND WDBS LIKE '%\\_PND' ESCAPE '\\'",
+                params![video_id],
+            );
+        }
     }
     // The production database's own INSERT trigger defaults a new video's WDBS to the raw "θψ"
     // prefix marker when it can't infer anything smarter (see the schema handoff doc). Since
@@ -109,6 +122,62 @@ pub fn save_video(
         clear_transcript_after_summary(&conn, video_id)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pending_drive_guess_tests {
+    use super::*;
+    use crate::db::init_db;
+    use crate::db::settings::set_setting;
+
+    // init_db doesn't create the maintainer's own trgVideosBeforeINS_Videos_SyncBioHandle (see the
+    // comment on that trigger in production_schema.sql, and the one on the DROP COLUMN in
+    // schema.rs::init_db) — it lives only on a hand-maintained production database. This stand-in
+    // mimics just the part save_video needs to react to: guessing a "<prefix>_PND" WDBS on INSERT
+    // and cancelling the original row, exactly like the real trigger's RAISE(IGNORE) does.
+    fn install_stub_pending_guess_trigger(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TRIGGER stub_pending_guess BEFORE INSERT ON Videos BEGIN
+                INSERT INTO Videos (video_id, title, author, handle, length_seconds, transcript,
+                    summary, view_count, published_at, date_added, tags, tokens, WDBS)
+                VALUES (NEW.video_id, NEW.title, NEW.author, NEW.handle, NEW.length_seconds,
+                    NEW.transcript, NEW.summary, NEW.view_count, NEW.published_at, NEW.date_added,
+                    NEW.tags, NEW.tokens, 'θψMWD_IFH_PND');
+                SELECT RAISE(IGNORE);
+            END;",
+        )
+        .unwrap();
+    }
+
+    fn setup(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("kinesis_pnd_{name}_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = path.to_string_lossy().to_string();
+        init_db(&db).unwrap();
+        install_stub_pending_guess_trigger(&Connection::open(&db).unwrap());
+        db
+    }
+
+    #[test]
+    fn reverts_the_guess_by_default() {
+        let db = setup("off");
+        save_video(&db, "v1", "Title", "Author", 60, "words", 1, "2026-01-01T00:00:00Z", "@IFixHearts", None).unwrap();
+        let wdbs: String = Connection::open(&db).unwrap()
+            .query_row("SELECT WDBS FROM Videos WHERE video_id = 'v1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(wdbs, ":", "left unassigned, not the trigger's silent _PND guess");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn keeps_the_guess_when_the_flag_is_on() {
+        let db = setup("on");
+        set_setting(&db, "allowAutoPendingDriveByChannel", "true").unwrap();
+        save_video(&db, "v1", "Title", "Author", 60, "words", 1, "2026-01-01T00:00:00Z", "@IFixHearts", None).unwrap();
+        let wdbs: String = Connection::open(&db).unwrap()
+            .query_row("SELECT WDBS FROM Videos WHERE video_id = 'v1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(wdbs, "θψMWD_IFH_PND");
+        let _ = std::fs::remove_file(&db);
+    }
 }
 
 /// Deletes a video by id. The FTS-index cleanup and biography cascade-delete happen via
@@ -290,8 +359,8 @@ pub fn get_library_stats(db_path: &str) -> Result<LibraryStats> {
     Ok(LibraryStats {
         channel_count: count("SELECT COUNT(DISTINCT LOWER(LTRIM(handle, '@'))) FROM Videos WHERE handle IS NOT NULL AND TRIM(handle, '@ ') != ''"),
         drive_count: drives.len() as i64,
-        glossary_count: count("SELECT COUNT(*) FROM Glossary WHERE TRIM(definition) != ''"),
-        quick_tag_count: count("SELECT COUNT(*) FROM Glossary WHERE TRIM(definition) = ''"),
+        glossary_count: count("SELECT COUNT(DISTINCT term) FROM Glossary WHERE TRIM(definition) != ''"),
+        quick_tag_count: count("SELECT COUNT(DISTINCT term) FROM Glossary WHERE TRIM(definition) = ''"),
         biography_count: count("SELECT COUNT(*) FROM Biographies"),
         attachment_count: count("SELECT COUNT(*) FROM VideoAttachments"),
         attachment_bytes: count("SELECT COALESCE(SUM(stored_size), 0) FROM AttachmentBlobs"),

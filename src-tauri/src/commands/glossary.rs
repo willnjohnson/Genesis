@@ -8,36 +8,33 @@ pub fn add_glossary_term(app: tauri::AppHandle, term: String, definition: String
 }
 
 #[command]
-pub fn get_glossary_terms(app: tauri::AppHandle) -> Result<Vec<(String, String)>, String> {
+pub fn get_glossary_terms(app: tauri::AppHandle) -> Result<Vec<db::GlossaryEntry>, String> {
     let db_path = get_db_path(&app);
     db::get_glossary_terms(&db_path).map_err(|e| e.to_string())
 }
 
+/// Deletes one entry: the term's rows in each of `drives` ('' = the uncategorized row).
 #[command]
-pub fn delete_glossary_term(app: tauri::AppHandle, term: String) -> Result<(), String> {
+pub fn delete_glossary_term(app: tauri::AppHandle, term: String, drives: Vec<String>) -> Result<(), String> {
     let db_path = get_db_path(&app);
-    db::delete_glossary_term(&db_path, &term).map_err(|e| e.to_string())
+    db::delete_glossary_group(&db_path, &term, &drives).map_err(|e| e.to_string())
 }
 
-/// Adds or edits a term and the top-level Drives it's filed under, in one step. `original_term` is
-/// the term's current name when editing (a different `term` renames it).
+/// Adds or edits one definition and the top-level Drives it's filed under (one row per Drive).
+/// `original_term`/`original_drives` are the entry's current term and Drives when editing.
 #[command]
 pub fn save_glossary_term(
     app: tauri::AppHandle,
     original_term: Option<String>,
+    original_drives: Option<Vec<String>>,
     term: String,
     definition: String,
     drives: Vec<String>,
 ) -> Result<(), String> {
     let db_path = get_db_path(&app);
-    db::save_glossary_term(&db_path, original_term.as_deref(), &term, &definition, &drives).map_err(|e| e.to_string())
-}
-
-/// Every (term, drive root) assignment, e.g. ("Halving", ":CRYPTO").
-#[command]
-pub fn get_glossary_drive_links(app: tauri::AppHandle) -> Result<Vec<(String, String)>, String> {
-    let db_path = get_db_path(&app);
-    db::get_glossary_drive_links(&db_path).map_err(|e| e.to_string())
+    let original_drives = original_drives.unwrap_or_default();
+    let original = original_term.as_deref().map(|t| (t, original_drives.as_slice()));
+    db::save_glossary_group(&db_path, original, &term, &definition, &drives).map_err(|e| e.to_string())
 }
 
 /// The top-level Drives a term can be filed under. Async on a blocking thread because it's worked

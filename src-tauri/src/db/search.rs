@@ -144,13 +144,71 @@ pub(crate) fn library_order_by(alias: &str, sort_field: Option<&str>, sort_order
     format!("{alias}{col} {dir}, {alias}rowid {dir}")
 }
 
+/// A search query's recognized facets (`handle:`/`video:`/`tag_search:`/`term_search:`), pulled
+/// out of the free text so both can be matched separately. Shared by search_library_videos below
+/// and by any narrower "search within a subset" query (db::wdbs::list_videos_by_wdbs,
+/// list_unsorted_videos) — extracting this out is what fixed a bug where typing a facet like
+/// `handle:DavidBombal` while a Drive category or Unsorted was selected silently matched nothing:
+/// those two only ever ran `free_text` through build_fts_query, with no facet parsing at all.
+pub(crate) struct SearchFacets {
+    pub handle: String,
+    pub video: String,
+    pub tag: String,
+    pub tag_exact: bool,
+    pub term: String,
+    pub term_exact: bool,
+    /// Whatever's left after every recognized facet token is stripped out — feed this to
+    /// build_fts_query, not the original query.
+    pub free_text: String,
+}
+
+pub(crate) fn parse_search_facets(query: &str) -> SearchFacets {
+    let facet_re = Regex::new(r#"([a-z_]+):(?:"([^"]*)"|([^ ]*))"#).unwrap();
+    let mut handle = String::new();
+    let mut video = String::new();
+    let mut tag = String::new();
+    let mut term = String::new();
+    let mut tag_exact = false;
+    let mut term_exact = false;
+    let mut remaining = query.to_string();
+
+    for cap in facet_re.captures_iter(query) {
+        let facet_type = &cap[1];
+        let quoted = cap.get(2).map(|m| m.as_str());
+        let value = quoted.unwrap_or_else(|| cap.get(3).map(|m| m.as_str()).unwrap_or(""));
+        // tag_search:"exact tag" (quoted) means an exact, case-insensitive match against one of
+        // the video's comma-separated tags; tag_search:contains (bare) means a substring match.
+        // tag_search only looks at Quick Tags (glossary entries without a definition);
+        // term_search works the same way against Terms (entries with a definition).
+        match facet_type {
+            "handle" => handle = value.to_string(),
+            "video" => video = value.to_string(),
+            "tag_search" => {
+                tag = value.to_string();
+                tag_exact = quoted.is_some();
+            }
+            "term_search" => {
+                term = value.to_string();
+                term_exact = quoted.is_some();
+            }
+            _ => {}
+        }
+        remaining = remaining.replace(&cap[0], "");
+    }
+
+    SearchFacets { handle, video, tag, tag_exact, term, term_exact, free_text: remaining.trim().to_string() }
+}
+
 /// WHERE clause for the `tag_search` / `term_search` facets. A video's `tags` column is a comma
 /// separated list of glossary entry names; an entry is a Term when it has a definition and a Quick
 /// Tag when it doesn't, so each facet only matches entries of its own kind. `param` is the named
 /// parameter holding the search value ("" means the facet wasn't used). Quoted values (`exact`)
 /// must equal an entry's name, bare ones just have to be contained in it, both ignoring case.
-fn glossary_tag_clause(terms: bool, exact: bool, param: &str) -> String {
+pub(crate) fn glossary_tag_clause(terms: bool, exact: bool, param: &str) -> String {
     let kind = if terms { "<> ''" } else { "= ''" };
+    // A name is a Term when ANY of its rows (one per Drive) has a definition, so the Quick Tag
+    // facet must skip a name that's also a Term in some Drive.
+    let only_quick = if terms { "" } else { "AND NOT EXISTS (SELECT 1 FROM Glossary g2 WHERE g2.term = g.term AND g2.definition <> '') " };
     let name_matches = if exact {
         format!("g.term = {param} COLLATE NOCASE")
     } else {
@@ -160,7 +218,7 @@ fn glossary_tag_clause(terms: bool, exact: bool, param: &str) -> String {
         "({param} = '' OR EXISTS (SELECT 1 FROM Glossary g
             WHERE COALESCE(g.definition, '') {kind}
               AND {name_matches}
-              AND instr(',' || lower(v.tags) || ',', ',' || lower(g.term) || ',') > 0))"
+              {only_quick}AND instr(',' || lower(v.tags) || ',', ',' || lower(g.term) || ',') > 0))"
     )
 }
 
@@ -179,51 +237,18 @@ pub fn search_library_videos(
 ) -> Result<(Vec<Video>, i64)> {
     let conn = Connection::open(db_path)?;
 
-    let facet_re = Regex::new(r#"([a-z_]+):(?:"([^"]*)"|([^ ]*))"#).unwrap();
-    let mut handle_val = "";
-    let mut video_val = "";
-    let mut tag_val = "";
-    let mut term_val = "";
-    // tag_search:"exact tag" (quoted) means an exact, case-insensitive match against one of the
-    // video's comma-separated tags; tag_search:contains (bare) means a substring match — the
-    // same quoted-vs-bare distinction every other facet value already gets from this regex's two
-    // capture groups. Replaces the old trailing-`#` convention. tag_search only looks at Quick
-    // Tags (glossary entries without a definition); term_search (`^`) works the same way against
-    // terms (entries with a definition).
-    let mut tag_exact = false;
-    let mut term_exact = false;
-    let mut remaining = query.to_string();
-
-    for cap in facet_re.captures_iter(query) {
-        let facet_type = &cap[1];
-        let quoted = cap.get(2).map(|m| m.as_str());
-        let value = quoted.unwrap_or_else(|| cap.get(3).map(|m| m.as_str()).unwrap_or(""));
-        match facet_type {
-            "handle" => handle_val = value,
-            "video" => video_val = value,
-            "tag_search" => {
-                tag_val = value;
-                tag_exact = quoted.is_some();
-            }
-            "term_search" => {
-                term_val = value;
-                term_exact = quoted.is_some();
-            }
-            _ => {}
-        }
-        remaining = remaining.replace(&cap[0], "");
-    }
-
-    let free_text = remaining.trim();
+    let facets = parse_search_facets(query);
+    let (handle_val, video_val, tag_val, term_val) =
+        (facets.handle.as_str(), facets.video.as_str(), facets.tag.as_str(), facets.term.as_str());
 
     let filter_where = filter_kind_where("v.", filter_kind);
     let columns = video_columns_sql("v.");
     let order = library_order_by("v.", sort_field, sort_order);
 
-    let tag_clause = glossary_tag_clause(false, tag_exact, ":tag");
-    let term_clause = glossary_tag_clause(true, term_exact, ":term");
+    let tag_clause = glossary_tag_clause(false, facets.tag_exact, ":tag");
+    let term_clause = glossary_tag_clause(true, facets.term_exact, ":term");
 
-    let fts_query = build_fts_query(free_text);
+    let fts_query = build_fts_query(&facets.free_text);
 
     let mut videos = Vec::new();
     let total: i64;

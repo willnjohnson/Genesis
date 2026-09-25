@@ -130,6 +130,42 @@ pub async fn fetch_videos_by_wdbs(
     Ok(VideoResponse { videos, continuation: None, total_count: Some(total_count) })
 }
 
+/// How many videos are Unsorted — see db::count_unsorted_videos.
+#[command]
+pub async fn get_unsorted_video_count(app: tauri::AppHandle) -> Result<i64, String> {
+    let db_path = get_db_path(&app);
+    db::count_unsorted_videos(&db_path).map_err(|e| e.to_string())
+}
+
+/// Pages the videos with no home Warp Drive — the tree's synthetic "Unsorted" entry (see
+/// components/WdbsTreePanel.tsx) — optionally narrowed by a free-text `query`, same as
+/// fetch_videos_by_wdbs above. See db::list_unsorted_videos.
+#[command]
+pub async fn fetch_unsorted_videos(
+    app: tauri::AppHandle,
+    query: Option<String>,
+    filter_kind: Option<String>,
+    sort_field: Option<String>,
+    sort_order: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<VideoResponse, String> {
+    let db_path = get_db_path(&app);
+    let limit = limit.unwrap_or(DEFAULT_DRIVE_PAGE_SIZE).clamp(1, MAX_DRIVE_PAGE_SIZE);
+    let offset = offset.unwrap_or(0).max(0);
+    let (videos, total_count) = db::list_unsorted_videos(
+        &db_path,
+        query.as_deref().unwrap_or(""),
+        filter_kind.as_deref(),
+        sort_field.as_deref(),
+        sort_order.as_deref(),
+        limit,
+        offset,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(VideoResponse { videos, continuation: None, total_count: Some(total_count) })
+}
+
 /// Sets (or clears, given a blank `alias`) the curated display alias for one Warp Drive taxonomy
 /// node — tblWDBS.WDInfo — shown as a tooltip/detail alongside its raw segment name in the tree
 /// (see components/WdbsTreePanel.tsx's "Edit Alias" context menu). `path` is a WdbsNode.path

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
-import { getGlossaryTerms, deleteGlossaryTerm, saveGlossaryTerm, getGlossaryDriveLinks, getWdbsRoots, type GlossaryTerm, type WdbsRoot, type Video } from '../api';
+import { useEffect, useRef, useState, useMemo, type RefObject } from 'react';
+import { getGlossaryTerms, deleteGlossaryTerm, saveGlossaryTerm, getWdbsRoots, type GlossaryTerm, type WdbsRoot, type Video } from '../api';
 import { Plus, X, Pencil, Check, ChevronDown } from 'lucide-react';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -14,9 +14,18 @@ const QUICK_VIEW = '__quick__';
 
 const nameOfRoot = (roots: WdbsRoot[], path: string) => roots.find(r => r.path === path)?.segment ?? path.replace(/^:/, '');
 
-/** Dropdown with checkboxes for filing a Standard Glossary Tag under one or more top-level drives.
- *  Only roots (level 1, e.g. CRYPTO) are offered: deeper levels like CRYPTO-DOAC can't be assigned.
- *  The list opens upward: these dialogs clip overflow, and the field sits near their bottom edge. */
+const sameDrives = (a: string[], b: string[]) => a.length === b.length && a.every(d => b.includes(d));
+
+/** The drives an entry is filed under, by name, for telling apart two definitions of one term. */
+const driveBadge = (roots: WdbsRoot[], drives: string[]) => {
+    const named = drives.filter(d => d !== '').map(d => nameOfRoot(roots, d));
+    return named.length === 0 ? 'General' : named.join(', ');
+};
+
+/** Dropdown with checkboxes for filing a Standard Glossary Tag under one or more top-level drives
+ *  (each gets its own row holding the same definition). Only roots (level 1, e.g. CRYPTO) are
+ *  offered: deeper levels like CRYPTO-DOAC can't be assigned. The list opens upward: these dialogs
+ *  clip overflow, and the field sits near their bottom edge. */
 function DrivePicker({ roots, selected, onChange }: { roots: WdbsRoot[], selected: string[], onChange: (next: string[]) => void }) {
     const { labels } = useWorkspace();
     const [open, setOpen] = useState(false);
@@ -98,7 +107,7 @@ function DrivePicker({ roots, selected, onChange }: { roots: WdbsRoot[], selecte
     );
 }
 
-export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allowModification = true, onChange }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'term' | 'library') => void, onOpenVideo?: (video: Video) => void, allowModification?: boolean, onChange?: () => void }) {
+export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allowModification = true, onChange, scrollContainerRef }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'term' | 'library') => void, onOpenVideo?: (video: Video) => void, allowModification?: boolean, onChange?: () => void, scrollContainerRef: RefObject<HTMLDivElement | null> }) {
     const { labels } = useWorkspace();
     const glossaryLower = labels.aliasGlossary.toLowerCase();
     const [terms, setTerms] = useState<GlossaryTerm[]>([]);
@@ -109,10 +118,10 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
     const [newDrives, setNewDrives] = useState<string[]>([]);
     const [selectedTerm, setSelectedTerm] = useState<GlossaryTerm | null>(null);
     const [termToDelete, setTermToDelete] = useState<GlossaryTerm | null>(null);
-    const [termToEdit, setTermToEdit] = useState<{ originalTerm: string, term: string, definition: string, drives: string[] } | null>(null);
-    // Top-level drives and each term's assignments.
+    // originalTerm/originalDrives: the entry being edited; its row is replaced on save.
+    const [termToEdit, setTermToEdit] = useState<{ originalTerm: string, originalDrives: string[], term: string, definition: string, drives: string[] } | null>(null);
+    // Top-level drives; each row of `terms` already carries its own drive.
     const [roots, setRoots] = useState<WdbsRoot[]>([]);
-    const [driveLinks, setDriveLinks] = useState<Record<string, string[]>>({});
     // The one dropdown picks what's shown: '' = all Standard Glossary Tags, QUICK_VIEW = all Quick
     // Tags, or a drive root's path (":CRYPTO") = the Standard tags filed under that drive.
     const [view, setView] = useState('');
@@ -135,18 +144,11 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
         loadRoots();
     }, []);
 
-    // The terms and which drives each is filed under: both small, and all the default "All Terms"
-    // view needs, so the list shows as soon as they arrive.
+    // Every term row (one per term per drive): small, and all the default "All Terms" view needs,
+    // so the list shows as soon as they arrive.
     const loadTerms = async () => {
         try {
-            const [res, links] = await Promise.all([
-                getGlossaryTerms(),
-                getGlossaryDriveLinks().catch(() => [] as [string, string][]),
-            ]);
-            setTerms(res.map(r => ({ term: r[0], definition: r[1] })));
-            const byTerm: Record<string, string[]> = {};
-            for (const [term, root] of links) (byTerm[term] ??= []).push(root);
-            setDriveLinks(byTerm);
+            setTerms(await getGlossaryTerms());
         } finally {
             setLoading(false);
         }
@@ -154,7 +156,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
 
     // The drive list is the slow part on a big library (it's worked out from every video), and only
     // the drive dropdown and picker use it, so it loads in the background after the terms are up. A
-    // term's saved drives don't wait on it: they come with the terms above.
+    // term's saved drive doesn't wait on it: it comes with the terms above.
     const loadRoots = async () => {
         const rootList = await getWdbsRoots().catch(() => [] as WdbsRoot[]);
         setRoots(rootList);
@@ -188,9 +190,9 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
 
     const handleDelete = async () => {
         if (!termToDelete) return;
-        await deleteGlossaryTerm(termToDelete.term);
+        await deleteGlossaryTerm(termToDelete.term, termToDelete.drives);
         setTermToDelete(null);
-        if (selectedTerm?.term === termToDelete.term) setSelectedTerm(null);
+        if (selectedTerm?.term === termToDelete.term && sameDrives(selectedTerm.drives, termToDelete.drives)) setSelectedTerm(null);
         loadTerms();
         onChange?.();
     };
@@ -199,16 +201,17 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
         e.preventDefault();
         if (!termToEdit || !termToEdit.term.trim() || (showGlossaryTags && !termToEdit.definition.trim())) return;
 
-        // One atomic save: a rename moves the term's drive assignments along with it.
+        // One atomic save: a rename or a change of drives replaces the entry's old rows.
+        const drives = showGlossaryTags ? termToEdit.drives : [];
         try {
-            await saveGlossaryTerm(termToEdit.originalTerm, termToEdit.term.trim(), termToEdit.definition.trim(), showGlossaryTags ? termToEdit.drives : []);
+            await saveGlossaryTerm({ term: termToEdit.originalTerm, drives: termToEdit.originalDrives }, termToEdit.term.trim(), termToEdit.definition.trim(), drives);
         } catch (err) {
             setSaveError(String(err));
             return;
         }
         setTermToEdit(null);
-        if (selectedTerm?.term === termToEdit.originalTerm) {
-            setSelectedTerm({ term: termToEdit.term.trim(), definition: termToEdit.definition.trim() });
+        if (selectedTerm?.term === termToEdit.originalTerm && sameDrives(selectedTerm.drives, termToEdit.originalDrives)) {
+            setSelectedTerm({ term: termToEdit.term.trim(), definition: termToEdit.definition.trim(), drives });
         }
         loadTerms();
         onChange?.();
@@ -221,7 +224,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
         if (showGlossaryTags) {
             filtered = terms.filter(t => t.definition.trim().length > 0);
             // Only Standard tags belong to drives; picking one shows just the tags filed under it.
-            if (driveFilter) filtered = filtered.filter(t => (driveLinks[t.term] ?? []).includes(driveFilter));
+            if (driveFilter) filtered = filtered.filter(t => t.drives.includes(driveFilter));
         } else {
             filtered = terms.filter(t => t.definition.trim().length === 0);
         }
@@ -230,7 +233,15 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
             if (isDef) return normalizeText(t.definition).includes(q);
             return normalizeText(t.term).includes(q);
         });
-    }, [terms, searchQuery, showGlossaryTags, driveFilter, driveLinks]);
+    }, [terms, searchQuery, showGlossaryTags, driveFilter]);
+
+    // Names listed more than once (a different definition per drive): those entries get a drive badge.
+    const multiRowTerms = useMemo(() => {
+        const seen = new Set<string>();
+        const repeated = new Set<string>();
+        for (const t of filteredTerms) (seen.has(t.term) ? repeated : seen).add(t.term);
+        return repeated;
+    }, [filteredTerms]);
 
     const groupedTerms = useMemo(() => {
         const groups: Record<string, GlossaryTerm[]> = {};
@@ -251,11 +262,13 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
 
     // The bottom panel exists even before there's anything to jump to, same as it does for an
     // empty filtered view — no popping in once terms actually load.
-    if (loading) return <AlphabetJumpNav idPrefix="glossary-az" available={[]} />;
+    if (loading) return <AlphabetJumpNav idPrefix="glossary-az" available={[]} scrollContainerRef={scrollContainerRef} />;
 
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-400">
-            <div className="flex justify-between items-center mb-4 px-4">
+            {/* sticky top-0 (solid bg — this scrolls within App.tsx's shared content pane) keeps
+                the heading and its filter/Add Term controls visible instead of scrolling past. */}
+            <div className="sticky top-0 z-10 bg-[#0f0f0f] flex justify-between items-center min-h-9 mb-4 px-2">
                 <h2 className="text-xl font-bold text-white">{labels.aliasGlossary}</h2>
                 <div className="flex items-center gap-3">
                     {(flags.showQuickTags || (flags.glossaryDriveFilterVisible && roots.length > 0)) && (
@@ -287,7 +300,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
             {/* pb-10: AlphabetJumpNav (below) is a true fixed panel, always present, no longer part
                 of this page's own scroll — its ~24px height has to be reserved here instead, or
                 it'd sit over the last section once scrolled all the way down. */}
-            <div className="px-4 pb-10">
+            <div className="px-2 pb-10">
                 {terms.length === 0 ? (
                     <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                         <p className="text-xl font-bold text-white mb-2">No glossary terms have been added</p>
@@ -314,13 +327,16 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                                 <h3 id={`glossary-az-${char}`} className="text-xl font-bold text-[#aaaaaa] border-b border-[#333] pb-2 mb-4 scroll-mt-4">{char}</h3>
                                 <ul className="space-y-1.5 pl-2">
                                     {groupedTerms[char].map(t => (
-                                        <li key={t.term} className="text-gray-300 flex items-center group">
+                                        <li key={`${t.term}|${t.drives.join(',')}`} className="text-gray-300 flex items-center group">
                                             <div className="w-1.5 h-1.5 rounded-full bg-[#444] mr-3 shrink-0 group-hover:bg-[var(--k-accent)] transition-colors"></div>
                                             <button
                                                 onClick={() => setSelectedTerm(t)}
                                                 className="group-hover:text-[var(--k-accent)] transition-colors cursor-pointer text-base font-medium text-left flex-1 hover:underline hover:decoration-dotted hover:underline-offset-4"
                                             >
                                                 {t.term}
+                                                {multiRowTerms.has(t.term) && (
+                                                    <span className="ml-2 text-[11px] font-semibold text-gray-500 no-underline">{driveBadge(roots, t.drives)}</span>
+                                                )}
                                             </button>
                                             {allowModification && (
                                                 <>
@@ -328,7 +344,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                                                         onClick={(e) => {
                                                             e.stopPropagation();
                                                             setSaveError(null);
-                                                            setTermToEdit({ originalTerm: t.term, term: t.term, definition: t.definition, drives: driveLinks[t.term] ?? [] });
+                                                            setTermToEdit({ originalTerm: t.term, originalDrives: t.drives, term: t.term, definition: t.definition, drives: t.drives.filter(d => d !== '') });
                                                         }}
                                                         className="text-gray-500 hover:text-blue-400 transition-colors cursor-pointer p-1"
                                                         title="Edit term"
@@ -353,7 +369,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                               )}
                          </div>
 
-            <AlphabetJumpNav idPrefix="glossary-az" available={groupKeys} />
+            <AlphabetJumpNav idPrefix="glossary-az" available={groupKeys} scrollContainerRef={scrollContainerRef} />
 
             {/* Add Modal */}
             {showAddModal && (
@@ -527,7 +543,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
             {/* Confirm Delete Modal */}
             {termToDelete && (
                 <ConfirmDialog
-                    message={`Are you sure you want to delete the term "${termToDelete.term}"?`}
+                    message={`Are you sure you want to delete the ${termToDelete.definition.trim() ? 'term' : 'tag'} "${termToDelete.term}"${driveBadge(roots, termToDelete.drives) !== 'General' ? ` (${driveBadge(roots, termToDelete.drives)})` : ''}?`}
                     onConfirm={handleDelete}
                     onCancel={() => setTermToDelete(null)}
                 />

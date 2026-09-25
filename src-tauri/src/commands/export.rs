@@ -400,8 +400,9 @@ fn run_export_with(
     // Every Drive's sequence, still in each drive's stored order — grouped into per-video Prev/Next
     // below, once scope filtering has settled which videos and Drives actually survive the export.
     let mut drive_sequences = db::get_all_drive_sequences(db_path).map_err(|e| e.to_string())?;
-    let mut glossary_terms = db::get_glossary_terms(db_path).map_err(|e| e.to_string())?;
-    let mut glossary_drive_links = db::get_glossary_drive_links(db_path).map_err(|e| e.to_string())?;
+    // One entry per definition, with every Drive it's filed under: a term can carry a different
+    // definition in different Drives.
+    let mut glossary_entries = db::get_glossary_terms(db_path).map_err(|e| e.to_string())?;
     let mut biographies = db::get_all_biographies_for_export(db_path).map_err(|e| e.to_string())?;
 
     // What the user chose to include. A link to something that isn't exported becomes plain text
@@ -418,8 +419,7 @@ fn run_export_with(
         }
     }
     if !options.glossary {
-        glossary_terms.clear();
-        glossary_drive_links.clear();
+        glossary_entries.clear();
     }
     if !options.biographies {
         biographies.clear();
@@ -436,8 +436,15 @@ fn run_export_with(
         // A dropped video loses its place; a video kept under a dropped Drive simply isn't
         // sequenced there any more (its Prev/Next in that Drive close around the gap it leaves).
         drive_sequences.retain(|(drive, id)| scope.video_kept(id) && scope.category_kept(drive));
-        glossary_terms.retain(|(term, _)| scope.term_kept(term));
-        glossary_drive_links.retain(|(term, root)| scope.term_kept(term) && scope.root_kept(root));
+        glossary_entries = glossary_entries
+            .into_iter()
+            .filter_map(|mut e| {
+                scope.glossary_row(&e.term, &e.drives).map(|drives| {
+                    e.drives = drives;
+                    e
+                })
+            })
+            .collect();
         biographies.retain(|b| scope.handle_kept(&b.handle));
     }
     drop(conn);
@@ -469,8 +476,39 @@ fn run_export_with(
     // Every note name is known before any note is written, so a link can point at one written later.
     let basename_by_id: HashMap<String, String> =
         videos.iter().map(|v| (v.id.clone(), video_note_basename(&v.title, &v.id))).collect();
+    // A term with one row keeps a single note at <Glossary>/<term>.md; one with several (a different
+    // definition per set of Drives) gets a note per row, "<term> (<Drives>)", with "General" for the
+    // uncategorized one. A plain [[Term]] link resolves to the uncategorized row when there is one,
+    // else to the first row (by Drive name).
+    let mut rows_by_term: BTreeMap<String, Vec<&db::GlossaryEntry>> = BTreeMap::new();
+    for entry in &glossary_entries {
+        rows_by_term.entry(entry.term.clone()).or_default().push(entry);
+    }
+    let drives_label = |drives: &[String]| {
+        if drives.is_empty() {
+            "General".to_string()
+        } else {
+            drives.iter().map(|d| drive_root_label(d, &node_map)).collect::<Vec<_>>().join(", ")
+        }
+    };
+    let mut note_basename: HashMap<(String, String), String> = HashMap::new(); // (term, drives joined) -> note name
+    let mut link_basename: HashMap<String, String> = HashMap::new(); // term -> what [[Term]] points at
+    for (term, rows) in &rows_by_term {
+        for row in rows {
+            let name = if rows.len() == 1 {
+                glossary_note_basename(term)
+            } else {
+                glossary_note_basename(&format!("{term} ({})", drives_label(&row.drives)))
+            };
+            note_basename.insert((term.clone(), row.drives.join("|")), name);
+        }
+        let primary = rows.iter().find(|r| r.drives.is_empty()).or_else(|| rows.first());
+        if let Some(primary) = primary {
+            link_basename.insert(term.clone(), note_basename[&(term.clone(), primary.drives.join("|"))].clone());
+        }
+    }
     let resolver = LinkResolver {
-        glossary: glossary_terms.iter().map(|(t, _)| (t.clone(), glossary_note_basename(t))).collect(),
+        glossary: link_basename,
         biographies: biographies
             .iter()
             .filter(|b| !b.handle.trim().is_empty())
@@ -551,34 +589,31 @@ fn run_export_with(
     }
 
     on_progress(&format!("Writing {glossary_name}..."));
-    // Standard Glossary Tags can be filed under top-level Drives. Each term keeps a single note at
-    // <Glossary>/<term>.md (so every [[Term]] link still resolves to exactly one file) and lists its
-    // drives in frontmatter; "By <Drive>" index notes then group the same terms per drive.
-    let mut drives_by_term: HashMap<String, Vec<String>> = HashMap::new();
-    let mut terms_by_drive: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (term, root) in glossary_drive_links {
-        let label = drive_root_label(&root, &node_map);
-        drives_by_term.entry(term.clone()).or_default().push(label.clone());
-        terms_by_drive.entry(label).or_default().push(term);
-    }
-
-    for (term, definition) in &glossary_terms {
-        let file_path = glossary_root.join(format!("{}.md", glossary_note_basename(term)));
-        let mut fm = format!("---\ntype: glossary-term\nterm: {}\n", yaml_str(term));
-        if let Some(labels) = drives_by_term.get(term).filter(|l| !l.is_empty()) {
+    // Standard Glossary Tags can be filed under top-level Drives (see the note names above); each
+    // note lists its Drive in frontmatter, and "By <Drive>" index notes group the same rows per drive.
+    let mut terms_by_drive: BTreeMap<String, Vec<String>> = BTreeMap::new(); // Drive label -> note names
+    for entry in &glossary_entries {
+        let name = &note_basename[&(entry.term.clone(), entry.drives.join("|"))];
+        let file_path = glossary_root.join(format!("{name}.md"));
+        let mut fm = format!("---\ntype: glossary-term\nterm: {}\n", yaml_str(&entry.term));
+        if !entry.drives.is_empty() {
+            let labels: Vec<String> = entry.drives.iter().map(|d| drive_root_label(d, &node_map)).collect();
             let quoted: Vec<String> = labels.iter().map(|l| yaml_str(l)).collect();
             fm.push_str(&format!("drives: [{}]\n", quoted.join(", ")));
+            for label in labels {
+                terms_by_drive.entry(label).or_default().push(name.clone());
+            }
         }
         fm.push_str("---\n");
-        let content = format!("{}{}\n", fm, resolver.wikilinks(definition));
+        let content = format!("{}{}\n", fm, resolver.wikilinks(&entry.definition));
         fs::write(&file_path, content).map_err(|e| format!("Failed to write {}: {}", file_path.display(), e))?;
     }
 
     if !terms_by_drive.is_empty() {
         let index_root = glossary_root.join(sanitize_path_component(&format!("By {drive_name}"), 60));
         fs::create_dir_all(&index_root).map_err(|e| format!("Failed to create {}: {}", index_root.display(), e))?;
-        for (label, terms) in &terms_by_drive {
-            let links: Vec<String> = terms.iter().map(|t| format!("- [[{}]]", glossary_note_basename(t))).collect();
+        for (label, names) in &terms_by_drive {
+            let links: Vec<String> = names.iter().map(|n| format!("- [[{n}]]")).collect();
             let content = format!(
                 "---\ntype: glossary-drive\ndrive: {}\n---\n# {}\n\n{}\n",
                 yaml_str(label),
@@ -602,7 +637,7 @@ fn run_export_with(
     on_progress("Done.");
     Ok(ExportSummary {
         videos_exported: videos.len() as i64,
-        glossary_terms: glossary_terms.len() as i64,
+        glossary_terms: rows_by_term.len() as i64,
         biographies: biographies.len() as i64,
         folder_path: root.to_string_lossy().to_string(),
     })
@@ -651,7 +686,7 @@ mod tests {
         db::init_db(&db_path).unwrap();
         db::save_video(&db_path, "vid1abcdefg", "First Talk", "Ann", 60, "words", 1, "2026-01-02T00:00:00Z", "@ann", None).unwrap();
         db::save_video(&db_path, "vid2abcdefg", "Second Talk", "Bob", 60, "words", 1, "2026-01-03T00:00:00Z", "@bob", None).unwrap();
-        db::save_glossary_term(&db_path, None, "Halving", "Cuts rewards. See also [the talk](kinesis://video/vid1abcdefg).", &[]).unwrap();
+        db::save_glossary_term(&db_path, None, "Halving", "Cuts rewards. See also [the talk](kinesis://video/vid1abcdefg).", "").unwrap();
 
         let summary = format!(
             "{} and {} and {} and {} and {} and {}",
@@ -713,31 +748,39 @@ mod tests {
         db::set_wdbs_alias(&db_path, "θψUAP", "Unidentified").unwrap();
 
         // A term in two drives (one aliased), one in a single drive, an uncategorized one, a Quick Tag.
-        let both = [":UAP".to_string(), ":FIN".to_string()];
-        db::save_glossary_term(&db_path, None, "Halving", "Supply cut", &both).unwrap();
-        db::save_glossary_term(&db_path, None, "Orb", "A sphere", &[":UAP".to_string()]).unwrap();
-        db::save_glossary_term(&db_path, None, "Loose", "No drive", &[]).unwrap();
-        db::save_glossary_term(&db_path, None, "qt", "", &[]).unwrap();
+        db::save_glossary_term(&db_path, None, "Halving", "Supply cut", ":UAP").unwrap();
+        db::save_glossary_term(&db_path, None, "Halving", "Supply cut (finance)", ":FIN").unwrap();
+        db::save_glossary_term(&db_path, None, "Orb", "A sphere", ":UAP").unwrap();
+        db::save_glossary_term(&db_path, None, "Loose", "No drive", "").unwrap();
+        db::save_glossary_term(&db_path, None, "qt", "", "").unwrap();
+        // One definition filed under two drives is a single row (and a single note).
+        db::save_glossary_group(&db_path, None, "Magnesium", "A mineral", &[":UAP".to_string(), ":FIN".to_string()]).unwrap();
 
         let out_dir = temp_dir("gout");
         let summary = run_export(&db_path, &out_dir.join("TestApp"), |_| {}).unwrap();
-        assert_eq!(summary.glossary_terms, 4);
+        assert_eq!(summary.glossary_terms, 5);
         let glossary = out_dir.join("TestApp/Glossary");
 
-        // One note per term, so [[Term]] links stay unambiguous; drives listed by their display names.
-        let halving = fs::read_to_string(glossary.join("Halving.md")).unwrap();
-        assert!(halving.contains("drives: [\"FIN\", \"Unidentified\"]\n"), "{halving}");
-        assert!(halving.ends_with("---\nSupply cut\n"), "the body still starts right after the frontmatter: {halving}");
+        // A term with a definition per Drive gets a note per Drive ("<term> (<Drive>)", the Drive by
+        // its display name); one with a single row keeps the plain name.
+        assert!(!glossary.join("Halving.md").exists(), "each Drive's definition has its own note");
+        let halving_uap = fs::read_to_string(glossary.join("Halving (Unidentified).md")).unwrap();
+        assert!(halving_uap.contains("drives: [\"Unidentified\"]\n"), "{halving_uap}");
+        assert!(halving_uap.ends_with("---\nSupply cut\n"), "the body still starts right after the frontmatter: {halving_uap}");
+        let halving_fin = fs::read_to_string(glossary.join("Halving (FIN).md")).unwrap();
+        assert!(halving_fin.contains("drives: [\"FIN\"]\n") && halving_fin.ends_with("---\nSupply cut (finance)\n"), "{halving_fin}");
+        assert!(fs::read_to_string(glossary.join("Orb.md")).unwrap().contains("drives: [\"Unidentified\"]"));
+        let magnesium = fs::read_to_string(glossary.join("Magnesium.md")).unwrap();
+        assert!(magnesium.contains("drives: [\"FIN\", \"Unidentified\"]"), "one note lists both drives: {magnesium}");
         assert!(!fs::read_to_string(glossary.join("Loose.md")).unwrap().contains("drives:"));
         assert!(!fs::read_to_string(glossary.join("qt.md")).unwrap().contains("drives:"));
-        assert_eq!(fs::read_dir(&glossary).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy() == "Halving.md").count(), 1);
 
-        // One index note per drive listing its terms.
+        // One index note per drive listing its notes.
         let unidentified = fs::read_to_string(glossary.join("By Drive/Unidentified.md")).unwrap();
         assert!(unidentified.contains("type: glossary-drive") && unidentified.contains("drive: \"Unidentified\""), "{unidentified}");
-        assert!(unidentified.contains("- [[Halving]]") && unidentified.contains("- [[Orb]]"), "{unidentified}");
+        assert!(unidentified.contains("- [[Halving (Unidentified)]]") && unidentified.contains("- [[Orb]]") && unidentified.contains("- [[Magnesium]]"), "{unidentified}");
         let fin = fs::read_to_string(glossary.join("By Drive/FIN.md")).unwrap();
-        assert!(fin.contains("- [[Halving]]") && !fin.contains("Orb"), "{fin}");
+        assert!(fin.contains("- [[Halving (FIN)]]") && fin.contains("- [[Magnesium]]") && !fin.contains("Orb"), "{fin}");
         assert!(!glossary.join("By Drive/UAP.md").exists(), "the aliased drive is named by its alias");
 
         fs::remove_dir_all(&work_dir).ok();
@@ -917,7 +960,7 @@ mod tests {
             .unwrap();
         }
         conn.execute("INSERT INTO VideoWDBSLinks (video_id, wdbs) VALUES ('m1', 'θψFIN')", []).unwrap();
-        for (term, drives) in [("OnlyUap", ":UAP"), ("Both", ":UAP\n:FIN")] {
+        for (term, drives) in [("OnlyUap", ":UAP"), ("Both", ":FIN\n:UAP")] {
             conn.execute("INSERT INTO Glossary (term, definition, drives) VALUES (?1, 'defined', ?2)", rusqlite::params![term, drives]).unwrap();
         }
         for handle in ["@uapguy", "@fingal", "@mixed"] {

@@ -1,7 +1,8 @@
 import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, ClipboardPaste, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, BookA, ListVideo, Paperclip, Monitor, Cloud } from 'lucide-react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { PixelLoader } from './PixelLoader';
-import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, getGlossaryDriveLinks, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, getWdbsAliases, getVideoById, getVideoAttachments, type Video } from '../api';
+import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, getWdbsAliases, getHandleDrives, getVideoById, getVideoAttachments, type Video, type GlossaryTerm } from '../api';
+import { DriveComboBox } from './DriveComboBox';
 import { saveImageAs } from '../lib/save-image-as';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
 import { useFindReplace } from './sidebar/useFindReplace';
@@ -18,14 +19,8 @@ import { markdownUrlTransform } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { useWorkspace } from '../hooks/useWorkspace';
-import { handleWdbsInputChange } from '../lib/wdbs-input';
 import { driveSegmentLabel } from '../lib/utils';
 import { useFlags } from '../hooks/useFlags';
-
-interface GlossaryTerm {
-    term: string;
-    definition: string;
-}
 
 type LeftTab = 'terms' | 'tags' | 'similar' | 'attachments';
 
@@ -120,8 +115,6 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [hasCustomPrompt, setHasCustomPrompt] = useState(false);
     const [promptTab, setPromptTab] = useState<'local' | 'cloud'>('local');
     const [glossaryTerms, setGlossaryTerms] = useState<GlossaryTerm[]>([]);
-    // (term, drive root) pairs: which terms are filed under which top-level Drive.
-    const [glossaryDriveLinks, setGlossaryDriveLinks] = useState<[string, string][]>([]);
     const [selectedTerm, setSelectedTerm] = useState<GlossaryTerm | null>(null);
     const [isEditingTranscript, setIsEditingTranscript] = useState(false);
     const [isEditingSummary, setIsEditingSummary] = useState(false);
@@ -140,6 +133,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [wdbsError, setWdbsError] = useState<string | null>(null);
     const [savingWdbs, setSavingWdbs] = useState(false);
     const [wdbsSuggestions, setWdbsSuggestions] = useState<string[]>([]);
+    // Drives this video's channel already appears in elsewhere (see DriveComboBox's Suggested
+    // section) — refetched whenever the channel changes, not per-video, since it depends only on
+    // the handle.
+    const [channelSuggestedDrives, setChannelSuggestedDrives] = useState<string[]>([]);
     const [wdbsLinks, setWdbsLinks] = useState<string[]>([]);
     // Curated aliases of this video's Drive and "Also in" tags (storage path -> alias), shown as the
     // tags' tooltips. Only Drives that have one are in here.
@@ -369,10 +366,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             });
             document.body.style.overflow = 'hidden';
 
-            getGlossaryTerms().then(terms => {
-                setGlossaryTerms(terms.map(t => ({ term: t[0], definition: t[1] })));
-            }).catch(console.error);
-            getGlossaryDriveLinks().then(setGlossaryDriveLinks).catch(() => setGlossaryDriveLinks([]));
+            getGlossaryTerms().then(setGlossaryTerms).catch(console.error);
         } else {
             document.body.style.overflow = 'auto';
         }
@@ -393,8 +387,8 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     }, [primaryWdbs, wdbsLinks]);
     const driveTerms = useMemo(() => {
         const rootsLower = new Set(videoDriveRoots.map(r => r.toLowerCase()));
-        return new Set(glossaryDriveLinks.filter(([, root]) => rootsLower.has(root.toLowerCase())).map(([term]) => term));
-    }, [videoDriveRoots, glossaryDriveLinks]);
+        return new Set(glossaryTerms.filter(t => t.drives.some(d => rootsLower.has(d.toLowerCase()))).map(t => t.term));
+    }, [videoDriveRoots, glossaryTerms]);
 
     useEffect(() => {
         if (!isOpen) {
@@ -624,6 +618,18 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         getWdbsSuggestions().then(paths => setWdbsSuggestions(paths.map(decodeWdbs).filter(Boolean))).catch(() => {});
     }, []);
 
+    // Suggested Drives for the combobox above — every Drive this handle's other saved videos
+    // already appear in (see the Suggested/Auto-Complete design this replaced the plain datalist
+    // for). Depends only on the channel, so it's kept separate from the per-video reset effect below.
+    useEffect(() => {
+        if (!handle) { setChannelSuggestedDrives([]); return; }
+        let cancelled = false;
+        getHandleDrives(handle).then(drives => {
+            if (!cancelled) setChannelSuggestedDrives(drives.map(d => d.display));
+        }).catch(() => { if (!cancelled) setChannelSuggestedDrives([]); });
+        return () => { cancelled = true; };
+    }, [handle]);
+
     // Reset any in-progress WDBS edit whenever a different video is opened, so leftover input/
     // error state from one video's edit doesn't leak into the next one's panel. Symlinked Warp
     // Drives are re-fetched per video too, since they aren't part of the Video object itself.
@@ -748,24 +754,18 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const driveActionButtonClass = "flex items-center gap-1.5 shrink-0 text-xs font-bold text-gray-300 hover:text-white bg-[#272727] hover:bg-[#3f3f3f] px-3 py-2.5 rounded-lg transition-colors cursor-pointer";
     const driveEditor = (
         <div className="space-y-6">
-            <datalist id="wdbs-suggestions">
-                {wdbsSuggestions.map(s => <option key={s} value={s} />)}
-            </datalist>
-
             <div>
                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Primary {labels.aliasDriveLink}</label>
                 {isEditingWdbs ? (
                     <div className="flex items-center gap-2">
-                        <input
-                            type="text"
+                        <DriveComboBox
                             autoFocus
-                            list="wdbs-suggestions"
                             value={wdbsInput}
-                            onChange={(e) => handleWdbsInputChange(e, setWdbsInput)}
-                            onKeyDown={(e) => {
-                                if (e.key === 'Enter') handleSaveWdbs();
-                                if (e.key === 'Escape') { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(primaryWdbs)); setWdbsError(null); }
-                            }}
+                            onValueChange={setWdbsInput}
+                            suggestions={wdbsSuggestions}
+                            suggestedDrives={channelSuggestedDrives}
+                            onEnter={handleSaveWdbs}
+                            onEscape={() => { setIsEditingWdbs(false); setWdbsInput(decodeWdbs(primaryWdbs)); setWdbsError(null); }}
                             placeholder=":CS-ML-REINF"
                             disabled={savingWdbs}
                             className={driveFieldClass}
@@ -852,16 +852,14 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                             long, and typing it should stay readable rather than scrolling inside a narrow box. */}
                         {allowEditWDBS && isAddingLink && (
                             <div className="flex items-center gap-2">
-                                <input
-                                    type="text"
+                                <DriveComboBox
                                     autoFocus
-                                    list="wdbs-suggestions"
                                     value={linkInput}
-                                    onChange={(e) => handleWdbsInputChange(e, setLinkInput)}
-                                    onKeyDown={(e) => {
-                                        if (e.key === 'Enter') handleAddLink();
-                                        if (e.key === 'Escape') { setIsAddingLink(false); setLinkInput(''); setLinkError(null); }
-                                    }}
+                                    onValueChange={setLinkInput}
+                                    suggestions={wdbsSuggestions}
+                                    suggestedDrives={channelSuggestedDrives}
+                                    onEnter={handleAddLink}
+                                    onEscape={() => { setIsAddingLink(false); setLinkInput(''); setLinkError(null); }}
                                     placeholder=":CS-ML-REINF"
                                     disabled={savingLink}
                                     className={driveFieldClass}
@@ -1071,6 +1069,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                             kind={activeLeftTab}
                                                             videoTags={videoTags}
                                                             glossaryTerms={glossaryTerms}
+                                                            preferredDrives={videoDriveRoots}
                                                             priorityTerms={activeLeftTab === 'terms' ? driveTerms : undefined}
                                                             priorityLabel={videoDriveRoots.join(', ')}
                                                             canEdit={flags.allowEditTermsAndTags}

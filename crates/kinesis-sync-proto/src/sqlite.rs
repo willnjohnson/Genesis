@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::settings::is_syncable_setting;
 use crate::types::{
-    link_key, sequence_key, split_link_key, split_sequence_key, BiographyData, CustomPromptData, GlossaryData, Kind,
+    glossary_key, link_key, sequence_key, split_glossary_key, split_link_key, split_sequence_key, BiographyData, CustomPromptData, GlossaryData, Kind,
     SequenceData, VideoData, VideoLinkData, WdbsData,
 };
 
@@ -93,15 +93,15 @@ fn build_sequence(row: &Row, _: &ReadOptions) -> Built {
 }
 
 fn build_glossary(row: &Row, _: &ReadOptions) -> Built {
-    let k = key(row, 0)?;
-    // Column 2 is Glossary's own `drives` column (newline-joined roots, "" when the term has
-    // none) — always present, so this is always `Some`, never the "sender doesn't know" `None`
-    // GlossaryData still allows for (an old pack that predates this field entirely).
-    let joined = os(row, 2).unwrap_or_default();
-    let mut roots: Vec<String> = joined.split('\n').filter(|r| !r.is_empty()).map(String::from).collect();
+    // One item per definition: column 2 is its newline-joined Drive roots ('' = uncategorized). The
+    // key carries the first of them (a Drive belongs to one definition of a term, so that's unique)
+    // and the payload the whole list, sorted so the hash is stable.
+    let term = key(row, 0)?;
+    let mut roots: Vec<String> = os(row, 2).unwrap_or_default().split('\n').filter(|r| !r.is_empty()).map(String::from).collect();
     roots.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then(a.cmp(b)));
     roots.dedup();
-    to_value(k, &GlossaryData { definition: os(row, 1), drives: Some(roots) })
+    let first = roots.first().cloned().unwrap_or_default();
+    to_value(glossary_key(&first, &term), &GlossaryData { definition: os(row, 1), drives: Some(roots) })
 }
 
 fn build_biography(row: &Row, _: &ReadOptions) -> Built {
@@ -173,8 +173,10 @@ fn spec(kind: Kind) -> Spec {
         },
         Kind::Glossary => Spec {
             table: "Glossary",
-            all: "SELECT term, definition, drives FROM Glossary ORDER BY term",
-            one: "SELECT term, definition, drives FROM Glossary WHERE term = ?1",
+            all: "SELECT term, definition, drives FROM Glossary ORDER BY term, drives",
+            // ?1 is the row's first Drive ('' for uncategorized): the whole value, or the front of the list.
+            one: "SELECT term, definition, drives FROM Glossary
+                  WHERE term = ?2 AND (drives = ?1 OR substr(drives, 1, length(?1) + 1) = ?1 || char(10))",
             build: build_glossary,
         },
         Kind::Biography => Spec {
@@ -248,6 +250,11 @@ pub fn load_item(conn: &Connection, kind: Kind, item_key: &str, opts: &ReadOptio
     } else if kind == Kind::DriveSequence {
         match split_sequence_key(item_key) {
             Some((d, v)) => vec![d, v],
+            None => return Ok(None),
+        }
+    } else if kind == Kind::Glossary {
+        match split_glossary_key(item_key) {
+            Some((d, t)) => vec![d, t],
             None => return Ok(None),
         }
     } else {
@@ -360,23 +367,28 @@ mod tests {
     }
 
     #[test]
-    fn glossary_terms_carry_their_drives() {
+    fn glossary_items_are_one_per_definition_keyed_by_first_drive() {
         let conn = db();
-        // `drives` lives directly on Glossary (see src-tauri/src/db/glossary.rs) — no separate
-        // join table to read, so this reader always knows a term's filings, never "unknown".
         conn.execute_batch(
-            "CREATE TABLE Glossary (term TEXT PRIMARY KEY, definition TEXT NOT NULL, drives TEXT NOT NULL DEFAULT '');
+            "CREATE TABLE Glossary (term TEXT NOT NULL, definition TEXT NOT NULL, drives TEXT NOT NULL DEFAULT '', PRIMARY KEY (term, drives));
              INSERT INTO Glossary VALUES
-                 ('Halving', 'Supply cut', ':FIN' || char(10) || ':CRYPTO'),
+                 ('Magnesium', 'Health.', ':HEALTH' || char(10) || ':SLEEP'),
+                 ('Magnesium', 'An element.', ':CHEM'),
                  ('Loose', 'No drive', ''),
                  ('qt', '', '');",
         )
         .unwrap();
 
-        let halving = load_item(&conn, Kind::Glossary, "Halving", &ReadOptions::default()).unwrap().unwrap();
-        assert_eq!(halving["drives"], serde_json::json!([":CRYPTO", ":FIN"]), "sorted, so the hash is stable");
-        let loose = load_item(&conn, Kind::Glossary, "Loose", &ReadOptions::default()).unwrap().unwrap();
-        assert_eq!(loose["drives"], serde_json::json!([]), "empty is a known, empty set");
+        // The key is the row's first Drive (sorted), the payload has the whole list.
+        let health = load_item(&conn, Kind::Glossary, &glossary_key(":HEALTH", "Magnesium"), &ReadOptions::default()).unwrap().unwrap();
+        assert_eq!(health["definition"], "Health.");
+        assert_eq!(health["drives"], serde_json::json!([":HEALTH", ":SLEEP"]), "the stored order, sorted by the app");
+        let chem = load_item(&conn, Kind::Glossary, &glossary_key(":CHEM", "Magnesium"), &ReadOptions::default()).unwrap().unwrap();
+        assert_eq!(chem["definition"], "An element.");
+        let loose = load_item(&conn, Kind::Glossary, &glossary_key("", "Loose"), &ReadOptions::default()).unwrap().unwrap();
+        assert_eq!(loose["drives"], serde_json::json!([]), "uncategorized is a known, empty list");
+        assert!(load_item(&conn, Kind::Glossary, &glossary_key(":SLEEP", "Magnesium"), &ReadOptions::default()).unwrap().is_none(), "a later Drive isn't the row's key");
+        assert!(load_item(&conn, Kind::Glossary, "Magnesium", &ReadOptions::default()).unwrap().is_none(), "a bare term isn't a key");
 
         let mut streamed = std::collections::BTreeMap::new();
         for_each_item(&conn, Kind::Glossary, &ReadOptions::default(), |k, v| {
@@ -384,7 +396,8 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(streamed["Halving"], halving, "scan and serve must agree");
+        assert_eq!(streamed.len(), 4);
+        assert_eq!(streamed[&glossary_key(":HEALTH", "Magnesium")], health, "scan and serve must agree");
     }
 
     #[test]

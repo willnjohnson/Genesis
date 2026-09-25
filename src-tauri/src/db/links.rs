@@ -293,8 +293,8 @@ mod tests {
         conn.execute("UPDATE Videos SET summary = ?1 WHERE video_id = 'v2'", params!["Refers to [One](kinesis://video/v1) and [Orb](kinesis://glossary/Orb)."]).unwrap();
         conn.execute("INSERT INTO Biographies (handle, display_name, bio) VALUES ('@b', 'B', 'Friend of [One](kinesis://video/v1).')", []).unwrap();
         drop(conn);
-        save_glossary_term(&db, None, "Halving", "Cuts [One](kinesis://video/v1) rewards", &[]).unwrap();
-        save_glossary_term(&db, None, "Orb", "A sphere", &[]).unwrap();
+        save_glossary_term(&db, None, "Halving", "Cuts [One](kinesis://video/v1) rewards", "").unwrap();
+        save_glossary_term(&db, None, "Orb", "A sphere", "").unwrap();
 
         delete_video(&db, "v1").unwrap();
 
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(text("SELECT definition FROM Glossary WHERE term='Halving'"), "Cuts One rewards");
         drop(conn);
 
-        delete_glossary_term(&db, "Orb").unwrap();
+        delete_glossary_term(&db, "Orb", "").unwrap();
         let conn = Connection::open(&db).unwrap();
         assert_eq!(
             conn.query_row::<String, _, _>("SELECT summary FROM Videos WHERE video_id='v2'", [], |r| r.get(0)).unwrap(),
@@ -345,9 +345,9 @@ mod tests {
     #[test]
     fn renaming_a_term_moves_the_links_to_the_new_name() {
         let db = temp_db("rename");
-        save_glossary_term(&db, None, "Halving", "Cuts rewards", &[]).unwrap();
-        save_glossary_term(&db, None, "Other", "See [Halving](kinesis://glossary/Halving)", &[]).unwrap();
-        save_glossary_term(&db, Some("Halving"), "Bitcoin Halving", "Cuts rewards", &[]).unwrap();
+        save_glossary_term(&db, None, "Halving", "Cuts rewards", "").unwrap();
+        save_glossary_term(&db, None, "Other", "See [Halving](kinesis://glossary/Halving)", "").unwrap();
+        save_glossary_term(&db, Some(("Halving", "")), "Bitcoin Halving", "Cuts rewards", "").unwrap();
         let conn = Connection::open(&db).unwrap();
         let def: String = conn.query_row("SELECT definition FROM Glossary WHERE term='Other'", [], |r| r.get(0)).unwrap();
         assert_eq!(def, "See [Halving](kinesis://glossary/Bitcoin%20Halving)");

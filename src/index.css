@@ -69,6 +69,10 @@ body {
     margin: 0;
     background-color: var(--k-bg);
     color: var(--k-text-white);
+    /* App.tsx's root is a fixed h-screen shell with its own scrollable content pane — this is
+       defensive insurance against a stray taller-than-viewport child ever reopening a
+       whole-window scrollbar, not something anything relies on to size correctly. */
+    overflow: hidden;
 }
 
 /* Backgrounds */

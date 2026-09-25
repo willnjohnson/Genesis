@@ -23,6 +23,7 @@ export const FLAG_DEFAULTS = {
     defaultView: 'search',
     // Library and search results
     showSortControls: true,
+    showSortControlButtons: false,
     showFilterControls: true,
     showListModeToggle: true,
     hideShortsInSearch: true,
@@ -46,6 +47,11 @@ export const FLAG_DEFAULTS = {
     allowEditTranscript: true,
     allowEditTranscriptOnNA: true,
     allowEditWDBS: true,
+    // Off (default) reverts the maintainer-owned production trigger's "<channel's established
+    // prefix>_PND" guess for a newly saved video back to plain unassigned, right after save (see
+    // db/videos.rs::save_video) — replaced by the Drive picker's own Suggested section and its
+    // Unsorted entry, both of which need a person to actually decide.
+    allowAutoPendingDriveByChannel: false,
     allowEditDriveLinking: true,
     showSequences: true,
     allowEditSequences: true,

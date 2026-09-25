@@ -1,16 +1,16 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Plus, X } from 'lucide-react';
-
-interface GlossaryTerm {
-    term: string;
-    definition: string;
-}
+import type { GlossaryTerm } from '../../api';
+import { resolveEntry, termKinds } from '../../lib/glossary';
 
 interface Props {
     /** 'terms' = glossary entries with a definition; 'tags' = Quick Tags (no definition). */
     kind: 'terms' | 'tags';
     videoTags: string[];
+    /** Every Glossary row (one per term per Drive). A term is listed once here, whichever Drives define it. */
     glossaryTerms: GlossaryTerm[];
+    /** The video's own Drives: which Drive's definition a term with several opens (see lib/glossary.ts). */
+    preferredDrives?: string[];
     onAddTag?: (term: string) => void;
     onRemoveTag?: (term: string) => void;
     onSelectTerm: (term: GlossaryTerm) => void;
@@ -28,10 +28,13 @@ interface Props {
  *  the ones not already applied. Clicking a chip opens its term definition (via
  *  `onSelectTerm`); the dropdown closes on an outside click. Renders just the tag row — the
  *  surrounding card/header is owned by Sidebar.tsx's Tags/Similar Videos tab switcher. */
-export function VideoTagsPanel({ kind, videoTags, glossaryTerms, onAddTag, onRemoveTag, onSelectTerm, priorityTerms, priorityLabel, canEdit = true }: Props) {
+export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives, onAddTag, onRemoveTag, onSelectTerm, priorityTerms, priorityLabel, canEdit = true }: Props) {
     const noun = kind === 'terms' ? 'term' : 'tag';
-    // A Quick Tag is a glossary entry without a definition; a term has one.
-    const ofKind = glossaryTerms.filter(t => (t.definition.trim() !== '') === (kind === 'terms'));
+    // A Quick Tag is a name with no definition in any Drive; a term has one in at least one.
+    const ofKind = useMemo(
+        () => [...termKinds(glossaryTerms)].filter(([, isTerm]) => isTerm === (kind === 'terms')).map(([name]) => name),
+        [glossaryTerms, kind],
+    );
     const [showTagDropdown, setShowTagDropdown] = useState(false);
     const [tagFilter, setTagFilter] = useState("");
 
@@ -50,14 +53,14 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, onAddTag, onRem
         }
     }, [showTagDropdown, handleClickOutside]);
 
-    const filtered = [...videoTags].filter(tag => ofKind.some(t => t.term === tag)).sort((a, b) => a.localeCompare(b));
-    const availableTerms = ofKind.filter(t =>
-        !videoTags.includes(t.term) &&
-        t.term.toLowerCase().includes(tagFilter.toLowerCase())
-    );
+    const filtered = [...videoTags].filter(tag => ofKind.includes(tag)).sort((a, b) => a.localeCompare(b));
+    const availableTerms = ofKind.filter(name =>
+        !videoTags.includes(name) &&
+        name.toLowerCase().includes(tagFilter.toLowerCase())
+    ).sort((a, b) => a.localeCompare(b));
     // The video's Drive's own terms go first; the rest follow without repeating them.
-    const prioritized = priorityTerms ? availableTerms.filter(t => priorityTerms.has(t.term)) : [];
-    const others = priorityTerms ? availableTerms.filter(t => !priorityTerms.has(t.term)) : availableTerms;
+    const prioritized = priorityTerms ? availableTerms.filter(name => priorityTerms.has(name)) : [];
+    const others = priorityTerms ? availableTerms.filter(name => !priorityTerms.has(name)) : availableTerms;
     // A label with a rule running out to the right ("IN :UAP ────"), in the dropdown's own border colour.
     const groupHeader = (text: string) => (
         <div className="flex items-center gap-2 px-4 pt-3 pb-1 select-none">
@@ -65,17 +68,17 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, onAddTag, onRem
             <span className="flex-1 h-px bg-[#383838]" />
         </div>
     );
-    const termButton = (term: GlossaryTerm) => (
+    const termButton = (name: string) => (
         <button
-            key={term.term}
+            key={name}
             onClick={() => {
-                onAddTag?.(term.term);
+                onAddTag?.(name);
                 setShowTagDropdown(false);
                 setTagFilter("");
             }}
             className="w-full text-left px-4 py-2 text-[11px] text-white hover:bg-[#2a2a2a] transition-colors cursor-pointer rounded"
         >
-            {term.term}
+            {name}
         </button>
     );
 
@@ -86,7 +89,9 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, onAddTag, onRem
                         key={tag}
                         onClick={(e) => {
                             e.stopPropagation();
-                            const term = ofKind.find(t => t.term === tag);
+                            // A term with a definition per Drive opens the one for this video's Drive.
+                            const rows = kind === 'terms' ? glossaryTerms.filter(t => t.definition.trim() !== '') : glossaryTerms;
+                            const term = resolveEntry(rows, tag, preferredDrives);
                             if (term) {
                                 onSelectTerm(term);
                             }

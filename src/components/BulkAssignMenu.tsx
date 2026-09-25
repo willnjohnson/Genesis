@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Check, ListPlus, X } from 'lucide-react';
+import { Check, X } from 'lucide-react';
 import { getWdbsSuggestions, decodeWdbs } from '../api';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { handleWdbsInputChange } from '../lib/wdbs-input';
@@ -8,13 +8,18 @@ interface BulkAssignMenuProps {
     x: number;
     y: number;
     count: number;
-    onAssign: (wdbs: string) => void;
+    /** Sets the selection's Drive (blank clears them back to unassigned). `alsoSequence` reflects
+     *  the checkbox — only meaningful when canAddToSequence is also true; the caller runs it as a
+     *  second step after the assignment succeeds, so "not filed under X" can't happen for it. */
+    onAssign: (wdbs: string, alsoSequence: boolean) => void;
     /** Drive assignment is only offered when the DB owner allows editing Drives (allowEditWDBS). */
     canAssignDrive: boolean;
     /** Adding to a Drive's sequence is only offered when sequences are on and editable. */
     canAddToSequence: boolean;
-    /** The Drive picked in the Library's Drive panel (display path), offered as the sequence to add to. */
-    defaultSequenceDrive: string;
+    /** The Drive picked in the Library's Drive panel (display path), used to prefill the field. */
+    defaultDrive: string;
+    /** Used instead of onAssign when canAssignDrive is false: sequence-only, no assignment step,
+     *  so it can only add videos already filed under the typed Drive. */
     onAddToSequence: (drive: string) => void;
     onClose: () => void;
     assigning?: boolean;
@@ -23,31 +28,35 @@ interface BulkAssignMenuProps {
 
 /**
  * Small popover opened by right-clicking a video card in Bulk Assign Mode (see App.tsx) — lets
- * the user type or pick an existing Drive category and apply it to every currently-selected
- * video in one action, and/or add the selection to a Drive's sequence (in the order shown in the
- * grid). Closes on outside-click or Escape, same pattern SearchBar.tsx uses for its own history
- * dropdown.
+ * the user type or pick an existing Drive category and apply it to every currently-selected video
+ * in one action. When both Drive assignment and sequence editing are allowed, a single field drives
+ * both: assigning and (via a checkbox, checked by default) appending the same videos to that
+ * Drive's sequence right after, so the sequence step can never reject them as "not filed under X" —
+ * they were just filed there. A DB owner who's allowed sequence editing but not Drive assignment
+ * instead gets a sequence-only field, which (like before) can only add videos already filed under
+ * the Drive typed. Closes on outside-click or Escape, same pattern SearchBar.tsx uses for its own
+ * history dropdown.
  */
 export function BulkAssignMenu({
-    x, y, count, onAssign, canAssignDrive, canAddToSequence, defaultSequenceDrive, onAddToSequence,
+    x, y, count, onAssign, canAssignDrive, canAddToSequence, defaultDrive, onAddToSequence,
     onClose, assigning = false, error,
 }: BulkAssignMenuProps) {
     const { labels } = useWorkspace();
-    const [input, setInput] = useState('');
-    const [sequenceDrive, setSequenceDrive] = useState(defaultSequenceDrive);
+    const [input, setInput] = useState(defaultDrive);
+    const [alsoSequence, setAlsoSequence] = useState(true);
     const [suggestions, setSuggestions] = useState<string[]>([]);
     const containerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
-    const sequenceInputRef = useRef<HTMLInputElement>(null);
     const noun = `video${count === 1 ? '' : 's'}`;
+    const both = canAssignDrive && canAddToSequence;
 
     useEffect(() => {
         getWdbsSuggestions().then(paths => setSuggestions(paths.map(decodeWdbs).filter(Boolean))).catch(() => {});
     }, []);
 
     useEffect(() => {
-        (canAssignDrive ? inputRef : sequenceInputRef).current?.focus();
-    }, [canAssignDrive]);
+        inputRef.current?.focus();
+    }, []);
 
     useEffect(() => {
         const handler = (e: MouseEvent) => {
@@ -59,14 +68,24 @@ export function BulkAssignMenu({
         return () => document.removeEventListener('mousedown', handler);
     }, [onClose]);
 
+    const submit = () => {
+        const value = input.trim();
+        if (canAssignDrive) {
+            onAssign(value, both && alsoSequence);
+        } else if (value) {
+            onAddToSequence(value);
+        }
+    };
+
     // Keeps the popover on-screen regardless of where the right-click landed. Wider than it used to
-    // be (288px): a Drive path or sequence path can run long, and the old width cramped it as you typed.
+    // be (288px): a Drive path can run long, and the old width cramped it as you typed.
     const MENU_WIDTH = 384;
-    const MENU_HEIGHT = 40 + (canAssignDrive ? 120 : 0) + (canAddToSequence ? 130 : 0);
+    const MENU_HEIGHT = 130 + (both ? 28 : 0);
     const left = Math.min(x, window.innerWidth - MENU_WIDTH - 12);
     const top = Math.min(y, window.innerHeight - MENU_HEIGHT - 12);
 
     const inputClass = 'flex-1 min-w-0 bg-[#121212] border border-[#333] focus:border-red-600/50 outline-none rounded-lg px-3 py-2 text-sm text-white placeholder-[#555] font-mono transition-colors disabled:opacity-50';
+    const canSubmit = canAssignDrive || !!input.trim();
 
     return (
         <div
@@ -81,83 +100,61 @@ export function BulkAssignMenu({
                 {suggestions.map(s => <option key={s} value={s} />)}
             </datalist>
 
-            {canAssignDrive && (
-                <>
-                    <div className="text-xs font-bold text-white mb-2">
-                        Assign {count} {noun} to {labels.aliasDriveName}
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                        <input
-                            ref={inputRef}
-                            type="text"
-                            list="bulk-assign-wdbs-suggestions"
-                            value={input}
-                            onChange={(e) => handleWdbsInputChange(e, setInput)}
-                            onKeyDown={(e) => { if (e.key === 'Enter') onAssign(input.trim()); }}
-                            placeholder=":CS-ML-REINF"
-                            disabled={assigning}
-                            className={inputClass}
-                        />
-                        <button
-                            onClick={() => onAssign(input.trim())}
-                            disabled={assigning}
-                            title="Assign"
-                            className="text-green-500 hover:text-green-400 transition-colors cursor-pointer p-1.5 disabled:opacity-50 shrink-0"
-                        >
-                            <Check className="w-4 h-4" />
-                        </button>
-                        <button
-                            onClick={onClose}
-                            disabled={assigning}
-                            title="Cancel"
-                            className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1.5 disabled:opacity-50 shrink-0"
-                        >
-                            <X className="w-4 h-4" />
-                        </button>
-                    </div>
-                    <p className="text-[10px] text-[#666] mt-1.5">Leave blank to clear back to unassigned.</p>
-                </>
+            <div className="text-xs font-bold text-white mb-2">
+                {canAssignDrive
+                    ? `Assign ${count} ${noun} to ${labels.aliasDriveName}`
+                    : `Add ${count} ${noun} to a sequence`}
+            </div>
+            <div className="flex items-center gap-1.5">
+                <input
+                    ref={inputRef}
+                    type="text"
+                    list="bulk-assign-wdbs-suggestions"
+                    value={input}
+                    onChange={(e) => handleWdbsInputChange(e, setInput)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && canSubmit) submit(); }}
+                    placeholder=":CS-ML-REINF"
+                    disabled={assigning}
+                    className={inputClass}
+                />
+                <button
+                    onClick={submit}
+                    disabled={assigning || !canSubmit}
+                    title={canAssignDrive ? "Assign" : "Add to this Drive's sequence"}
+                    className="text-green-500 hover:text-green-400 transition-colors cursor-pointer p-1.5 disabled:opacity-50 shrink-0"
+                >
+                    <Check className="w-4 h-4" />
+                </button>
+                <button
+                    onClick={onClose}
+                    disabled={assigning}
+                    title="Cancel"
+                    className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1.5 disabled:opacity-50 shrink-0"
+                >
+                    <X className="w-4 h-4" />
+                </button>
+            </div>
+
+            {both && (
+                <label className="flex items-center gap-2 mt-2.5 text-xs text-[#ccc] cursor-pointer">
+                    <input
+                        type="checkbox"
+                        checked={alsoSequence}
+                        onChange={(e) => setAlsoSequence(e.target.checked)}
+                        disabled={assigning}
+                        className="cursor-pointer"
+                    />
+                    Also add to this {labels.aliasDriveName}'s sequence
+                </label>
             )}
 
-            {canAddToSequence && (
-                <div className={canAssignDrive ? 'mt-3 pt-3 border-t border-[#333]' : ''}>
-                    <div className="text-xs font-bold text-white mb-2">
-                        Add {count} {noun} to a sequence
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                        <input
-                            ref={sequenceInputRef}
-                            type="text"
-                            list="bulk-assign-wdbs-suggestions"
-                            value={sequenceDrive}
-                            onChange={(e) => handleWdbsInputChange(e, setSequenceDrive)}
-                            onKeyDown={(e) => { if (e.key === 'Enter' && sequenceDrive.trim()) onAddToSequence(sequenceDrive.trim()); }}
-                            placeholder=":CS-DSA"
-                            disabled={assigning}
-                            className={inputClass}
-                        />
-                        <button
-                            onClick={() => onAddToSequence(sequenceDrive.trim())}
-                            disabled={assigning || !sequenceDrive.trim()}
-                            title="Add to this Drive's sequence"
-                            className="text-green-500 hover:text-green-400 transition-colors cursor-pointer p-1.5 disabled:opacity-50 shrink-0"
-                        >
-                            <ListPlus className="w-4 h-4" />
-                        </button>
-                        {!canAssignDrive && (
-                            <button
-                                onClick={onClose}
-                                disabled={assigning}
-                                title="Cancel"
-                                className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1.5 disabled:opacity-50 shrink-0"
-                            >
-                                <X className="w-4 h-4" />
-                            </button>
-                        )}
-                    </div>
-                    <p className="text-[10px] text-[#666] mt-1.5">Added in the order shown. Ones already in it are skipped.</p>
-                </div>
-            )}
+            <p className="text-[10px] text-[#666] mt-1.5">
+                {canAssignDrive
+                    ? both
+                        ? "Leave blank to clear back to unassigned (skips sequencing). Sequenced in the order shown; already-included videos are skipped."
+                        : "Leave blank to clear back to unassigned."
+                    : "Added in the order shown. Ones already in it are skipped."}
+            </p>
 
             {error && (
                 <div className="mt-2 text-[10px] text-red-400 bg-red-900/20 border border-red-500/30 rounded-md px-2 py-1.5">

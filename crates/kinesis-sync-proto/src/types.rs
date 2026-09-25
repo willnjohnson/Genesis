@@ -197,9 +197,8 @@ pub struct SequenceData {
 pub struct GlossaryData {
     #[serde(default)]
     pub definition: Option<String>,
-    /// Top-level Drives (":CRYPTO") a Standard Glossary Tag is filed under. `Some` is the complete
-    /// set (an empty list uncategorizes the term); `None` means the sender doesn't know about drive
-    /// assignments at all (an older server or pack), and the receiver leaves its own untouched.
+    /// Every top-level Drive (":CRYPTO") this definition is filed under, sorted; empty means
+    /// uncategorized. `None` (an older sender) means just the key's own Drive, if it has one.
     #[serde(default)]
     pub drives: Option<Vec<String>>,
 }
@@ -267,6 +266,19 @@ pub fn split_sequence_key(key: &str) -> Option<(&str, &str)> {
     key.split_once('|').filter(|(d, v)| !d.is_empty() && !v.is_empty())
 }
 
+/// Composite key for `glossary` items: `drive|term`, where `drive` is the row's FIRST Drive (its
+/// Drives are stored sorted) or empty when uncategorized. A Drive belongs to at most one of a term's
+/// definitions, so (first Drive, term) is unique per row; the full list travels in the payload. A
+/// Drive root (":PRIV") can't contain `|`, so splitting on the first one is unambiguous even though
+/// a term itself may contain one.
+pub fn glossary_key(drive: &str, term: &str) -> String {
+    format!("{drive}|{term}")
+}
+
+pub fn split_glossary_key(key: &str) -> Option<(&str, &str)> {
+    key.split_once('|').filter(|(_, t)| !t.is_empty())
+}
+
 /// Rejects keys that are empty, oversized or contain control characters.
 pub fn validate_key(key: &str) -> Result<(), String> {
     if key.trim().is_empty() {
@@ -293,6 +305,15 @@ mod tests {
         assert_eq!(Kind::parse("nope"), None);
         assert!(Kind::Wdbs.order() < Kind::Video.order());
         assert!(Kind::Video.order() < Kind::VideoLink.order());
+    }
+
+    #[test]
+    fn glossary_key_round_trips() {
+        assert_eq!(split_glossary_key(&glossary_key(":PRIV", "Magnesium")), Some((":PRIV", "Magnesium")));
+        assert_eq!(split_glossary_key(&glossary_key("", "Magnesium")), Some(("", "Magnesium")), "uncategorized has an empty drive");
+        assert_eq!(split_glossary_key(&glossary_key(":A", "a|b")), Some((":A", "a|b")), "a term may contain the separator");
+        assert_eq!(split_glossary_key("no-separator"), None);
+        assert_eq!(split_glossary_key(":PRIV|"), None);
     }
 
     #[test]

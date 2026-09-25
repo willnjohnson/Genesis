@@ -4,8 +4,10 @@ import {
     getApiKey, getKeyStatus, getSetting, openExternalUrl, bulkUpdateVideoWdbs, addToDriveSequence,
     type Video, type BiographyEntry, saveTags, getBiography,
     getVideoById, getGlossaryTerms, getWdbsTree, decodeWdbs, type WdbsNode,
+    UNSORTED_WDBS_FILTER,
 } from "./api";
 import { driveSegmentLabel, formatBytes } from "./lib/utils";
+import { resolveEntry } from "./lib/glossary";
 import { setInternalLinkHandler, linkKindLabel, type LinkKind } from "./lib/internal-links";
 import { LinkPicker } from "./components/LinkPicker";
 import { MarkdownContextMenu } from "./components/MarkdownContextMenu";
@@ -13,7 +15,7 @@ import { TermDefinitionModal } from "./components/TermDefinitionModal";
 import { saveImageAs } from "./lib/save-image-as";
 import { applyTheme, resolveTheme, loadCustomThemes } from "./lib/themes";
 import { SearchBar, type Facet } from "./components/SearchBar";
-import { VideoList } from "./components/VideoList";
+import { VideoList, type SortField, type SortOrder, type FilterType } from "./components/VideoList";
 import { Sidebar } from "./components/Sidebar";
 import { BRAND } from "./branding";
 import { BrandLogo } from "./components/BrandLogo";
@@ -98,6 +100,11 @@ function App() {
     // Human-readable label of library.wdbsFilter, for the empty-state message below — the panel
     // only tracks the encoded path, not the display segment shown in the tree.
     const [driveFilterLabel, setDriveFilterLabel] = useState('');
+    // The selected node's own curated alias (null when it doesn't have one, or nothing's
+    // selected) — shown as "Drive: X (alias)" in VideoList's bottom-bar chip (see driveLabel
+    // below). Used to live as its own strip under the tree in WdbsTreePanel; moved here so it has
+    // one home instead of two.
+    const [driveFilterAlias, setDriveFilterAlias] = useState<string | null>(null);
     // Bulk Assign Mode: click a card to select it (no checkboxes), right-click to assign the
     // whole selection to a Warp Drive category at once — see BulkAssignMenu.tsx. Only offered
     // while the Drive panel is open, since assigning implies picking a destination category.
@@ -110,10 +117,17 @@ function App() {
     const [biographySearchQuery, setBiographySearchQuery] = useState("person_search:");
     const [notification, setNotification] = useState<{ message: string; type: NotificationType } | null>(null);
     const [showScrollTop, setShowScrollTop] = useState(false);
+    // The one scrollable region (see the `mt-4 flex-1 overflow-y-auto` div in the return below) —
+    // everywhere that used to assume the whole window scrolls (this file, VideoList.tsx's
+    // virtualizer, AlphabetJumpNav.tsx, useLibrary.ts's scroll-reset) now targets this instead.
+    const scrollContainerRef = useRef<HTMLDivElement>(null);
     const [showSettings, setShowSettings] = useState(false);
     const [hasApiKey, setHasApiKey] = useState(false);
     const [videoListMode, setVideoListMode] = useState<'grid' | 'compact'>('grid');
     const [navigationOrientation, setNavigationOrientation] = useState<'horizontal' | 'vertical'>('horizontal');
+    const [searchSortField, setSearchSortField] = useState<SortField>('date');
+    const [searchSortOrder, setSearchSortOrder] = useState<SortOrder>('desc');
+    const [searchFilterKind, setSearchFilterKind] = useState<FilterType>('all');
     const [pluginSummarizeEnabled, setPluginSummarizeEnabled] = useState(false);
     const [pluginPhotosynthesisEnabled, setPluginPhotosynthesisEnabled] = useState(false);
     // Feature flags: settings-table rows a DB owner sets (or a sync server enforces) to hide or
@@ -141,7 +155,7 @@ function App() {
     const [sidebarInitialTab, setSidebarInitialTab] = useState<'transcript' | 'summary' | undefined>(undefined);
     const [selectedBiography, setSelectedBiography] = useState<BiographyEntry | null>(null);
     // A glossary term opened from a link inside some markdown (see lib/internal-links.ts).
-    const [linkedTerm, setLinkedTerm] = useState<{ term: string; definition: string } | null>(null);
+    const [linkedTerm, setLinkedTerm] = useState<{ term: string; definition: string; drives: string[] } | null>(null);
 
     // ── Hooks ────────────────────────────────────────────────────────────────
     const search = useSearch(hasApiKey);
@@ -153,6 +167,7 @@ function App() {
         effectivePluginSummarizeEnabled,
         search.filteredVideos,
         setNotification,
+        scrollContainerRef,
     );
 
     // ── Computed: which videos to show in VideoList ──────────────────────────
@@ -327,9 +342,11 @@ function App() {
 
     // ── Scroll-to-top ────────────────────────────────────────────────────────
     useEffect(() => {
-        const onScroll = () => setShowScrollTop(window.scrollY > 400);
-        window.addEventListener("scroll", onScroll);
-        return () => window.removeEventListener("scroll", onScroll);
+        const el = scrollContainerRef.current;
+        if (!el) return;
+        const onScroll = () => setShowScrollTop(el.scrollTop > 400);
+        el.addEventListener("scroll", onScroll);
+        return () => el.removeEventListener("scroll", onScroll);
     }, []);
 
     // ── Load library when switching to Library mode ──────────────────────────
@@ -352,9 +369,9 @@ function App() {
     useEffect(() => {
         const cameFrom = prevViewModeRef.current;
         if (cameFrom === 'library' && viewMode !== 'library') {
-            libraryScrollYRef.current = window.scrollY;
+            libraryScrollYRef.current = scrollContainerRef.current?.scrollTop ?? 0;
         } else if (viewMode === 'library' && cameFrom !== 'library') {
-            requestAnimationFrame(() => window.scrollTo({ top: libraryScrollYRef.current }));
+            requestAnimationFrame(() => scrollContainerRef.current?.scrollTo({ top: libraryScrollYRef.current }));
         }
         prevViewModeRef.current = viewMode;
     }, [viewMode]);
@@ -435,7 +452,7 @@ function App() {
     // Biography's "In Drive" list: opens the Library/Portal with the Drive panel showing and that
     // entry selected. Leftover search text is cleared first, since selecting a Drive keeps it
     // (and would narrow the Drive's videos by it).
-    const goToLibraryDrive = useCallback((storagePath: string, label: string) => {
+    const goToLibraryDrive = useCallback((storagePath: string, label: string, alias: string | null = null) => {
         setBulkAssignMode(false);
         setBulkSelectedIds(new Set());
         setBulkAssignMenu(null);
@@ -444,6 +461,7 @@ function App() {
         library.setLibrarySearch('');
         library.setWdbsFilter(storagePath);
         setDriveFilterLabel(label);
+        setDriveFilterAlias(alias);
         setShowDrivePanel(true);
     }, [library]);
 
@@ -470,10 +488,13 @@ function App() {
             switch (kind) {
                 case 'glossary': {
                     if (!flags.showGlossary) return unavailable();
-                    const found = (await getGlossaryTerms()).find(([term]) => term === key);
-                    if (!found || !found[1].trim()) return say(`"${key}" is no longer in the glossary.`);
+                    // A term can have a different definition per Drive; a link is by name alone, so
+                    // prefer the one filed under the Drive being browsed (if any), else uncategorized.
+                    const browsing = library.wdbsFilter?.startsWith(':') ? [':' + library.wdbsFilter.slice(1).split('-')[0]] : [];
+                    const found = resolveEntry((await getGlossaryTerms()).filter(t => t.definition.trim() !== ''), key, browsing);
+                    if (!found) return say(`"${key}" is no longer in the glossary.`);
                     setSelectedBiography(null);
-                    setLinkedTerm({ term: found[0], definition: found[1] });
+                    setLinkedTerm(found);
                     return;
                 }
                 case 'bio': {
@@ -513,7 +534,7 @@ function App() {
         } catch (e) {
             say(typeof e === 'string' ? e : (e as { message?: string })?.message ?? "Couldn't open that link.");
         }
-    }, [flags.showGlossary, flags.showBiography, flags.showDrive, handleSelectVideo, goToLibraryDrive]);
+    }, [flags.showGlossary, flags.showBiography, flags.showDrive, handleSelectVideo, goToLibraryDrive, library.wdbsFilter]);
 
     useEffect(() => setInternalLinkHandler(handleOpenLink), [handleOpenLink]);
 
@@ -588,24 +609,42 @@ function App() {
         });
     }, []);
 
-    const handleBulkAssign = useCallback(async (wdbs: string) => {
+    // `alsoSequence` (from BulkAssignMenu's checkbox) appends the same videos to that Drive's own
+    // sequence right after assigning them — as a second step, once assignment has actually
+    // succeeded, so add_to_drive_sequence's "filed at or beneath the Drive" check can never reject
+    // them: they were just filed there, by this same action.
+    const handleBulkAssign = useCallback(async (wdbs: string, alsoSequence: boolean) => {
         if (!bulkAssignMenu) return;
         setBulkAssigning(true);
         setBulkAssignError(null);
         try {
             const result = await bulkUpdateVideoWdbs(bulkAssignMenu.videoIds, wdbs);
             const label = wdbs.trim() || "unassigned";
-            if (result.failed.length === 0) {
-                setNotification({ message: `Assigned ${result.succeeded.length} video${result.succeeded.length === 1 ? '' : 's'} to ${label}.`, type: "success" });
-                setBulkSelectedIds(new Set());
-                setBulkAssignMenu(null);
-            } else if (result.succeeded.length === 0) {
+
+            if (result.succeeded.length === 0 && result.failed.length > 0) {
                 setBulkAssignError(result.failed[0][1]);
-            } else {
-                setNotification({ message: `Assigned ${result.succeeded.length} video${result.succeeded.length === 1 ? '' : 's'} to ${label}; ${result.failed.length} failed.`, type: "info" });
-                setBulkSelectedIds(new Set());
-                setBulkAssignMenu(null);
+                return;
             }
+
+            let seqAdded = 0;
+            let seqAlreadyIn = 0;
+            // Nothing to sequence into once the selection was cleared back to unassigned.
+            if (alsoSequence && wdbs.trim() && result.succeeded.length > 0) {
+                const shown = new Map(displayedVideos.map((v, i) => [v.id, i]));
+                const ids = [...result.succeeded].sort((a, b) => (shown.get(a) ?? Infinity) - (shown.get(b) ?? Infinity));
+                const seqOut = await addToDriveSequence(wdbs, ids);
+                seqAdded = seqOut.added;
+                seqAlreadyIn = seqOut.alreadyIn;
+            }
+
+            const assignPart = `Assigned ${result.succeeded.length} video${result.succeeded.length === 1 ? '' : 's'} to ${label}`;
+            const failedPart = result.failed.length > 0 ? `; ${result.failed.length} failed` : '';
+            const seqPart = alsoSequence && wdbs.trim()
+                ? `, added ${seqAdded} to its sequence${seqAlreadyIn > 0 ? ` (${seqAlreadyIn} already in it)` : ''}`
+                : '';
+            setNotification({ message: `${assignPart}${seqPart}${failedPart}.`, type: result.failed.length === 0 ? "success" : "info" });
+            setBulkSelectedIds(new Set());
+            setBulkAssignMenu(null);
             library.refreshLibrary();
             setDriveVersion(v => v + 1);
         } catch (e: any) {
@@ -613,7 +652,7 @@ function App() {
         } finally {
             setBulkAssigning(false);
         }
-    }, [bulkAssignMenu, library, setNotification]);
+    }, [bulkAssignMenu, library, displayedVideos, setNotification]);
 
     // Adds the selection to a Drive's sequence in the order the grid shows it (so sorting the grid by
     // date, then selecting a range, gives a chronological sequence), not the order they were clicked.
@@ -657,8 +696,22 @@ function App() {
             : `No videos are tagged under "${driveFilterLabel}" yet.`)
         : (library.librarySearch.trim() ? "Try different search terms" : "Find videos and save their transcripts here.");
 
+    // The bottom bar's Drive chip prefix: "Drive" for the synthetic All/Unsorted states (nothing
+    // to show depth for), otherwise "L<depth>" (L1 = a root node, L2 = one level under it, etc.),
+    // with a tooltip on the prefix itself giving the ancestor path above the selected node (e.g.
+    // hovering "L3" on a node at :CRYPTO-BITCOIN-INFO shows ":CRYPTO-BITCOIN") — the value shown
+    // next to the prefix is still just the node's own segment/alias, so this is how the chip says
+    // "this is a level-3 node" without repeating the whole path there too.
+    const driveLabelPrefix = (() => {
+        const path = library.wdbsFilter;
+        if (!path || path === UNSORTED_WDBS_FILTER) return { text: 'Drive', tooltip: undefined as string | undefined };
+        const segments = path.replace(/^θψ/, '').split('_').filter(Boolean);
+        const ancestors = segments.slice(0, -1);
+        return { text: `L${segments.length}`, tooltip: ancestors.length > 0 ? `:${ancestors.join('-')}` : undefined };
+    })();
+
     return (
-        <div className="min-h-screen bg-[#0f0f0f] text-white font-sans selection:bg-red-500/30 selection:text-white pb-20 select-none">
+        <div className="h-screen overflow-hidden bg-[#0f0f0f] text-white font-sans selection:bg-red-500/30 selection:text-white select-none flex flex-col">
             {/* Navigation - conditional rendering */}
             {navigationOrientation === 'vertical' && (
                 <div className="fixed left-0 top-0 h-full w-16 bg-[#0f0f0f] border-r border-[#272727] z-40 flex flex-col items-center pt-6">
@@ -741,8 +794,8 @@ function App() {
                 </div>
             )}
 
-            <div className={`${navigationOrientation === 'vertical' ? 'ml-16' : ''} px-4 pt-4`}>
-                <header className="mb-4 relative z-40 transition-all">
+            <div className={`${navigationOrientation === 'vertical' ? 'ml-16' : ''} px-4 pt-4 shrink-0`}>
+                <header className="relative z-40 transition-all">
                     {/* Top bar - only show in horizontal mode */}
                     {navigationOrientation === 'horizontal' && (
                         <div className="flex items-center justify-between mb-6 relative border-b border-[#272727] pb-2">
@@ -850,7 +903,7 @@ function App() {
                                     }
                                     return next;
                                 })}
-                                className={`shrink-0 p-2.5 mb-4 rounded-lg border transition-all cursor-pointer ${showDrivePanel ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
+                                className={`shrink-0 p-2.5 mb-2 rounded-lg border transition-all cursor-pointer ${showDrivePanel ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
                                 title={`Toggle ${labels.aliasDriveName}`}
                             >
                                 <HardDrive className="w-5 h-5" />
@@ -886,134 +939,184 @@ function App() {
                         </div>
                     </div>
                 </header>
-                {viewMode === 'search' && search.error && (
-                    <div className="mt-8 text-center animate-in fade-in duration-300">
-                        <div className="text-red-500 font-medium bg-red-900/10 px-6 py-3 rounded-lg border border-red-600/20 inline-block mx-auto text-sm">
-                            {search.error}
-                        </div>
-                    </div>
-                )}
+            </div>
 
-                <div className="mt-4">
-                     {viewMode === 'glossary' ? (
-                         <GlossaryView
-                             searchQuery={glossarySearchQuery}
-                             onSearchInLibrary={handleSearchInLibrary}
-                             onOpenVideo={handleSelectVideo}
-                             allowModification={allowModificationGlossary}
-                         />
-                     ) : viewMode === 'biography' ? (
-                          <BiographyView searchQuery={biographySearchQuery} onVideoSelect={handleSelectVideo} onViewMore={(handle) => goToLibrarySearch(`handle:${handle.replace('@', '')}`)} onDriveSelect={showDrive ? goToLibraryDrive : undefined} allowEditBio={allowEditBio} />
-                     ) : viewMode === 'search' ? (
-                        <>
+            {/* Everything above (rail, header, search bar) is shrink-0/fixed and stays put.
+                --k-bottom-bar-height's marginBottom (not padding — padding wouldn't shrink this
+                element's own box, so its scrollbar track would still run behind BottomBar) ends
+                this region's box exactly where BottomBar begins. This div itself never scrolls
+                (overflow-hidden) — it just lays out whichever of the two shapes below applies. */}
+            {/* No mt-4 here: header already ends with mb-4, and each view's own sticky heading
+                (VideoList.tsx/GlossaryView.tsx/BiographyView.tsx) adds its own mb-4 below itself —
+                stacking a third top margin on top of those left too much whitespace above it. */}
+            <div
+                className={`${navigationOrientation === 'vertical' ? 'ml-16' : ''} px-4 flex-1 min-h-0 overflow-hidden`}
+                style={{ marginBottom: 'var(--k-bottom-bar-height, 0px)' }}
+            >
+                {viewMode === 'library' ? (
+                    <div className="animate-in fade-in slide-in-from-bottom-2 duration-400 flex gap-6 h-full">
+                        {showDrivePanel && showDrive && (
+                            // Always beside the grid, never stacked above it (no flex-col
+                            // fallback at narrow widths): the panel instead shrinks its own width
+                            // down to min-w-40. Its own scroll (h-full, independent of
+                            // scrollContainerRef) rather than sharing the grid's: scrolling the
+                            // video list shouldn't move the Drive tree out of view, and vice
+                            // versa. WdbsTreePanel's own row labels truncate with an ellipsis (and
+                            // a title tooltip) to cope with the narrower width.
+                            <div className="w-80 min-w-40 shrink h-full flex flex-col gap-3">
+                                <WdbsTreePanel
+                                    className="flex-1 min-h-0 flex flex-col"
+                                    selectedPath={library.wdbsFilter ?? undefined}
+                                    onSelect={(path, label, alias) => {
+                                        // Clicking the already-selected node (a real Drive or the
+                                        // synthetic Unsorted entry) steps back off it, the same as
+                                        // the toggle button turning the panel off — see
+                                        // setWdbsFilter(null)'s own reset-search behavior.
+                                        if (path === library.wdbsFilter) {
+                                            library.setWdbsFilter(null);
+                                            setDriveFilterLabel('');
+                                            setDriveFilterAlias(null);
+                                        } else {
+                                            library.setWdbsFilter(path);
+                                            setDriveFilterLabel(label);
+                                            setDriveFilterAlias(alias);
+                                        }
+                                    }}
+                                    refreshKey={driveVersion}
+                                    allowEditAlias={allowEditWDBS}
+                                />
+                                {canBulkAssign && (
+                                    <button
+                                        onClick={() => setBulkAssignMode(prev => {
+                                            const next = !prev;
+                                            if (!next) setBulkSelectedIds(new Set());
+                                            return next;
+                                        })}
+                                        // mb-2: this column's own h-full already stops right at the
+                                        // fixed bottom bar's top edge (via the shared marginBottom
+                                        // on the content region above), so without this the button
+                                        // sits flush against it with no breathing room.
+                                        className={`shrink-0 mb-2 w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${bulkAssignMode ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
+                                        title={`Select videos, then right-click to ${allowEditWDBS ? `assign them to a ${labels.aliasDriveName} category` : ''}${allowEditWDBS && canBulkSequence ? ', optionally also adding them to its sequence' : canBulkSequence ? 'add them to a sequence' : ''}`}
+                                    >
+                                        <MousePointerClick className="w-3.5 h-3.5" />
+                                        {bulkAssignMode ? `Bulk Assign Mode (${bulkSelectedIds.size} selected)` : "Bulk Assign Mode"}
+                                    </button>
+                                )}
+                            </div>
+                        )}
+                        {/* position: relative makes this VideoList.tsx's gridRef offsetParent, so
+                            its existing offsetTop-based scrollMargin keeps resolving correctly
+                            against this pane instead of the document. */}
+                        <div ref={scrollContainerRef} className="flex-1 min-w-0 h-full overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable] custom-scrollbar relative">
                             <VideoList
                                 videos={displayedVideos}
                                 onSelect={handleSelectVideo}
                                 onSelectWithTab={handleSelectVideo}
-                                onSaveAll={flags.saveAllAllowed && displayedVideos.length > 0 ? library.handleSaveAll : undefined}
-                                saveProgress={library.saveProgress}
+                                onDelete={library.handleDeleteVideo}
                                 compact={videoListMode === 'compact'}
+                                totalCount={library.totalCount}
+                                isLibrary={true}
+                                allowDeletion={allowDeletionLibrary}
+                                sortField={library.sortField}
+                                onSortFieldChange={library.setSortField}
+                                sortOrder={library.sortOrder}
+                                onToggleSortOrder={library.toggleSortOrder}
+                                filterKind={library.filterKind}
+                                onFilterKindChange={library.setFilterKind}
+                                onLoadMore={library.loadMore}
+                                loadingMore={library.loadingMore}
+                                hasMore={library.hasMore}
+                                loading={library.loading}
+                                emptyTitle={library.wdbsFilter ? "No videos" : (library.librarySearch.trim() ? "No results" : `Build your ${labels.aliasLibrary}`)}
+                                emptyMessage={libraryEmptyMessage}
+                                bulkAssignMode={bulkAssignMode}
+                                bulkSelectedIds={bulkSelectedIds}
+                                onToggleBulkSelect={handleToggleBulkSelect}
+                                onBulkSelectRange={handleBulkSelectRange}
+                                onBulkContextMenu={handleBulkContextMenu}
+                                driveLabel={showDrivePanel
+                                    ? (driveFilterLabel ? (driveFilterAlias ? `${driveFilterLabel} (${driveFilterAlias})` : driveFilterLabel) : 'All')
+                                    : undefined}
+                                driveLabelPrefix={showDrivePanel ? driveLabelPrefix.text : undefined}
+                                driveLabelPrefixTooltip={driveLabelPrefix.tooltip}
+                                scrollContainerRef={scrollContainerRef}
                             />
-                            {search.continuationToken && !search.isSearch && (
-                                <div className="mt-16 text-center flex justify-center gap-4">
-                                    <button
-                                        onClick={search.handleLoadMore}
-                                        disabled={search.loadingMore}
-                                        className="px-10 py-3 bg-[#272727] text-white rounded-full text-sm font-bold hover:bg-[#3f3f3f] transition-all disabled:opacity-50 cursor-pointer"
-                                    >
-                                        {search.loadingMore
-                                            ? <div className="flex items-center gap-2"><div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Loading...</div>
-                                            : "Load More"
-                                        }
-                                    </button>
-                                    <button
-                                        onClick={search.handleLoadAll}
-                                        disabled={search.loadingMore}
-                                        className="px-10 py-3 bg-white text-black rounded-full text-sm font-bold hover:bg-[#e5e5e5] transition-all disabled:opacity-50 cursor-pointer"
-                                    >
-                                        {search.loadingMore ? "Loading..." : "Load All"}
-                                    </button>
-                                </div>
-                            )}
-                        </>
-                    ) : (
-                        <div className="animate-in fade-in slide-in-from-bottom-2 duration-400 flex flex-col lg:flex-row gap-6">
-                            {showDrivePanel && showDrive && (
-                                <div className="lg:w-80 shrink-0">
-                                    <WdbsTreePanel
-                                        selectedPath={library.wdbsFilter ?? undefined}
-                                        onSelect={(path, label) => {
-                                            library.setWdbsFilter(path);
-                                            setDriveFilterLabel(label);
-                                        }}
-                                        refreshKey={driveVersion}
-                                        allowEditAlias={allowEditWDBS}
-                                        clearNavRail={navigationOrientation === 'vertical'}
-                                    />
-                                    {canBulkAssign && (
-                                        <button
-                                            onClick={() => setBulkAssignMode(prev => {
-                                                const next = !prev;
-                                                if (!next) setBulkSelectedIds(new Set());
-                                                return next;
-                                            })}
-                                            className={`mt-3 w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${bulkAssignMode ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
-                                            title={`Select videos, then right-click to ${allowEditWDBS ? `assign them to a ${labels.aliasDriveName} category` : ''}${allowEditWDBS && canBulkSequence ? ' or ' : ''}${canBulkSequence ? 'add them to a sequence' : ''}`}
-                                        >
-                                            <MousePointerClick className="w-3.5 h-3.5" />
-                                            {bulkAssignMode ? `Bulk Assign Mode (${bulkSelectedIds.size} selected)` : "Bulk Assign Mode"}
-                                        </button>
-                                    )}
-                                </div>
-                            )}
-                            <div className="flex-1 min-w-0">
+                        </div>
+                    </div>
+                ) : (
+                    // Glossary/Biography/Search share the one scroll pane directly — no Drive
+                    // panel to keep independent of it. position: relative, see the comment above.
+                    <div ref={scrollContainerRef} className="h-full overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable] custom-scrollbar relative">
+                        {viewMode === 'glossary' ? (
+                            <GlossaryView
+                                searchQuery={glossarySearchQuery}
+                                onSearchInLibrary={handleSearchInLibrary}
+                                onOpenVideo={handleSelectVideo}
+                                allowModification={allowModificationGlossary}
+                                scrollContainerRef={scrollContainerRef}
+                            />
+                        ) : viewMode === 'biography' ? (
+                            <BiographyView searchQuery={biographySearchQuery} onVideoSelect={handleSelectVideo} onViewMore={(handle) => goToLibrarySearch(`handle:${handle.replace('@', '')}`)} onDriveSelect={showDrive ? goToLibraryDrive : undefined} allowEditBio={allowEditBio} scrollContainerRef={scrollContainerRef} />
+                        ) : (
+                            <>
                                 <VideoList
                                     videos={displayedVideos}
                                     onSelect={handleSelectVideo}
                                     onSelectWithTab={handleSelectVideo}
-                                    onDelete={library.handleDeleteVideo}
+                                    onSaveAll={flags.saveAllAllowed && displayedVideos.length > 0 ? library.handleSaveAll : undefined}
+                                    saveProgress={library.saveProgress}
                                     compact={videoListMode === 'compact'}
-                                    totalCount={library.totalCount}
-                                    isLibrary={true}
-                                    allowDeletion={allowDeletionLibrary}
-                                    sortField={library.sortField}
-                                    onSortFieldChange={library.setSortField}
-                                    sortOrder={library.sortOrder}
-                                    onToggleSortOrder={library.toggleSortOrder}
-                                    filterKind={library.filterKind}
-                                    onFilterKindChange={library.setFilterKind}
-                                    onLoadMore={library.loadMore}
-                                    loadingMore={library.loadingMore}
-                                    hasMore={library.hasMore}
-                                    loading={library.loading}
-                                    emptyTitle={library.wdbsFilter ? "No videos" : (library.librarySearch.trim() ? "No results" : `Build your ${labels.aliasLibrary}`)}
-                                    emptyMessage={libraryEmptyMessage}
-                                    bulkAssignMode={bulkAssignMode}
-                                    bulkSelectedIds={bulkSelectedIds}
-                                    onToggleBulkSelect={handleToggleBulkSelect}
-                                    onBulkSelectRange={handleBulkSelectRange}
-                                    onBulkContextMenu={handleBulkContextMenu}
+                                    error={search.error}
+                                    sortField={searchSortField}
+                                    onSortFieldChange={setSearchSortField}
+                                    sortOrder={searchSortOrder}
+                                    onToggleSortOrder={() => setSearchSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
+                                    filterKind={searchFilterKind}
+                                    onFilterKindChange={setSearchFilterKind}
+                                    scrollContainerRef={scrollContainerRef}
                                 />
-                            </div>
-                        </div>
-                    )}
+                                {displayedVideos.length > 0 && search.continuationToken && !search.isSearch && (
+                                    <div className="mt-16 text-center flex justify-center gap-4">
+                                        <button
+                                            onClick={search.handleLoadMore}
+                                            disabled={search.loadingMore}
+                                            className="px-10 py-3 bg-[#272727] text-white rounded-full text-sm font-bold hover:bg-[#3f3f3f] transition-all disabled:opacity-50 cursor-pointer"
+                                        >
+                                            {search.loadingMore
+                                                ? <div className="flex items-center gap-2"><div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Loading...</div>
+                                                : "Load More"
+                                            }
+                                        </button>
+                                        <button
+                                            onClick={search.handleLoadAll}
+                                            disabled={search.loadingMore}
+                                            className="px-10 py-3 bg-white text-black rounded-full text-sm font-bold hover:bg-[#e5e5e5] transition-all disabled:opacity-50 cursor-pointer"
+                                        >
+                                            {search.loadingMore ? "Loading..." : "Load All"}
+                                        </button>
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                )}
 
-                    {bulkAssignMenu && (
-                        <BulkAssignMenu
-                            x={bulkAssignMenu.x}
-                            y={bulkAssignMenu.y}
-                            count={bulkAssignMenu.videoIds.length}
-                            onAssign={handleBulkAssign}
-                            canAssignDrive={allowEditWDBS}
-                            canAddToSequence={canBulkSequence}
-                            defaultSequenceDrive={library.wdbsFilter ? decodeWdbs(library.wdbsFilter).toUpperCase() : ''}
-                            onAddToSequence={handleBulkAddToSequence}
-                            onClose={() => { setBulkAssignMenu(null); setBulkAssignError(null); }}
-                            assigning={bulkAssigning}
-                            error={bulkAssignError}
-                        />
-                    )}
-                </div>
+                {bulkAssignMenu && (
+                    <BulkAssignMenu
+                        x={bulkAssignMenu.x}
+                        y={bulkAssignMenu.y}
+                        count={bulkAssignMenu.videoIds.length}
+                        onAssign={handleBulkAssign}
+                        canAssignDrive={allowEditWDBS}
+                        canAddToSequence={canBulkSequence}
+                        defaultDrive={library.wdbsFilter ? decodeWdbs(library.wdbsFilter).toUpperCase() : ''}
+                        onAddToSequence={handleBulkAddToSequence}
+                        onClose={() => { setBulkAssignMenu(null); setBulkAssignError(null); }}
+                        assigning={bulkAssigning}
+                        error={bulkAssignError}
+                    />
+                )}
             </div>
 
             <Sidebar
@@ -1143,15 +1246,21 @@ function App() {
             )}
 
             <button
-                // Not "smooth": VideoList's rows are window-virtualized (useWindowVirtualizer)
-                // with an *estimated* row height. A multi-frame smooth scroll gives it time to
-                // swap in newly-visible rows mid-animation and correct that estimate, which
-                // shifts the page's total height while the browser's scroll animation is still
-                // computing against the original one — the scroll can end up landing wherever
-                // that shifting layout leaves it, well short of 0. A single instant jump happens
-                // before the virtualizer gets a chance to do that.
-                onClick={() => window.scrollTo({ top: 0, behavior: "auto" })}
-                className={`fixed bottom-12 right-6 p-3 bg-red-600 hover:bg-red-500 text-white rounded-full shadow-lg transition-opacity duration-200 cursor-pointer z-39 active:scale-95 ${showScrollTop ? "opacity-100" : "opacity-0 pointer-events-none"}`}
+                // Not "smooth": VideoList's rows are virtualized with an *estimated* row height.
+                // A multi-frame smooth scroll gives it time to swap in newly-visible rows
+                // mid-animation and correct that estimate, which shifts the pane's total height
+                // while the browser's scroll animation is still computing against the original
+                // one — the scroll can end up landing wherever that shifting layout leaves it,
+                // well short of 0. A single instant jump happens before the virtualizer gets a
+                // chance to do that.
+                onClick={() => scrollContainerRef.current?.scrollTo({ top: 0, behavior: "auto" })}
+                className={`fixed right-6 p-3 bg-red-600 hover:bg-red-500 text-white rounded-full shadow-lg transition-opacity duration-200 cursor-pointer z-39 active:scale-95 ${showScrollTop ? "opacity-100" : "opacity-0 pointer-events-none"}`}
+                // `max`, not a flat add: this button's resting spot (3rem) already clears every
+                // other view with nothing docked at the bottom (including Library/Search with the
+                // setting off). --k-bottom-bar-height (VideoList.tsx) only needs to push it up
+                // further once that bar is actually taller than 2rem or so — adding the two
+                // unconditionally floated it a whole extra 3rem above an already-short bar.
+                style={{ bottom: 'max(3rem, calc(var(--k-bottom-bar-height, 0px) + 1rem))' }}
                 title="Back to Top"
             >
                 <ChevronUp className="w-6 h-6" style={{ color: '#ffffff' }} />
@@ -1161,7 +1270,8 @@ function App() {
                 <button
                     onClick={library.handleSummarizeAll}
                     disabled={!!library.summarizeProgress}
-                    className={`fixed bottom-12 left-20 summarize-btn px-4 py-2.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-500 hover:to-blue-500 rounded-lg text-sm font-bold transition-all shadow-lg hover:shadow-purple-500/25 disabled:opacity-50 flex items-center gap-2 z-40 ${!library.summarizeProgress ? 'cursor-pointer' : 'cursor-default'}`}
+                    className={`fixed left-20 summarize-btn px-4 py-2.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-500 hover:to-blue-500 rounded-lg text-sm font-bold transition-all shadow-lg hover:shadow-purple-500/25 disabled:opacity-50 flex items-center gap-2 z-40 ${!library.summarizeProgress ? 'cursor-pointer' : 'cursor-default'}`}
+                    style={{ bottom: 'max(3rem, calc(var(--k-bottom-bar-height, 0px) + 1rem))' }}
                 >
                     {library.summarizeProgress ? (
                         <>

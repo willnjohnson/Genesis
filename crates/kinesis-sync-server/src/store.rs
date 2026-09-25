@@ -251,7 +251,7 @@ pub(crate) mod tests {
                 transcript TEXT, summary TEXT, view_count INTEGER, published_at TEXT, tags TEXT, WDBS TEXT);
              CREATE TABLE IF NOT EXISTS tblWDBS (WDBS TEXT PRIMARY KEY, lev INTEGER, WDID TEXT, WDInfo TEXT, WDIcon TEXT, WDDefault INTEGER);
              CREATE TABLE IF NOT EXISTS VideoWDBSLinks (video_id TEXT NOT NULL, wdbs TEXT NOT NULL, PRIMARY KEY (video_id, wdbs));
-             CREATE TABLE IF NOT EXISTS Glossary (term TEXT PRIMARY KEY, definition TEXT NOT NULL, drives TEXT NOT NULL DEFAULT '');
+             CREATE TABLE IF NOT EXISTS Glossary (term TEXT NOT NULL, definition TEXT NOT NULL, drives TEXT NOT NULL DEFAULT '', PRIMARY KEY (term, drives));
              CREATE TABLE IF NOT EXISTS Biographies (handle TEXT PRIMARY KEY, display_name TEXT, bio TEXT, wikipedia TEXT, website TEXT,
                 twitter TEXT, instagram TEXT, facebook TEXT, threads TEXT, youtube TEXT, tiktok TEXT, twitch TEXT, reddit TEXT,
                 discord TEXT, channel_id TEXT, subscriber_count INTEGER);
@@ -302,7 +302,7 @@ pub(crate) mod tests {
         let stats = store.scan(&master, 1000, false).unwrap();
         assert_eq!((stats.changed, stats.head), (1, 4));
         let p = page(&store, 3, 10, false);
-        assert_eq!(ids(&p), vec!["glossary:a"]);
+        assert_eq!(ids(&p), vec!["glossary:|a"]);
         assert_eq!(p.revision, 4);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -333,13 +333,13 @@ pub(crate) mod tests {
         let stats = store.scan(&master, 1000, false).unwrap();
         assert_eq!((stats.removed, stats.head), (1, 3));
 
-        assert_eq!(ids(&page(&store, 2, 10, false)), vec!["glossary:a!"], "a delta carries the tombstone");
-        assert_eq!(ids(&page(&store, 0, 10, true)), vec!["glossary:b"], "a snapshot only lists what exists");
+        assert_eq!(ids(&page(&store, 2, 10, false)), vec!["glossary:|a!"], "a delta carries the tombstone");
+        assert_eq!(ids(&page(&store, 0, 10, true)), vec!["glossary:|b"], "a snapshot only lists what exists");
 
         // Re-adding the row revives it under a fresh revision.
         master.execute("INSERT INTO Glossary (term, definition) VALUES ('a', '1')", []).unwrap();
         store.scan(&master, 1000, false).unwrap();
-        assert_eq!(ids(&page(&store, 3, 10, false)), vec!["glossary:a"]);
+        assert_eq!(ids(&page(&store, 3, 10, false)), vec!["glossary:|a"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

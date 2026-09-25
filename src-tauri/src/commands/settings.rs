@@ -144,15 +144,13 @@ pub fn get_db_details(app: tauri::AppHandle) -> Result<DbDetails, String> {
 #[command]
 pub fn get_display_settings(app: tauri::AppHandle) -> Result<DisplaySettings, String> {
     let db_path = get_db_path(&app);
-    let get = |key: &str, default: &str| -> String {
-        db::get_setting(&db_path, key).unwrap_or(None).unwrap_or_else(|| default.to_string())
-    };
+    let global = crate::global_settings::load(&app);
     Ok(DisplaySettings {
-        resolution: get("resolution", "1440x900"),
-        fullscreen: db::get_setting(&db_path, "fullscreen").unwrap_or(None).map(|s| s == "true").unwrap_or(false),
-        theme: get("theme", "dark"),
-        video_list_mode: get("video_list_mode", "grid"),
-        navigation_orientation: get("navigation_orientation", "horizontal"),
+        resolution: global.resolution,
+        fullscreen: global.fullscreen,
+        theme: db::get_setting(&db_path, "theme").unwrap_or(None).unwrap_or_else(|| "dark".to_string()),
+        video_list_mode: global.video_list_mode,
+        navigation_orientation: global.navigation_orientation,
     })
 }
 
@@ -161,16 +159,18 @@ pub fn set_display_settings(app: tauri::AppHandle, settings: DisplaySettings) ->
     use tauri::Manager;
     let db_path = get_db_path(&app);
 
-    let current_resolution = db::get_setting(&db_path, "resolution")
-        .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| "1440x900".to_string());
-    let resolution_changed = current_resolution != settings.resolution;
+    let current = crate::global_settings::load(&app);
+    let resolution_changed = current.resolution != settings.resolution;
 
-    db::set_setting(&db_path, "resolution", &settings.resolution).map_err(|e| e.to_string())?;
-    db::set_setting(&db_path, "fullscreen", &settings.fullscreen.to_string()).map_err(|e| e.to_string())?;
+    // update(), not a whole-struct save: the window's remembered position isn't part of what the
+    // Settings screen edits, and must survive this write.
+    crate::global_settings::update(&app, |g| {
+        g.resolution = settings.resolution.clone();
+        g.fullscreen = settings.fullscreen;
+        g.video_list_mode = settings.video_list_mode.clone();
+        g.navigation_orientation = settings.navigation_orientation.clone();
+    });
     db::set_setting(&db_path, "theme", &settings.theme).map_err(|e| e.to_string())?;
-    db::set_setting(&db_path, "video_list_mode", &settings.video_list_mode).map_err(|e| e.to_string())?;
-    db::set_setting(&db_path, "navigation_orientation", &settings.navigation_orientation).map_err(|e| e.to_string())?;
 
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_fullscreen(settings.fullscreen);

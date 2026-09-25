@@ -33,6 +33,83 @@ pub(crate) fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> 
     Ok(count > 0)
 }
 
+/// True once `Glossary`'s primary key includes `drives` (the one-row-per-Drive shape).
+fn glossary_keyed_by_drive(conn: &Connection) -> Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(Glossary)")?;
+    // table_info columns: cid, name, type, notnull, dflt_value, pk (1-based position in the key, 0 = not in it).
+    let keyed = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?)))?
+        .filter_map(|r| r.ok())
+        .any(|(name, pk)| name.eq_ignore_ascii_case("drives") && pk > 0);
+    Ok(keyed)
+}
+
+/// Rebuilds `Glossary` keyed by (term, drives) instead of `term` alone, keeping one row per
+/// definition. Each row's newline-joined `drives` is put in the one stored order (sorted, no
+/// duplicates); a Quick Tag (empty definition) is always ''. One transaction, so a failure part-way
+/// leaves the old table intact.
+fn rebuild_glossary_keyed_by_drive(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DROP TABLE IF EXISTS Glossary_new", [])?;
+    tx.execute(
+        "CREATE TABLE Glossary_new (
+            term TEXT NOT NULL,
+            definition TEXT NOT NULL,
+            drives TEXT NOT NULL DEFAULT '',
+            CONSTRAINT GLOSSARY_PK PRIMARY KEY (term, drives)
+        ) STRICT",
+        [],
+    )?;
+    let old_rows: Vec<(String, String, String)> = {
+        let mut stmt = tx.prepare("SELECT term, definition, drives FROM Glossary")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<Result<_>>()?
+    };
+    for (term, definition, drives) in old_rows {
+        let key = if definition.trim().is_empty() { String::new() } else { super::glossary::encode_drives(&super::glossary::decode_drives(&drives)) };
+        tx.execute(
+            "INSERT OR IGNORE INTO Glossary_new (term, definition, drives) VALUES (?1, ?2, ?3)",
+            params![term, definition, key],
+        )?;
+    }
+    tx.execute("DROP TABLE Glossary", [])?;
+    tx.execute("ALTER TABLE Glossary_new RENAME TO Glossary", [])?;
+    tx.commit()
+}
+
+/// A definition is one row holding all its Drives, so a term never has two rows with the same
+/// definition. Databases from the one-row-per-Drive layout (or a sync/import that wrote one) are
+/// folded back: each such group becomes a single row with the union of its Drives. A no-op once
+/// there's nothing to fold, so it's safe to run on every open.
+fn merge_glossary_duplicates(conn: &Connection) -> Result<()> {
+    let groups: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT term, definition FROM Glossary GROUP BY term, definition HAVING COUNT(*) > 1")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<_>>()?
+    };
+    if groups.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    for (term, definition) in groups {
+        let keys: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT drives FROM Glossary WHERE term = ?1 AND definition = ?2")?;
+            let rows = stmt.query_map(params![term, definition], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<_>>()?
+        };
+        let mut all: Vec<String> = Vec::new();
+        for k in &keys {
+            all.extend(super::glossary::decode_drives(k));
+        }
+        tx.execute("DELETE FROM Glossary WHERE term = ?1 AND definition = ?2", params![term, definition])?;
+        tx.execute(
+            "INSERT INTO Glossary (term, definition, drives) VALUES (?1, ?2, ?3)",
+            params![term, definition, super::glossary::encode_drives(&all)],
+        )?;
+    }
+    tx.commit()
+}
+
 // The exact-spelling variant: tells "still under the old name" from "already renamed".
 fn table_exists_exact(conn: &Connection, table_name: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
@@ -462,23 +539,25 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     )?;
 
-    // Create glossary table. `drives` is the newline-joined Drive roots (level 1 only, e.g.
-    // ":CRYPTO") a Standard Glossary Tag is filed under, '' = uncategorized (shown under "All").
-    // Quick Tags (empty definition) never have one. This used to be a separate GlossaryDrives join
-    // table (term, root); folded directly onto Glossary instead, so a term's filings can never
-    // drift out of step with a second copy of its definition the way a denormalized (term, root)
-    // row-per-drive table would risk — one row, one definition, per term, always.
+    // Create glossary table. One row per definition: `drives` is the newline-joined Drive roots (level
+    // 1 only, e.g. ":CRYPTO") it's filed under, sorted, or '' for uncategorized (shown under "All"), so
+    // the same term can carry a different definition in different Drives ("Magnesium" the element vs.
+    // the supplement). A Drive belongs to at most one of a term's definitions (enforced in
+    // db/glossary.rs, not by the key). Quick Tags (empty definition) are always ''. Written with
+    // `ON CONFLICT(term, drives) DO UPDATE SET definition = excluded.definition`.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS Glossary (
-            term TEXT PRIMARY KEY,
+            term TEXT NOT NULL,
             definition TEXT NOT NULL,
-            drives TEXT NOT NULL DEFAULT ''
+            drives TEXT NOT NULL DEFAULT '',
+            CONSTRAINT GLOSSARY_PK PRIMARY KEY (term, drives)
         ) STRICT",
         [],
     )?;
-    // A database from before the fold-in above: carry each term's rows from the old join table
-    // into its new drives column before that table goes. Gated on `drives` not existing yet so
-    // this backfill only ever runs once, the same pattern as the Biographies migrations below.
+    // A database from before the fold-in of the old GlossaryDrives join table (term, root): carry
+    // each term's rows into a newline-joined drives column before that table goes. Gated on
+    // `drives` not existing yet so this backfill only ever runs once, the same pattern as the
+    // Biographies migrations below.
     if !column_exists(&conn, "Glossary", "drives")? {
         conn.execute("ALTER TABLE Glossary ADD COLUMN drives TEXT NOT NULL DEFAULT ''", [])?;
         if table_exists(&conn, "GlossaryDrives")? {
@@ -494,6 +573,13 @@ pub fn init_db(db_path: &str) -> Result<()> {
     if table_exists(&conn, "GlossaryDrives")? {
         conn.execute("DROP TABLE GlossaryDrives", [])?;
     }
+    // A database whose Glossary is still keyed by `term` alone: rebuild it keyed by (term, drives).
+    // Gated on the key shape, so it runs once. Then fold any rows that share a term and definition
+    // (the one-row-per-Drive layout) into one row holding all their Drives.
+    if !glossary_keyed_by_drive(&conn)? {
+        rebuild_glossary_keyed_by_drive(&conn)?;
+    }
+    merge_glossary_duplicates(&conn)?;
 
     // Drive sequences (see db/sequences.rs): one ordered watch-through list per Drive, for the
     // sidebar's First / Previous / Next bar. `drive` is the display path (":CS-DSA", uppercase) and a
@@ -748,7 +834,6 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // FEATURE_FLAGS said, so a change made there (checked by that parity test) could still have no
     // actual effect on a real database. Keep this array to genuinely flag-less settings only.
     let defaults = [
-        ("navigation_orientation", "horizontal"),
         ("venice_model", "zai-org-glm-5"),
     ];
 
@@ -1184,8 +1269,13 @@ mod tests {
         let _ = fs::remove_file(&db_path);
     }
 
+    fn glossary_rows(conn: &Connection) -> Vec<(String, String, String)> {
+        let mut stmt = conn.prepare("SELECT term, definition, drives FROM Glossary ORDER BY term, drives").unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().filter_map(|r| r.ok()).collect()
+    }
+
     #[test]
-    fn a_preexisting_glossary_drives_table_is_folded_into_glossary_drives_and_dropped() {
+    fn a_preexisting_glossary_drives_table_is_folded_into_the_drives_column() {
         let db_path = temp_db_path("glossary_fold");
         {
             let conn = Connection::open(&db_path).unwrap();
@@ -1203,16 +1293,89 @@ mod tests {
             .unwrap();
         }
         init_db(&db_path).unwrap();
-        // A second run must be a no-op (the backfill is gated on the column not existing yet).
+        // A second run must be a no-op (each migration is gated on the shape it produces).
         init_db(&db_path).unwrap();
         let conn = Connection::open(&db_path).unwrap();
         assert!(!table_exists(&conn, "GlossaryDrives").unwrap(), "the join table is gone once its rows are folded in");
-        let halving: String = conn.query_row("SELECT drives FROM Glossary WHERE term = 'Halving'", [], |row| row.get(0)).unwrap();
-        let mut roots: Vec<&str> = halving.split('\n').collect();
-        roots.sort();
-        assert_eq!(roots, [":CRYPTO", ":FIN"], "existing assignments survive the fold-in, not just new ones");
-        let loose: String = conn.query_row("SELECT drives FROM Glossary WHERE term = 'Loose'", [], |row| row.get(0)).unwrap();
-        assert_eq!(loose, "", "a term with no rows in the old table is simply uncategorized, not lost");
+        let s = |t: &str, d: &str, dr: &str| (t.to_string(), d.to_string(), dr.to_string());
+        assert_eq!(
+            glossary_rows(&conn),
+            vec![
+                s("Halving", "Supply cut", ":CRYPTO\n:FIN"),
+                s("Loose", "No drive", ""),
+                s("qt", "", ""),
+            ],
+            "existing assignments survive in one row per term, sorted; a term with none is simply uncategorized, not lost"
+        );
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn a_term_keyed_glossary_is_rebuilt_keyed_by_term_and_drives() {
+        let db_path = temp_db_path("glossary_pk");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE Glossary (term TEXT PRIMARY KEY, definition TEXT NOT NULL, drives TEXT NOT NULL DEFAULT '') STRICT",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO Glossary VALUES ('Halving', 'Supply cut', ':FIN' || char(10) || ':CRYPTO'), ('Loose', 'No drive', ''), ('qt', '', ':CRYPTO')",
+                [],
+            )
+            .unwrap();
+        }
+        init_db(&db_path).unwrap();
+        init_db(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        assert!(!table_exists(&conn, "Glossary_new").unwrap(), "the scratch table is renamed away");
+        let s = |t: &str, d: &str, dr: &str| (t.to_string(), d.to_string(), dr.to_string());
+        assert_eq!(
+            glossary_rows(&conn),
+            vec![
+                s("Halving", "Supply cut", ":CRYPTO\n:FIN"),
+                s("Loose", "No drive", ""),
+                s("qt", "", ""),
+            ],
+            "the Drive list is put in sorted order; a Quick Tag is always uncategorized"
+        );
+        // The new key allows the same term with a different definition under different Drives...
+        conn.execute("INSERT INTO Glossary VALUES ('Halving', 'Other meaning', ':UAP')", []).unwrap();
+        // ...but not twice under the same list.
+        assert!(conn.execute("INSERT INTO Glossary VALUES ('Halving', 'dup', ':UAP')", []).is_err());
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn one_row_per_drive_rows_are_folded_back_into_one_row_per_definition() {
+        let db_path = temp_db_path("glossary_merge");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE Glossary (term TEXT NOT NULL, definition TEXT NOT NULL, drives TEXT NOT NULL DEFAULT '', CONSTRAINT GLOSSARY_PK PRIMARY KEY (term, drives)) STRICT",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO Glossary VALUES ('Halving', 'Supply cut', ':FIN'), ('Halving', 'Supply cut', ':CRYPTO'), ('Halving', 'Other meaning', ':UAP'), ('Loose', 'No drive', '')",
+                [],
+            )
+            .unwrap();
+        }
+        init_db(&db_path).unwrap();
+        init_db(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        let s = |t: &str, d: &str, dr: &str| (t.to_string(), d.to_string(), dr.to_string());
+        assert_eq!(
+            glossary_rows(&conn),
+            vec![
+                s("Halving", "Supply cut", ":CRYPTO\n:FIN"),
+                s("Halving", "Other meaning", ":UAP"),
+                s("Loose", "No drive", ""),
+            ],
+            "rows sharing a term and definition become one row holding all their Drives"
+        );
         let _ = fs::remove_file(&db_path);
     }
 

@@ -1,8 +1,8 @@
 use crate::Video;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{named_params, params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use super::search::{video_columns_sql, video_row, library_order_by, filter_kind_where, build_fts_query};
+use super::search::{video_columns_sql, video_row, library_order_by, filter_kind_where, build_fts_query, parse_search_facets, glossary_tag_clause};
 use super::schema::table_exists;
 
 /// Ensures `display_path` (":UAP-GERB-VVV", display format — colon + hyphens) and every
@@ -314,61 +314,338 @@ pub fn list_videos_by_wdbs(
     let columns = video_columns_sql("v.");
     let order = library_order_by("v.", sort_field, sort_order);
     let filter_where = filter_kind_where("v.", filter_kind);
-    let fts_query = build_fts_query(query.trim());
+    // `query` can carry the same handle:/video:/tag_search:/term_search: facets as the plain
+    // Library search box (see db::search::parse_search_facets) — searching within a category
+    // used to only ever run the whole query through build_fts_query with no facet parsing at
+    // all, so a facet typed here (e.g. "handle:DavidBombal") silently matched nothing.
+    let facets = parse_search_facets(query);
+    let (handle_val, video_val, tag_val, term_val) =
+        (facets.handle.as_str(), facets.video.as_str(), facets.tag.as_str(), facets.term.as_str());
+    let fts_query = build_fts_query(&facets.free_text);
+    let tag_clause = glossary_tag_clause(false, facets.tag_exact, ":tag");
+    let term_clause = glossary_tag_clause(true, facets.term_exact, ":term");
+    let handle_like = format!("%{handle_val}%");
+    let video_like = format!("%{video_val}%");
 
     // GLOB (not LIKE) is required here: LIKE's '_' wildcard matches any single character, which
     // would treat the literal underscore segment-separator as a wildcard too. GLOB's '_' is
     // literal and '*' is the wildcard. The ids subquery only has enough columns to resolve WDBS
-    // membership, not transcript/summary state or FTS content, so filter_kind and the text
-    // search below are both applied against the outer `videos` row instead, once IN (...) has
-    // narrowed it down to this category's members.
+    // membership, not transcript/summary/facet state, so filter_kind and every facet below are
+    // all applied against the outer `v` row instead, once IN (...) has narrowed it down to this
+    // category's members.
     let matching_ids_sql = "
-        SELECT video_id FROM Videos WHERE WDBS = ?1 OR WDBS GLOB ?1 || '_*'
+        SELECT video_id FROM Videos WHERE WDBS = :wdbs_prefix OR WDBS GLOB :wdbs_prefix || '_*'
         UNION
-        SELECT video_id FROM VideoWDBSLinks WHERE wdbs = ?1 OR wdbs GLOB ?1 || '_*'
+        SELECT video_id FROM VideoWDBSLinks WHERE wdbs = :wdbs_prefix OR wdbs GLOB :wdbs_prefix || '_*'
     ";
+    let facet_where = format!(
+        "(:handle = '' OR v.handle LIKE :handle_like)
+           AND (:video = '' OR v.video_id LIKE :video_like)
+           AND {tag_clause}
+           AND {term_clause}"
+    );
 
     let mut videos = Vec::new();
     let total: i64;
 
     if fts_query.is_empty() {
-        // No search text (or nothing left after stripping a bare ':') — just the category
-        // membership + filter_kind.
-        let where_sql = format!("v.video_id IN ({matching_ids_sql}) AND {filter_where}");
+        // No free-text search term left to match on (a bare facet, or nothing typed at all) —
+        // just the category membership + facets + filter_kind.
+        let where_sql = format!("v.video_id IN ({matching_ids_sql}) AND {facet_where} AND {filter_where}");
         total = conn.query_row(
             &format!("SELECT COUNT(*) FROM Videos AS v WHERE {where_sql}"),
-            params![wdbs_prefix],
+            named_params! {
+                ":wdbs_prefix": wdbs_prefix,
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+            },
             |row| row.get(0),
         )?;
 
         let sql = format!(
-            "SELECT {columns} FROM Videos AS v WHERE {where_sql} ORDER BY {order} LIMIT ?2 OFFSET ?3"
+            "SELECT {columns} FROM Videos AS v WHERE {where_sql} ORDER BY {order} LIMIT :limit OFFSET :offset"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let iter = stmt.query_map(params![wdbs_prefix, limit, offset], |row| video_row(row, false))?;
+        let iter = stmt.query_map(
+            named_params! {
+                ":wdbs_prefix": wdbs_prefix,
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+                ":limit": limit, ":offset": offset,
+            },
+            |row| video_row(row, false),
+        )?;
         for v in iter {
             videos.push(v?);
         }
     } else {
         let where_sql = format!(
-            "v.video_id IN ({matching_ids_sql}) AND ftsVideos MATCH ?2 AND {filter_where}"
+            "v.video_id IN ({matching_ids_sql}) AND ftsVideos MATCH :fts AND {facet_where} AND {filter_where}"
         );
         let count_sql = format!(
             "SELECT COUNT(*) FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql}"
         );
-        total = conn.query_row(&count_sql, params![wdbs_prefix, fts_query], |row| row.get(0))?;
+        total = conn.query_row(
+            &count_sql,
+            named_params! {
+                ":wdbs_prefix": wdbs_prefix, ":fts": fts_query,
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+            },
+            |row| row.get(0),
+        )?;
 
         let sql = format!(
-            "SELECT {columns} FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql} ORDER BY {order} LIMIT ?3 OFFSET ?4"
+            "SELECT {columns} FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql} ORDER BY {order} LIMIT :limit OFFSET :offset"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let iter = stmt.query_map(params![wdbs_prefix, fts_query, limit, offset], |row| video_row(row, false))?;
+        let iter = stmt.query_map(
+            named_params! {
+                ":wdbs_prefix": wdbs_prefix, ":fts": fts_query,
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+                ":limit": limit, ":offset": offset,
+            },
+            |row| video_row(row, false),
+        )?;
         for v in iter {
             videos.push(v?);
         }
     }
 
     Ok((videos, total))
+}
+
+#[cfg(test)]
+mod list_by_wdbs_facet_tests {
+    use super::*;
+    use crate::db::{init_db, save_video, update_video_wdbs};
+
+    fn temp_db(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("kinesis_wdbsfacet_{}_{}.db", name, std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let p = path.to_string_lossy().to_string();
+        init_db(&p).unwrap();
+        p
+    }
+
+    // Regression test, same bug as list_unsorted_videos's narrows_by_handle_facet: searching
+    // within a Drive category used to only run the query through build_fts_query, which has no
+    // idea what "handle:DavidBombal" means, so it wasn't narrowing by handle at all.
+    #[test]
+    fn narrows_by_handle_facet_within_a_category() {
+        let db = temp_db("handle_facet");
+        save_video(&db, "a", "a", "Author", 60, "words", 1, "2026-01-01T00:00:00Z", "@DavidBombal", None).unwrap();
+        save_video(&db, "b", "b", "Author", 60, "words", 1, "2026-01-01T00:00:00Z", "@SomeoneElse", None).unwrap();
+        update_video_wdbs(&db, "a", "θψNET").unwrap();
+        update_video_wdbs(&db, "b", "θψNET").unwrap();
+
+        let (videos, total) = list_videos_by_wdbs(&db, "θψNET", "handle:DavidBombal", None, None, None, 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].id, "a");
+    }
+}
+
+/// A video counts as Unsorted when it has no home Warp Drive at all: `WDBS` is NULL, empty, the
+/// bare ':' placeholder, or the raw 'θψ' one (mirrors [`is_unassigned_sentinel`] plus NULL/'').
+/// Only ever about the video's own canonical category — an "Also in" symlink elsewhere doesn't
+/// rescue it from this list, since Unsorted specifically means nobody has ever actually filed the
+/// video anywhere (see save_video's revert of the production trigger's "_PND" guess).
+///
+/// Always qualified with the `v.` alias both callers below use: `ftsVideos` (FTS5, content='Videos')
+/// has its own `wdbs` column, so once list_unsorted_videos joins it for a text search, a bare
+/// unqualified `WDBS` here is ambiguous between the two tables and SQLite rejects the query outright.
+const UNSORTED_WHERE: &str = "(v.WDBS IS NULL OR v.WDBS = '' OR v.WDBS = ':' OR v.WDBS = 'θψ')";
+
+/// How many videos are Unsorted — the synthetic tree entry's count badge (see
+/// components/WdbsTreePanel.tsx) — kept separate from list_unsorted_videos so showing it doesn't
+/// require paging through or decoding any actual video rows.
+pub fn count_unsorted_videos(db_path: &str) -> Result<i64> {
+    let conn = Connection::open(db_path)?;
+    conn.query_row(&format!("SELECT COUNT(*) FROM Videos AS v WHERE {UNSORTED_WHERE}"), [], |row| row.get(0))
+}
+
+/// Pages the videos with no home Warp Drive — the tree's synthetic "Unsorted" entry, reachable
+/// there instead of as a real taxonomy node since it isn't one (see UNSORTED_WHERE). Mirrors
+/// list_videos_by_wdbs's shape (search/filter/sort/paging) minus its GLOB-prefix/VideoWDBSLinks
+/// membership matching, since there's no taxonomy to descend into here.
+pub fn list_unsorted_videos(
+    db_path: &str,
+    query: &str,
+    filter_kind: Option<&str>,
+    sort_field: Option<&str>,
+    sort_order: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<(Vec<Video>, i64)> {
+    let conn = Connection::open(db_path)?;
+    let columns = video_columns_sql("v.");
+    let order = library_order_by("v.", sort_field, sort_order);
+    let filter_where = filter_kind_where("v.", filter_kind);
+    // Same facet support as list_videos_by_wdbs above (handle:/video:/tag_search:/term_search:) —
+    // see parse_search_facets's doc comment for why this can't just be build_fts_query(query).
+    let facets = parse_search_facets(query);
+    let (handle_val, video_val, tag_val, term_val) =
+        (facets.handle.as_str(), facets.video.as_str(), facets.tag.as_str(), facets.term.as_str());
+    let fts_query = build_fts_query(&facets.free_text);
+    let tag_clause = glossary_tag_clause(false, facets.tag_exact, ":tag");
+    let term_clause = glossary_tag_clause(true, facets.term_exact, ":term");
+    let handle_like = format!("%{handle_val}%");
+    let video_like = format!("%{video_val}%");
+    let facet_where = format!(
+        "(:handle = '' OR v.handle LIKE :handle_like)
+           AND (:video = '' OR v.video_id LIKE :video_like)
+           AND {tag_clause}
+           AND {term_clause}"
+    );
+
+    let mut videos = Vec::new();
+    let total: i64;
+
+    if fts_query.is_empty() {
+        let where_sql = format!("{UNSORTED_WHERE} AND {facet_where} AND {filter_where}");
+        total = conn.query_row(
+            &format!("SELECT COUNT(*) FROM Videos AS v WHERE {where_sql}"),
+            named_params! {
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+            },
+            |row| row.get(0),
+        )?;
+        let sql = format!("SELECT {columns} FROM Videos AS v WHERE {where_sql} ORDER BY {order} LIMIT :limit OFFSET :offset");
+        let mut stmt = conn.prepare(&sql)?;
+        let iter = stmt.query_map(
+            named_params! {
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+                ":limit": limit, ":offset": offset,
+            },
+            |row| video_row(row, false),
+        )?;
+        for v in iter {
+            videos.push(v?);
+        }
+    } else {
+        let where_sql = format!("{UNSORTED_WHERE} AND ftsVideos MATCH :fts AND {facet_where} AND {filter_where}");
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql}"
+        );
+        total = conn.query_row(
+            &count_sql,
+            named_params! {
+                ":fts": fts_query,
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+            },
+            |row| row.get(0),
+        )?;
+        let sql = format!(
+            "SELECT {columns} FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql} ORDER BY {order} LIMIT :limit OFFSET :offset"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let iter = stmt.query_map(
+            named_params! {
+                ":fts": fts_query,
+                ":handle": handle_val, ":handle_like": handle_like,
+                ":video": video_val, ":video_like": video_like,
+                ":tag": tag_val, ":term": term_val,
+                ":limit": limit, ":offset": offset,
+            },
+            |row| video_row(row, false),
+        )?;
+        for v in iter {
+            videos.push(v?);
+        }
+    }
+
+    Ok((videos, total))
+}
+
+#[cfg(test)]
+mod unsorted_tests {
+    use super::*;
+    use crate::db::{add_video_wdbs_link, init_db, save_video, update_video_wdbs};
+
+    fn temp_db(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("kinesis_unsorted_{}_{}.db", name, std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let p = path.to_string_lossy().to_string();
+        init_db(&p).unwrap();
+        p
+    }
+
+    fn video(db: &str, id: &str) {
+        save_video(db, id, id, "Author", 60, "words", 1, "2026-01-01T00:00:00Z", "@Creator", None).unwrap();
+    }
+
+    #[test]
+    fn counts_and_lists_only_videos_with_no_home_drive() {
+        let db = temp_db("basic");
+        video(&db, "a"); // save_video leaves a freshly-saved video unassigned (":")
+        video(&db, "b");
+        video(&db, "c");
+        update_video_wdbs(&db, "b", "θψCRYPTO_DOAC").unwrap();
+        update_video_wdbs(&db, "c", "θψ").unwrap(); // the raw placeholder also counts as unsorted
+        add_video_wdbs_link(&db, "b", "θψNEWS").unwrap(); // a symlink elsewhere doesn't rescue "b"
+
+        assert_eq!(count_unsorted_videos(&db).unwrap(), 2);
+        let (videos, total) = list_unsorted_videos(&db, "", None, None, None, 10, 0).unwrap();
+        assert_eq!(total, 2);
+        let mut ids: Vec<&str> = videos.iter().map(|v| v.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn assigning_a_drive_removes_it_from_unsorted() {
+        let db = temp_db("assign");
+        video(&db, "a");
+        assert_eq!(count_unsorted_videos(&db).unwrap(), 1);
+        update_video_wdbs(&db, "a", "θψFIN").unwrap();
+        assert_eq!(count_unsorted_videos(&db).unwrap(), 0);
+    }
+
+    // Regression test: a non-empty query makes list_unsorted_videos join ftsVideos, which (per
+    // schema.rs) has its own "wdbs" column alongside Videos' "WDBS" — an unqualified WDBS in
+    // UNSORTED_WHERE used to make that join's WHERE clause ambiguous and SQLite reject the whole
+    // query outright, surfacing in the UI as "Failed to load Library" the moment a user typed
+    // anything into the search box while Unsorted was selected.
+    #[test]
+    fn narrowing_by_search_text_does_not_error() {
+        let db = temp_db("search");
+        save_video(&db, "a", "Widget Repair Guide", "Author", 60, "words", 1, "2026-01-01T00:00:00Z", "@Creator", None).unwrap();
+        save_video(&db, "b", "Something Else Entirely", "Author", 60, "words", 1, "2026-01-01T00:00:00Z", "@Creator", None).unwrap();
+        update_video_wdbs(&db, "b", "θψFIN").unwrap();
+
+        let (videos, total) = list_unsorted_videos(&db, "Widget", None, None, None, 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].id, "a");
+    }
+
+    // Regression test: a `handle:` facet (what the search bar turns "@DavidBombal" into) used to
+    // be silently ignored while browsing Unsorted — list_unsorted_videos only ever ran the raw
+    // query through build_fts_query, which doesn't know about facets at all, so it matched every
+    // unsorted video regardless of handle instead of narrowing to just this one's.
+    #[test]
+    fn narrows_by_handle_facet() {
+        let db = temp_db("handle_facet");
+        save_video(&db, "a", "a", "Author", 60, "words", 1, "2026-01-01T00:00:00Z", "@DavidBombal", None).unwrap();
+        save_video(&db, "b", "b", "Author", 60, "words", 1, "2026-01-01T00:00:00Z", "@SomeoneElse", None).unwrap();
+
+        let (videos, total) = list_unsorted_videos(&db, "handle:DavidBombal", None, None, None, 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].id, "a");
+    }
 }
 
 /// Every distinct Warp Drive path currently assigned to at least one video (canonical or
@@ -482,11 +759,10 @@ pub fn get_wdbs_roots(db_path: &str) -> Result<Vec<WdbsRoot>> {
     }
     // Glossary is Kinesis-owned and always exists (see db/schema.rs), unlike tblWDBS above.
     {
-        let mut stmt = conn.prepare("SELECT drives FROM Glossary WHERE drives != ''")?;
+        let mut stmt = conn.prepare("SELECT DISTINCT drives FROM Glossary WHERE drives != ''")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         for raw in rows.filter_map(|r| r.ok()) {
-            for path in raw.split('\n').filter(|r| !r.is_empty()) {
-                let path = path.to_string();
+            for path in super::glossary::decode_drives(&raw) {
                 let segment = path.trim_start_matches(':').to_string();
                 roots.entry(path.clone()).or_insert(WdbsRoot { path, segment, alias: None });
             }

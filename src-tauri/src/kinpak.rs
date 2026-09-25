@@ -343,7 +343,8 @@ fn write_pack(
                     obj.insert("date_added".into(), Value::String(when.clone()));
                 }
             }
-            out.item(kind.as_str(), key, data)?;
+            let key = scope.as_ref().map_or_else(|| key.to_string(), |s| s.item_key(kind, key, &data));
+            out.item(kind.as_str(), &key, data)?;
             done += 1;
             // A big library takes a while: say how far along it is, not just what it's on.
             if !label.is_empty() && done % 200 == 0 {
@@ -961,7 +962,7 @@ mod tests {
         .unwrap();
         conn.execute("INSERT INTO VideoWDBSLinks (video_id, wdbs) VALUES ('vid1', 'θψCRYPTO')", []).unwrap();
         conn.execute("INSERT INTO DriveSequence (drive, video_id, position) VALUES (':UAP', 'vid1', 1)", []).unwrap();
-        conn.execute("INSERT INTO Glossary (term, definition, drives) VALUES ('term', 'def', ':UAP' || char(10) || ':FIN')", []).unwrap();
+        conn.execute("INSERT INTO Glossary (term, definition, drives) VALUES ('term', 'def', ':FIN' || char(10) || ':UAP')", []).unwrap();
         conn.execute("INSERT OR REPLACE INTO Biographies (handle, display_name, bio, subscriber_count) VALUES ('@auth', 'Auth', 'Bio', 42)", []).unwrap();
         conn.execute("INSERT INTO CustomPrompts (handle, local_prompt_text, cloud_prompt_text) VALUES ('@auth', 'local', 'cloud')", []).unwrap();
         conn.execute("INSERT INTO WorkspaceLabels (key, value) VALUES ('workspaceName', 'Metabolic Warp Drive'), ('aliasLibrary', 'Portal')", []).unwrap();
@@ -1054,10 +1055,7 @@ mod tests {
         assert_eq!(links, 1);
         let position: i64 = conn.query_row("SELECT position FROM DriveSequence WHERE drive=':UAP' AND video_id='vid1'", [], |r| r.get(0)).unwrap();
         assert_eq!(position, 1);
-        let drives: String = conn.query_row("SELECT drives FROM Glossary WHERE term='term'", [], |r| r.get(0)).unwrap();
-        let mut roots: Vec<&str> = drives.split('\n').collect();
-        roots.sort();
-        assert_eq!(roots.join(","), ":FIN,:UAP");
+        assert_eq!(column(&dst, "SELECT replace(drives, char(10), ',') FROM Glossary WHERE term='term'").join(";"), ":FIN,:UAP", "one row holding both Drives");
         let prompt: String = conn.query_row("SELECT cloud_prompt_text FROM CustomPrompts WHERE handle='@auth'", [], |r| r.get(0)).unwrap();
         assert_eq!(prompt, "cloud");
         assert_eq!(db::get_setting(&dst, "showBiography").unwrap().as_deref(), Some("false"));
@@ -1209,12 +1207,12 @@ mod tests {
 
         let dst = temp_db("own_dst");
         let conn = Connection::open(&dst).unwrap();
-        conn.execute("INSERT INTO Glossary (term, definition) VALUES ('term', 'server version')", []).unwrap();
-        conn.execute("INSERT INTO SyncItems (kind, item_key, rev, content_hash) VALUES ('glossary', 'term', 1, 'h')", []).unwrap();
+        conn.execute("INSERT INTO Glossary (term, definition, drives) VALUES ('term', 'server version', ':FIN')", []).unwrap();
+        conn.execute("INSERT INTO SyncItems (kind, item_key, rev, content_hash) VALUES ('glossary', ':FIN|term', 1, 'h')", []).unwrap();
         drop(conn);
         let imported = import_pack(&dst, &out, ImportOptions { apply_settings: false }, |_| {}).unwrap();
         let conn = Connection::open(&dst).unwrap();
-        let def: String = conn.query_row("SELECT definition FROM Glossary WHERE term='term'", [], |r| r.get(0)).unwrap();
+        let def: String = conn.query_row("SELECT definition FROM Glossary WHERE term='term' AND drives=':FIN'", [], |r| r.get(0)).unwrap();
         assert_eq!(def, "server version");
         assert!(imported.skipped >= 1);
         assert_eq!(imported.settings_applied, 0);
@@ -1362,7 +1360,7 @@ mod tests {
         for (label, sql) in [
             ("video", "SELECT video_id||'|'||IFNULL(title,'')||'|'||IFNULL(author,'')||'|'||handle||'|'||IFNULL(length_seconds,'')||'|'||IFNULL(transcript,'')||'|'||IFNULL(summary,'')||'|'||IFNULL(view_count,'')||'|'||IFNULL(published_at,'')||'|'||IFNULL(tags,'')||'|'||WDBS FROM Videos ORDER BY video_id"),
             ("bio", "SELECT handle||'|'||display_name||'|'||bio||'|'||website FROM Biographies ORDER BY handle"),
-            ("glossary", "SELECT term||'|'||definition FROM Glossary ORDER BY term"),
+            ("glossary", "SELECT term||'|'||drives||'|'||definition FROM Glossary ORDER BY term, drives"),
             ("link", "SELECT video_id||'|'||WDBS FROM VideoWDBSLinks ORDER BY 1"),
             ("wdbs", "SELECT WDBS||'|'||lev||'|'||WDID||'|'||WDInfo||'|'||WDIcon FROM tblWDBS WHERE WDBS <> ':' ORDER BY WDBS"),
             ("prompt", "SELECT handle||'|'||IFNULL(local_prompt_text,'')||'|'||IFNULL(cloud_prompt_text,'') FROM CustomPrompts ORDER BY handle"),
@@ -1373,17 +1371,6 @@ mod tests {
             let mut stmt = conn.prepare(sql).unwrap();
             for row in stmt.query_map([], |r| r.get::<_, String>(0)).unwrap() {
                 out.push(format!("{label}: {}", row.unwrap()));
-            }
-        }
-        // drives: lives on Glossary itself now (newline-joined), expanded to one snapshot line
-        // per (term, root) pair so this still catches the same granularity of drift as before.
-        let mut stmt = conn.prepare("SELECT term, drives FROM Glossary WHERE drives != '' ORDER BY term").unwrap();
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap() {
-            let (term, drives) = row.unwrap();
-            let mut roots: Vec<&str> = drives.split('\n').filter(|r| !r.is_empty()).collect();
-            roots.sort();
-            for root in roots {
-                out.push(format!("drives: {term}|{root}"));
             }
         }
         out
@@ -1401,7 +1388,7 @@ mod tests {
         db::save_video(&src, "vid2", "Second", "Author", 30, "other words", 5, "2024-02-03", "@auth", None).unwrap();
         db::update_video_wdbs(&src, "vid1", "θψUAP").unwrap();
         db::add_video_wdbs_link(&src, "vid1", "θψFIN").unwrap();
-        db::save_glossary_term(&src, None, "Halving", "Supply cut", &[":FIN".to_string()]).unwrap();
+        db::save_glossary_term(&src, None, "Halving", "Supply cut", ":FIN").unwrap();
         db::set_custom_prompt(&src, "@auth", Some("local"), Some("cloud")).unwrap();
         db::attachments::add_attachment(&src, "vid1", "notes.txt", b"hello attachment ".repeat(500)).unwrap();
         db::attachments::set_note(&src, "vid1", "my note").unwrap();
@@ -1453,7 +1440,7 @@ mod tests {
         video("m2", "θψFIN", "@mixed", "");
         video("u1", ":", "@free", "");
         conn.execute("INSERT INTO VideoWDBSLinks (video_id, wdbs) VALUES ('m1', 'θψFIN'), ('m2', 'θψUAP_GERB')", []).unwrap();
-        for (term, drives) in [("OnlyUap", ":UAP"), ("Both", ":UAP\n:FIN"), ("Free", ""), ("OnlyFin", ":FIN")] {
+        for (term, drives) in [("OnlyUap", ":UAP"), ("Both", ":FIN\n:UAP"), ("Free", ""), ("OnlyFin", ":FIN")] {
             conn.execute("INSERT INTO Glossary (term, definition, drives) VALUES (?1, 'defined', ?2)", params![term, drives]).unwrap();
         }
         for handle in ["@uapguy", "@fingal", "@mixed", "@free"] {
@@ -1473,8 +1460,7 @@ mod tests {
         stmt.query_map([], |r| r.get::<_, String>(0)).unwrap().filter_map(|r| r.ok()).collect()
     }
 
-    /// "TermRoot" for every (term, root) filing, sorted — drives lives on Glossary itself now
-    /// (newline-joined), so this expands it the way `column`'s single-SQL-column shape can't.
+    /// "TermRoot" for every (term, Drive) filing, sorted — a row holds a newline-separated list.
     fn glossary_drive_pairs(db: &str) -> Vec<String> {
         let conn = Connection::open(db).unwrap();
         let mut stmt = conn.prepare("SELECT term, drives FROM Glossary WHERE drives != ''").unwrap();
@@ -1483,7 +1469,7 @@ mod tests {
             .unwrap()
             .flat_map(|row| {
                 let (term, drives) = row.unwrap();
-                drives.split('\n').filter(|r| !r.is_empty()).map(move |root| format!("{term}{root}")).collect::<Vec<_>>()
+                drives.lines().map(move |root| format!("{term}{root}")).collect::<Vec<_>>()
             })
             .collect();
         out.sort();
