@@ -1,6 +1,6 @@
 /* The screen shown while switching between workspaces: a 5x5 block of cells running Conway's Game of
    Life, drawn like the board behind the Workspaces screen (src/components/workspace/LifeBackground.tsx):
-   plain circles in the theme's text color, fading in and out, a newborn glowing in the accent color.
+   plain squares in the theme's text color, fading in and out, a newborn glowing in the accent color.
    Loaded as a plain script ahead of the app (index.html), so it can be up the instant the page starts
    loading after a switch reloads the window (see src/lib/transitions.ts, which shows it as the old page
    zooms away and hides it once the new one is ready).
@@ -38,7 +38,7 @@
         var cells = [];
         for (var i = 0; i < SIZE * SIZE; i++) {
             var c = document.createElement('div');
-            c.style.cssText = 'background:' + look.fg + ';opacity:0;border-radius:50%;';
+            c.style.cssText = 'background:' + look.fg + ';opacity:0;';
             grid.appendChild(c);
             cells.push(c);
         }

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
  * The app's loading animation for anything that takes a while (an import, an export, a sync, a
  * transcript): a 5x5 block of cells running Conway's Game of Life on a board that wraps at its edges,
  * the same one shown between workspaces (public/k-life.js — plain script, so its rules are repeated
- * there) and drawn like the board behind the Workspaces screen: plain circles in the theme's text
+ * there) and drawn like the board behind the Workspaces screen: plain squares in the theme's text
  * color that fade in and out, a newborn glowing in the accent color. Every theme gets it for free.
  * When it dies out or starts repeating it is seeded again.
  *
@@ -74,7 +74,6 @@ export function LifeLoader({ cell = 5, gap = 1, className = "" }: Props) {
                 <div
                     key={i}
                     style={{
-                        borderRadius: "50%",
                         // A newborn starts in the accent color and settles into the text color.
                         backgroundColor: state.born[i] ? "var(--k-accent)" : "var(--k-text-white)",
                         opacity: alive ? (state.born[i] ? 0.6 : 0.3) : 0,
