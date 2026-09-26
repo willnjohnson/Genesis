@@ -62,9 +62,9 @@ export function LifeBackground() {
         let dragged = false;
         let downCell = { x: 0, y: 0 };
         let lastCell = { x: 0, y: 0 };
-        // The Konami code toggles this. Read by fillCell below; nothing else about the simulation
-        // or the interaction changes, just how a filled-in cell is drawn.
-        let circles = false;
+        // Cells are circles, like the loading animation's. The Konami code toggles this (to squares, from here). Read
+        // by fillCell below; nothing else about the simulation or the interaction changes, just how a filled-in cell is drawn.
+        let circles = true;
 
         const fillCell = (x: number, y: number, size: number) => {
             if (circles) {

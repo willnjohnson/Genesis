@@ -892,6 +892,23 @@ function App() {
         return { text: `L${segments.length}`, tooltip: ancestors.length > 0 ? `:${ancestors.join('-')}` : undefined };
     })();
 
+    // Where the Videos section starts on screen (right of the navigation rail and the Drive panel, when it is open):
+    // the Summarize All button is placed from it, so it stays in the Videos section instead of over the Drive panel.
+    const [videosLeft, setVideosLeft] = useState(0);
+    useEffect(() => {
+        const el = scrollContainerRef.current;
+        if (viewMode !== 'library' || !el) return;
+        const measure = () => setVideosLeft(Math.round(el.getBoundingClientRect().left));
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(el);
+        window.addEventListener('resize', measure);
+        return () => {
+            observer.disconnect();
+            window.removeEventListener('resize', measure);
+        };
+    }, [viewMode, showDrivePanel, showDrive, navigationOrientation]);
+
     // Deleting the video the dialog asked about (or, with Confirm Before Deleting off, the one a delete button asked
     // about, with no dialog at all).
     const runConfirmedDelete = async () => {
@@ -1282,7 +1299,7 @@ function App() {
                                     scrollContainerRef={scrollContainerRef}
                                 />
                                 {displayedVideos.length > 0 && search.continuationToken && !search.isSearch && (
-                                    <div className="mt-16 pb-10 text-center flex justify-center gap-4">
+                                    <div className="mt-16 pb-20 text-center flex justify-center gap-4">
                                         <button
                                             onClick={search.handleLoadMore}
                                             disabled={search.loadingMore}
@@ -1490,8 +1507,10 @@ function App() {
                 <button
                     onClick={library.handleSummarizeAll}
                     disabled={!!library.summarizeProgress}
-                    className={`fixed left-20 summarize-btn px-4 py-2.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-500 hover:to-blue-500 rounded-lg text-sm font-bold transition-all shadow-lg hover:shadow-purple-500/25 disabled:opacity-50 flex items-center gap-2 z-40 ${!library.summarizeProgress ? 'cursor-pointer' : 'cursor-default'}`}
-                    style={{ bottom: 'max(3rem, calc(var(--k-bottom-bar-height, 0px) + 1rem))' }}
+                    className={`fixed summarize-btn h-10 px-4 bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-500 hover:to-blue-500 rounded-lg text-sm font-bold transition-all shadow-lg hover:shadow-purple-500/25 disabled:opacity-50 flex items-center gap-2 z-40 ${!library.summarizeProgress ? 'cursor-pointer' : 'cursor-default'}`}
+                    // At the left edge of the Videos section (wherever the Drive panel leaves it), on the same line as
+                    // the back-to-top button at the right, so it never sits over the Drive panel.
+                    style={{ left: videosLeft + 16, bottom: 'max(3rem, calc(var(--k-bottom-bar-height, 0px) + 1rem))' }}
                 >
                     {library.summarizeProgress ? (
                         <>

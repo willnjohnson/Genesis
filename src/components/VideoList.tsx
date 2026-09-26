@@ -630,7 +630,9 @@ export function VideoList({
     );
 
     return (
-        <div className="w-full">
+        // pb-20: room at the very bottom for the floating back-to-top and Summarize All buttons (App.tsx), so
+        // they never sit on the last thumbnails when scrolled all the way down (Glossary and Biography do the same).
+        <div className="w-full pb-20">
             {/* Bare heading (plus Save All) — same convention as Glossary/Biography's own top
                 heading — while the rest (count, sort, filter) lives in the fixed bar below the
                 grid, always (see BottomBar.tsx). sticky top-0 (with a solid bg, since this scrolls
