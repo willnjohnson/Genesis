@@ -2,7 +2,7 @@ use crate::{Video, types::normalize_published_at};
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use super::summaries::{append_channel_info_footer, clean_blockquote_lines, clear_transcript_after_summary, has_real_summary};
 use super::settings::get_setting_bool;
-use super::search::{regenerate_tokens_from_transcript, video_row, video_columns_sql, filter_kind_where, library_order_by};
+use super::search::{video_row, video_columns_sql, filter_kind_where, library_order_by};
 
 /// Pages the Library grid: optionally filtered by `filter_kind` ("transcript"/"summary"/
 /// None-or-"all"), ordered per `sort_field`/`sort_order` (see `library_order_by`), and capped to
@@ -113,7 +113,7 @@ pub fn save_video(
         "UPDATE Videos SET WDBS = ':' WHERE video_id = ?1 AND WDBS = 'θψ'",
         params![video_id],
     );
-    regenerate_tokens_from_transcript(&conn, video_id)?;
+    super::tokens::regenerate_tokens(&conn, video_id)?;
     // Covers the "summarize before saving" workflow: a real summary can already be provided
     // at insert time, so it needs the same quote-marker cleanup applied on later saves.
     clean_blockquote_lines(&conn, video_id)?;
@@ -184,7 +184,12 @@ mod pending_drive_guess_tests {
 /// SQLite triggers (see db/schema.rs), not here. Links to the video (and to its channel's
 /// biography, if that went with it) are removed from the text that held them, see db/links.rs.
 pub fn delete_video(db_path: &str, video_id: &str) -> Result<()> {
-    use super::links::{apply_link_edits, LinkEdit, LinkKind};
+    delete_video_recorded(db_path, video_id).map(|_| ())
+}
+
+/// `delete_video`, returning the texts whose links to the video were removed (the Trash puts them back).
+pub fn delete_video_recorded(db_path: &str, video_id: &str) -> Result<Vec<super::links::TextChange>> {
+    use super::links::{apply_link_edits_recorded, LinkEdit, LinkKind};
     let conn = Connection::open(db_path)?;
     let handle: Option<String> = conn
         .query_row("SELECT handle FROM Videos WHERE video_id = ?", params![video_id], |r| r.get(0))
@@ -209,10 +214,13 @@ pub fn delete_video(db_path: &str, video_id: &str) -> Result<()> {
     }
     drop(conn);
     // The delete itself has succeeded; a failure tidying links must not undo or hide that.
-    if let Err(e) = apply_link_edits(db_path, &edits) {
-        log::warn!("Couldn't remove links to deleted video {video_id}: {e}");
+    match apply_link_edits_recorded(db_path, &edits) {
+        Ok(changes) => Ok(changes),
+        Err(e) => {
+            log::warn!("Couldn't remove links to deleted video {video_id}: {e}");
+            Ok(Vec::new())
+        }
     }
-    Ok(())
 }
 
 /// One saved video by id, or None when it isn't in the library.
@@ -367,6 +375,96 @@ pub fn get_library_stats(db_path: &str) -> Result<LibraryStats> {
     })
 }
 
+/// A saved video, as much as the search box needs to complete its ID and say what it is.
+#[derive(Debug, serde::Serialize, Clone, PartialEq)]
+pub struct SuggestedVideo {
+    pub id: String,
+    pub title: String,
+}
+
+/// A saved channel: its handle (no leading "@") and the name it goes by.
+#[derive(Debug, serde::Serialize, Clone, PartialEq)]
+pub struct SuggestedHandle {
+    pub handle: String,
+    pub name: String,
+}
+
+/// A saved channel by its display name (with its handle when its videos have one).
+#[derive(Debug, serde::Serialize, Clone, PartialEq)]
+pub struct SuggestedChannel {
+    pub name: String,
+    pub handle: String,
+}
+
+/// What the search box completes from: the saved handles (one per handle whatever its capitalization, the
+/// ones with the most videos first), the saved channel names (the same, from the videos' author, so a channel
+/// whose videos have no handle is still there), and every saved video's ID and title.
+#[derive(Debug, serde::Serialize, Default, PartialEq)]
+pub struct SearchSuggestions {
+    pub handles: Vec<SuggestedHandle>,
+    pub channels: Vec<SuggestedChannel>,
+    pub videos: Vec<SuggestedVideo>,
+}
+
+pub fn get_search_suggestions(db_path: &str) -> Result<SearchSuggestions> {
+    let conn = Connection::open(db_path)?;
+    let handles = conn
+        .prepare(
+            "SELECT LTRIM(handle, '@'), COALESCE(MAX(author), '') FROM Videos
+              WHERE handle IS NOT NULL AND LTRIM(handle, '@') != ''
+              GROUP BY LOWER(LTRIM(handle, '@'))
+              ORDER BY COUNT(*) DESC, LOWER(LTRIM(handle, '@'))",
+        )?
+        .query_map([], |row| Ok(SuggestedHandle { handle: row.get(0)?, name: row.get(1)? }))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let channels = conn
+        .prepare(
+            "SELECT author, COALESCE(MAX(LTRIM(handle, '@')), '') FROM Videos
+              WHERE author IS NOT NULL AND author != ''
+              GROUP BY LOWER(author)
+              ORDER BY COUNT(*) DESC, LOWER(author)",
+        )?
+        .query_map([], |row| Ok(SuggestedChannel { name: row.get(0)?, handle: row.get(1)? }))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let videos = conn
+        .prepare("SELECT video_id, COALESCE(title, '') FROM Videos ORDER BY video_id")?
+        .query_map([], |row| Ok(SuggestedVideo { id: row.get(0)?, title: row.get(1)? }))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(SearchSuggestions { handles, channels, videos })
+}
+
+#[cfg(test)]
+mod search_suggestion_tests {
+    use super::*;
+    use crate::db::init_db;
+
+    #[test]
+    fn lists_handles_by_how_many_videos_they_have_and_every_video() {
+        let path = std::env::temp_dir().join(format!("kinesis_suggest_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = path.to_string_lossy().to_string();
+        init_db(&db).unwrap();
+        assert_eq!(get_search_suggestions(&db).unwrap(), SearchSuggestions::default());
+        for (id, handle) in [("a", "@Zed"), ("b", "@alpha"), ("c", "@Alpha"), ("d", "")] {
+            save_video(&db, id, &format!("Title {id}"), "Author", 60, "words", 1, "2026-01-01T00:00:00Z", handle, None).unwrap();
+        }
+        let got = get_search_suggestions(&db).unwrap();
+        // "@alpha" and "@Alpha" are one channel (two videos), so it comes before Zed's one.
+        assert_eq!(got.handles.len(), 2);
+        assert_eq!(got.handles[0].handle.to_lowercase(), "alpha");
+        assert_eq!(got.handles[0].name, "Author");
+        assert_eq!(got.handles[1].handle, "Zed");
+        // Channel names come from the author, so the video with no handle ("d") still has one.
+        assert_eq!(got.channels.len(), 1);
+        assert_eq!(got.channels[0].name, "Author");
+        assert_eq!(got.videos.len(), 4);
+        assert_eq!(got.videos[0], SuggestedVideo { id: "a".into(), title: "Title a".into() });
+    }
+}
+
 #[cfg(test)]
 mod library_stats_tests {
     use super::*;
@@ -437,11 +535,14 @@ pub fn get_video_count(
 
 pub fn save_transcript(db_path: &str, video_id: &str, transcript: &str) -> Result<()> {
     let conn = Connection::open(db_path)?;
-    conn.execute(
+    // One transaction: the transcript and its tokens land together (and in one disk sync, not two).
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "UPDATE Videos SET transcript = ?1 WHERE video_id = ?2",
         params![transcript, video_id],
     )?;
-    regenerate_tokens_from_transcript(&conn, video_id)?;
+    super::tokens::regenerate_tokens(&tx, video_id)?;
+    tx.commit()?;
     Ok(())
 }
 

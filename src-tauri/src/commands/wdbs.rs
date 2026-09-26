@@ -323,6 +323,13 @@ pub async fn get_handle_drives(app: tauri::AppHandle, handle: String) -> Result<
     db::get_handle_drives(&db_path, &handle).map_err(|e| e.to_string())
 }
 
+/// What the search box completes handles and video IDs from (see db::get_search_suggestions).
+#[command]
+pub async fn get_search_suggestions(app: tauri::AppHandle) -> Result<db::SearchSuggestions, String> {
+    let db_path = get_db_path(&app);
+    db::get_search_suggestions(&db_path).map_err(|e| e.to_string())
+}
+
 /// Curated aliases for the given Drive paths (storage form), keyed by that same path. Drives without
 /// an alias of their own are left out. For the tooltips on a video's Drive and "Also in" tags.
 #[command]

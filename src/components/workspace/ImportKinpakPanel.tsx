@@ -72,7 +72,7 @@ export function ImportKinpakPanel({ defaultLocation, onBack }: Props) {
                 setResult(done);
                 setBusy(false);
             } else {
-                reloadApp();
+                reloadApp(name);
             }
         } catch (e) {
             setError(errText(e));
@@ -96,7 +96,7 @@ export function ImportKinpakPanel({ defaultLocation, onBack }: Props) {
                         <ul className="list-disc ml-4 mt-1 break-words">{result.summary.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>
                     </div>
                 </div>
-                <button onClick={reloadApp} className={`w-full ${primaryBtn}`}>Open the workspace</button>
+                <button onClick={() => reloadApp(name)} className={`w-full ${primaryBtn}`}>Open the workspace</button>
             </div>
         );
     }

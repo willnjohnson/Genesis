@@ -38,6 +38,7 @@ pub const FEATURE_FLAGS: &[(&str, &str)] = &[
     ("allowSaveToLibrary", "true"),
     ("allowSaveAll", "true"),
     ("allowDeletionLibrary", "true"),
+    ("confirmBeforeDeleting", "true"),
     ("allowSummarizeAll", "true"),
     // ── Video detail panel
     ("showVideoPlayer", "true"),

@@ -5,6 +5,46 @@ use crate::{get_db_path, db, types::*};
 use crate::sync::license::{self, Route};
 use crate::youtube::{self, YouTubeClient, ClientType, decode_html};
 
+/// The bad-key message. The Search screen turns its "YouTube API key" into a link to the API Key
+/// settings (VideoList.tsx matches this exact text), so change them together.
+const BAD_KEY_MESSAGE: &str = "Your YouTube API key isn't valid.";
+
+/// Why a Data API call failed, as a sentence for the person searching. The API answers a bad key
+/// with an ordinary error body (HTTP 400, reason `keyInvalid`), so there's no separate "check my key"
+/// call: the first real request says. Anything not recognized keeps Google's own message.
+fn youtube_api_error(res: &Value) -> String {
+    let error = &res["error"];
+    let message = error["message"].as_str().unwrap_or("Unknown");
+    // The reason sits in `errors[0].reason` (e.g. "keyInvalid"), and newer responses repeat it in
+    // `details[].reason` (e.g. "API_KEY_INVALID").
+    let reasons: Vec<&str> = error["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["reason"].as_str())
+        .chain(error["details"].as_array().into_iter().flatten().filter_map(|d| d["reason"].as_str()))
+        .collect();
+    let has = |wanted: &[&str]| reasons.iter().any(|r| wanted.contains(r));
+    if has(&["keyInvalid", "API_KEY_INVALID"]) || message.contains("API key not valid") {
+        BAD_KEY_MESSAGE.to_string()
+    } else if has(&["quotaExceeded", "dailyLimitExceeded", "rateLimitExceeded", "RATE_LIMIT_EXCEEDED"]) {
+        "Your YouTube API quota has run out. It resets daily (midnight Pacific time).".to_string()
+    } else if has(&["accessNotConfigured", "SERVICE_DISABLED"]) {
+        "The YouTube Data API v3 isn't enabled for this API key's Google Cloud project. Enable it there, then try again.".to_string()
+    } else if has(&["ipRefererBlocked", "API_KEY_HTTP_REFERRER_BLOCKED", "API_KEY_IP_ADDRESS_BLOCKED", "API_KEY_ANDROID_APP_BLOCKED", "API_KEY_IOS_APP_BLOCKED"]) {
+        "This YouTube API key has restrictions (IP address or referrer) that block Kinesis. Remove them or use an unrestricted key.".to_string()
+    } else {
+        format!("API Error: {message}")
+    }
+}
+
+/// A problem with the key or the account itself, which no other request will get around (unlike a
+/// missing playlist, where searching instead may still work): worth stopping on rather than trying
+/// the costlier fallback.
+fn is_key_problem(res: &Value) -> bool {
+    !youtube_api_error(res).starts_with("API Error:")
+}
+
 /// Parses an ISO-8601 duration as returned by the Data API's contentDetails.duration
 /// (e.g. "PT1H2M30S", "PT45S") into whole seconds.
 fn parse_iso8601_duration_secs(s: &str) -> Option<i32> {
@@ -209,6 +249,11 @@ pub async fn fetch_channel_videos_v3(
     let mut res: Value = route.apply(client.get(&url)).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
 
     if res.get("error").is_some() {
+        // A bad key or spent quota would fail the same way on the fallback below (and searching
+        // costs far more quota than listing a playlist), so say so now.
+        if is_key_problem(&res) {
+            return Err(youtube_api_error(&res));
+        }
         let mut search_path = format!(
             "youtube/v3/search?part=snippet&maxResults=50&channelId={}&order=date&type=video",
             channel_id
@@ -219,7 +264,7 @@ pub async fn fetch_channel_videos_v3(
         let search_url = route.url(&search_path);
         res = route.apply(client.get(&search_url)).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
         if res.get("error").is_some() {
-            return Err(format!("API Error: {}", res["error"]["message"].as_str().unwrap_or("Unknown")));
+            return Err(youtube_api_error(&res));
         }
     }
 
@@ -361,7 +406,7 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
         let res: Value = route.apply(client.get(&url)).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
 
         if res.get("error").is_some() {
-            return Err(format!("API Error: {}", res["error"]["message"].as_str().unwrap_or("Unknown")));
+            return Err(youtube_api_error(&res));
         }
 
         let next_page_token = res["nextPageToken"].as_str().map(|s| s.to_string());
@@ -439,4 +484,37 @@ pub async fn search_videos(app: tauri::AppHandle, query: String, continuation: O
     }
 
     Ok(VideoResponse { videos, continuation: page.continuation, total_count: None })
+}
+
+#[cfg(test)]
+mod api_error_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_bad_key_is_reported_as_one() {
+        let older = json!({"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.",
+            "errors": [{"message": "API key not valid. Please pass a valid API key.", "domain": "global", "reason": "keyInvalid"}]}});
+        let newer = json!({"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT",
+            "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID"}]}});
+        for res in [older, newer] {
+            assert!(youtube_api_error(&res).starts_with("Your YouTube API key isn't valid"), "{res}");
+            assert!(is_key_problem(&res));
+        }
+    }
+
+    #[test]
+    fn quota_and_a_disabled_api_have_their_own_messages() {
+        let quota = json!({"error": {"code": 403, "message": "The request cannot be completed because you have exceeded your quota.", "errors": [{"reason": "quotaExceeded"}]}});
+        assert!(youtube_api_error(&quota).contains("quota has run out"));
+        let disabled = json!({"error": {"code": 403, "message": "YouTube Data API v3 has not been used in project 1 before or it is disabled.", "errors": [{"reason": "accessNotConfigured"}]}});
+        assert!(youtube_api_error(&disabled).contains("isn't enabled"));
+    }
+
+    #[test]
+    fn anything_else_keeps_googles_message_and_still_allows_the_fallback() {
+        let missing = json!({"error": {"code": 404, "message": "The playlist identified with the request's playlistId parameter cannot be found.", "errors": [{"reason": "playlistNotFound"}]}});
+        assert!(youtube_api_error(&missing).starts_with("API Error: The playlist"));
+        assert!(!is_key_problem(&missing), "a missing playlist may still be found by searching");
+    }
 }

@@ -448,22 +448,64 @@ mark {
     background: var(--k-scrollbar-thumb-hover);
 }
 
-/* PixelLoader (components/PixelLoader.tsx): the invader marches along its lane in steps, the runner's
-   ground scrolls under it. Both hold still for people who ask for reduced motion. */
-@keyframes k-pixel-march {
-    from { transform: translateX(calc(var(--k-march, 28px) / -2)); }
-    to { transform: translateX(calc(var(--k-march, 28px) / 2)); }
+/* Settings cog: a quarter turn while the button is hovered, turning back when the mouse leaves. */
+.k-spin-once { transition: transform 0.22s ease-out; }
+:hover > .k-spin-once { transform: rotate(90deg); }
+
+/* Grid/compact toggle, on hover: the grid icon grows and shrinks with a bounce; the list icon
+   is drawn in from left to right. */
+@keyframes k-pop {
+    0% { transform: scale(1); }
+    40% { transform: scale(1.15); }
+    70% { transform: scale(0.95); }
+    100% { transform: scale(1); }
 }
-.k-pixel-march { animation: k-pixel-march 2.6s steps(10, end) infinite alternate; }
-@keyframes k-pixel-ground {
-    from { background-position: 0 0; }
-    to { background-position: -8px 0; }
+:hover > .k-pop { animation: k-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1); }
+@keyframes k-reveal {
+    from { clip-path: inset(0 100% 0 0); }
+    to { clip-path: inset(0 0 0 0); }
 }
-.k-pixel-ground {
-    background-image: linear-gradient(to right, currentColor 50%, transparent 50%);
-    background-size: 8px 2px;
-    animation: k-pixel-ground 0.32s steps(2, end) infinite;
+:hover > .k-reveal { animation: k-reveal 0.45s ease-out; }
+/* Command palette (CommandPalette.tsx): uncovered from the top down, quickly. */
+@keyframes k-reveal-down {
+    from { clip-path: inset(0 0 100% 0); }
+    to { clip-path: inset(0 0 0 0); }
 }
+.k-reveal-down { animation: k-reveal-down 0.14s ease-out; }
 @media (prefers-reduced-motion: reduce) {
-    .k-pixel-march, .k-pixel-ground { animation: none; }
+    .k-reveal-down { animation: none; }
+    :hover > .k-pop, :hover > .k-reveal { animation: none; }
+    .k-spin-once { transition: none; }
+    :hover > .k-spin-once { transform: none; }
 }
+
+/* Workspace transitions (lib/transitions.ts). Leaving and arriving move in OPPOSITE directions, so
+   it reads as going out of one place and into another rather than the same zoom twice. Switching
+   workspaces: the page you're leaving shrinks away and fades, the one you arrive at grows in from a
+   little smaller. The Workspaces screen: it settles down from slightly larger (pulling back), and
+   grows away when closed (going back in). */
+@keyframes k-leave-forward { to { opacity: 0; transform: scale(0.94); } }
+@keyframes k-enter-forward { from { opacity: 0; transform: scale(0.95); } }
+@keyframes k-enter-back { from { opacity: 0; transform: scale(1.05); } }
+@keyframes k-leave-back { to { opacity: 0; transform: scale(1.05); } }
+body.k-leave-forward { animation: k-leave-forward 0.22s ease-in forwards; }
+body.k-enter-forward { animation: k-enter-forward 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.k-enter-back { animation: k-enter-back 0.32s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.k-leave-back { animation: k-leave-back 0.22s ease-in forwards; }
+@media (prefers-reduced-motion: reduce) {
+    body.k-leave-forward, body.k-enter-forward, .k-enter-back, .k-leave-back { animation: none; }
+}
+
+/* While a workspace transition runs (lib/transitions.ts, public/k-life.js, the Workspaces screen): no
+   scrollbars. Scaling the page or an overlay pushes it past the window's edges, which would otherwise
+   pop page-level scrollbars in and out mid-animation; the scrollbars inside panes are made invisible
+   (not removed, so nothing reflows). */
+html.k-switching, html.k-switching body { overflow: hidden !important; }
+html.k-switching *::-webkit-scrollbar-thumb,
+html.k-switching *::-webkit-scrollbar-track,
+html.k-switching *::-webkit-scrollbar-corner,
+html.k-switching *::-webkit-scrollbar-button { background: transparent !important; border-color: transparent !important; }
+
+/* Ctrl+F in the Sidebar (sidebar/useReadFind.ts): every match, and the one being stepped to. */
+::highlight(find-all) { background-color: rgba(250, 204, 21, 0.35); color: inherit; }
+::highlight(find-current) { background-color: rgba(59, 130, 246, 0.75); color: #ffffff; }

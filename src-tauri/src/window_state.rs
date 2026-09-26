@@ -3,6 +3,10 @@
 //! machine-global display settings (global_settings.rs) as the window moves, and read back at launch,
 //! where a saved size or position that no longer fits the screens is corrected before the window is
 //! shown (a smaller monitor, a disconnected one, a changed resolution).
+//!
+//! On Linux only the size is remembered (a custom one included), and it's restored exactly as it was
+//! saved: window managers and Wayland place windows themselves, and correcting a size or position
+//! against the screens went wrong there, so none of that is done (see `plan_for_launch`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -105,10 +109,9 @@ fn logical_size(s: &Screen) -> (f64, f64) {
 /// Decides how to open the window. The saved size is kept whenever it fits on some connected screen
 /// (the one the window was on first) and only shrunk, to a preset that fits, when it's bigger than
 /// every screen. The saved position is kept if the window is still reachable there; otherwise the
-/// window is centered on its screen (also the first launch, when nothing was saved, and where the
-/// desktop doesn't let apps place windows: `positions` false).
-pub fn plan(saved: Saved, screens: &[Screen], primary: usize, positions: bool) -> Plan {
-    let position = if positions { saved.position } else { None };
+/// window is centered on its screen (also the first launch, when nothing was saved).
+pub fn plan(saved: Saved, screens: &[Screen], primary: usize) -> Plan {
+    let position = saved.position;
     if screens.is_empty() {
         return Plan { width: saved.width, height: saved.height, position, maximized: saved.maximized };
     }
@@ -146,19 +149,7 @@ pub fn plan(saved: Saved, screens: &[Screen], primary: usize, positions: bool) -
             (x, y)
         }
     };
-    Plan { width, height, position: positions.then_some(position), maximized: saved.maximized }
-}
-
-/// Whether the desktop lets an app read and set its window's position. Wayland doesn't: the
-/// compositor places windows and doesn't say where they are (the position reads back as 0,0).
-pub fn positions_supported() -> bool {
-    if !cfg!(target_os = "linux") {
-        return true;
-    }
-    let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default().to_lowercase();
-    let on_wayland = session == "wayland" || std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let forced_x11 = std::env::var("GDK_BACKEND").map(|v| v.split(',').next() == Some("x11")).unwrap_or(false);
-    !(on_wayland && !forced_x11)
+    Plan { width, height, position: Some(position), maximized: saved.maximized }
 }
 
 /// The desktop's screens (work areas) and the index of the primary one.
@@ -180,13 +171,21 @@ fn screens(app: &AppHandle) -> (Vec<Screen>, usize) {
     (list, primary)
 }
 
+/// Linux's plan: the saved size as it is (never shrunk to fit a screen), placed by the desktop, not maximized.
+fn size_only(width: f64, height: f64) -> Plan {
+    Plan { width, height, position: None, maximized: false }
+}
+
 /// The plan for launching now, from what was saved and the screens that are connected.
 pub fn plan_for_launch(app: &AppHandle) -> Plan {
     let prefs = global_settings::load(app);
     let (width, height) = parse_resolution(&prefs.resolution).unwrap_or(DEFAULT_SIZE);
+    if cfg!(target_os = "linux") {
+        return size_only(width, height);
+    }
     let position = prefs.window_x.zip(prefs.window_y);
     let (screens, primary) = screens(app);
-    plan(Saved { width, height, position, maximized: prefs.maximized }, &screens, primary, positions_supported())
+    plan(Saved { width, height, position, maximized: prefs.maximized }, &screens, primary)
 }
 
 /// Records the window's current size, position and maximized state. A minimized or fullscreen
@@ -198,7 +197,10 @@ fn save_now(app: &AppHandle) {
         return;
     }
     if window.is_maximized().unwrap_or(false) {
-        global_settings::update(app, |s| s.maximized = true);
+        // Linux keeps only the size, so a maximized window leaves what was saved alone.
+        if !cfg!(target_os = "linux") {
+            global_settings::update(app, |s| s.maximized = true);
+        }
         return;
     }
     let (Ok(size), Ok(position), Ok(scale)) = (window.inner_size(), window.outer_position(), window.scale_factor()) else { return };
@@ -210,14 +212,13 @@ fn save_now(app: &AppHandle) {
     if let Some((pw, ph)) = PRESETS.iter().find(|(pw, ph)| pw.abs_diff(width) <= 1 && ph.abs_diff(height) <= 1) {
         (width, height) = (*pw, *ph);
     }
-    let positions = positions_supported();
     global_settings::update(app, |s| {
         s.resolution = format!("{width}x{height}");
-        if positions {
+        if !cfg!(target_os = "linux") {
             s.window_x = Some(position.x);
             s.window_y = Some(position.y);
+            s.maximized = false;
         }
-        s.maximized = false;
     });
 }
 
@@ -265,25 +266,6 @@ pub fn track(window: &WebviewWindow) {
     });
 }
 
-/// Some X11 window managers place a window themselves when it's first shown, ignoring where it was
-/// asked to go. Shortly after it appears, put it back if it isn't where the plan said.
-#[cfg(target_os = "linux")]
-pub fn settle_position(window: &WebviewWindow, position: Option<(i32, i32)>) {
-    let Some((x, y)) = position.filter(|_| positions_supported()) else { return };
-    let window = window.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(500));
-        if let Ok(now) = window.outer_position() {
-            if (now.x - x).abs() > 8 || (now.y - y).abs() > 8 {
-                let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-            }
-        }
-    });
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn settle_position(_: &WebviewWindow, _: Option<(i32, i32)>) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +276,15 @@ mod tests {
 
     fn saved(w: f64, h: f64, position: Option<(i32, i32)>) -> Saved {
         Saved { width: w, height: h, position, maximized: false }
+    }
+
+    #[test]
+    fn linux_keeps_the_saved_size_as_it_is_and_lets_the_desktop_place_it() {
+        // Even a size bigger than any screen is used as saved: nothing shrinks it to fit.
+        let p = size_only(3000.0, 2000.0);
+        assert_eq!((p.width, p.height), (3000.0, 2000.0));
+        assert_eq!(p.position, None);
+        assert!(!p.maximized);
     }
 
     #[test]
@@ -339,7 +330,7 @@ mod tests {
     #[test]
     fn first_launch_centers_on_the_primary_screen() {
         let screens = [screen(0, 0, 1920, 1040, 1.0)];
-        let p = plan(saved(1440.0, 900.0, None), &screens, 0, true);
+        let p = plan(saved(1440.0, 900.0, None), &screens, 0);
         assert_eq!((p.width, p.height), (1440.0, 900.0));
         assert_eq!(p.position, Some((240, 70)));
     }
@@ -347,21 +338,21 @@ mod tests {
     #[test]
     fn a_saved_position_that_is_still_reachable_is_kept() {
         let screens = [screen(0, 0, 1920, 1040, 1.0)];
-        let p = plan(saved(1333.0, 777.0, Some((300, 120))), &screens, 0, true);
+        let p = plan(saved(1333.0, 777.0, Some((300, 120))), &screens, 0);
         assert_eq!((p.width, p.height, p.position), (1333.0, 777.0, Some((300, 120))));
     }
 
     #[test]
     fn a_position_on_a_disconnected_monitor_falls_back_to_centering() {
         let screens = [screen(0, 0, 1920, 1040, 1.0)];
-        let p = plan(saved(1440.0, 900.0, Some((3000, 200))), &screens, 0, true);
+        let p = plan(saved(1440.0, 900.0, Some((3000, 200))), &screens, 0);
         assert_eq!(p.position, Some((240, 70)));
     }
 
     #[test]
     fn a_window_bigger_than_its_screen_is_shrunk_and_recentered() {
         let screens = [screen(0, 0, 1366, 728, 1.0)];
-        let p = plan(saved(1920.0, 1080.0, Some((0, 0))), &screens, 0, true);
+        let p = plan(saved(1920.0, 1080.0, Some((0, 0))), &screens, 0);
         assert_eq!((p.width, p.height), (1280.0, 720.0));
         assert_eq!(p.position, Some((43, 4)));
     }
@@ -371,7 +362,7 @@ mod tests {
         // A 4K monitor at 200% is 1920x1040 logical: a 1920x1080 window doesn't fit its height, so it
         // becomes 1600x900 and is centered on that monitor (physical coordinates, 3200px wide there).
         let screens = [screen(0, 0, 1920, 1040, 1.0), screen(1920, 0, 3840, 2080, 2.0)];
-        let p = plan(saved(1920.0, 1080.0, Some((2000, 50))), &screens, 0, true);
+        let p = plan(saved(1920.0, 1080.0, Some((2000, 50))), &screens, 0);
         assert_eq!((p.width, p.height), (1600.0, 900.0));
         assert_eq!(p.position, Some((2240, 140)));
     }
@@ -380,7 +371,7 @@ mod tests {
     fn a_size_that_fits_some_other_screen_is_kept_not_shrunk() {
         // Nothing to say which screen it was on (first guess: the small primary), but it fits the big one.
         let screens = [screen(0, 0, 1366, 728, 1.0), screen(1366, 0, 2560, 1400, 1.0)];
-        let p = plan(saved(1920.0, 1080.0, None), &screens, 0, true);
+        let p = plan(saved(1920.0, 1080.0, None), &screens, 0);
         assert_eq!((p.width, p.height), (1920.0, 1080.0));
         assert_eq!(p.position, Some((1686, 160)), "centered on the screen it fits");
     }
@@ -388,17 +379,9 @@ mod tests {
     #[test]
     fn a_position_just_off_every_screen_still_finds_its_screen() {
         let screens = [screen(0, 0, 1920, 1040, 1.0)];
-        let p = plan(saved(1440.0, 900.0, Some((-30, 10))), &screens, 0, true);
+        let p = plan(saved(1440.0, 900.0, Some((-30, 10))), &screens, 0);
         assert_eq!(p.position, Some((-30, 10)), "a frame's shadow doesn't count as off-screen");
-        let p = plan(saved(1440.0, 900.0, Some((-30, 10))), &[screen(0, 0, 1920, 1040, 1.0), screen(1920, 0, 1000, 1040, 1.0)], 1, true);
+        let p = plan(saved(1440.0, 900.0, Some((-30, 10))), &[screen(0, 0, 1920, 1040, 1.0), screen(1920, 0, 1000, 1040, 1.0)], 1);
         assert_eq!((p.width, p.height), (1440.0, 900.0), "the nearest screen is used, not the primary");
-    }
-
-    #[test]
-    fn where_positions_are_not_supported_the_saved_one_is_ignored_and_none_is_set() {
-        let screens = [screen(0, 0, 1920, 1040, 1.0)];
-        let p = plan(saved(1333.0, 777.0, Some((300, 120))), &screens, 0, false);
-        assert_eq!((p.width, p.height), (1333.0, 777.0), "the size is still restored");
-        assert_eq!(p.position, None, "the compositor places the window");
     }
 }

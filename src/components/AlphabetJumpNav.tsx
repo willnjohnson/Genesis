@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { BottomBar } from './BottomBar';
 
 /** A true bottom panel of clickable letters — fixed to the viewport, not part of the content
@@ -17,7 +17,7 @@ import { BottomBar } from './BottomBar';
  *  is App.tsx's one scrollable content pane — the letter for whatever section is currently at the
  *  top of ITS scroll (not the window's — the whole page no longer scrolls) is underlined, updated
  *  as the user scrolls past each section's heading, not just right after a jump-to click. */
-export function AlphabetJumpNav({ idPrefix, available, scrollContainerRef }: { idPrefix: string; available: string[]; scrollContainerRef: RefObject<HTMLDivElement | null> }) {
+export function AlphabetJumpNav({ idPrefix, available, scrollContainerRef, trailing }: { idPrefix: string; available: string[]; scrollContainerRef: RefObject<HTMLDivElement | null>; trailing?: ReactNode }) {
     const [active, setActive] = useState<string | null>(null);
     // A click's own intent wins over the geometric scan for a moment afterward: a short trailing
     // section (little or no content below it but the reserved bottom padding) can't be scrolled
@@ -105,6 +105,8 @@ export function AlphabetJumpNav({ idPrefix, available, scrollContainerRef }: { i
                     </button>
                 ))}
             </div>
+            {/* At the right end of the bar (the Glossary's "N in Trash"). */}
+            {trailing && <div className="ml-auto pl-3 shrink-0 flex items-center">{trailing}</div>}
         </BottomBar>
     );
 }

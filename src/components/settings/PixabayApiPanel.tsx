@@ -2,6 +2,7 @@ import { Info } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getKeyStatus, getPixabayApiKey, setPixabayApiKey, type KeyStatus } from "../../api";
 import { ApiKeyField } from "./ApiKeyField";
+import { ApiPanelHeading, API_GUIDES } from "./ApiPanelHeading";
 
 /** Pixabay: the API key for searching its free stock photos from the image tools. */
 export function PixabayApiPanel() {
@@ -15,7 +16,7 @@ export function PixabayApiPanel() {
 
     return (
         <div>
-            <h3 className="text-base font-bold mb-1">Pixabay</h3>
+            <ApiPanelHeading title="Pixabay" guideUrl={API_GUIDES.pixabay.url} />
             <p className="text-xs text-[#aaaaaa] mb-4">Lets the image tools search Pixabay's free stock photos.</p>
 
             {keyStatus?.pixabay.licensed && (

@@ -16,6 +16,7 @@ import { PluginsTab } from "./settings/PluginsTab";
 import { ExportTab } from "./settings/ExportTab";
 import { SyncTab } from "./settings/SyncTab";
 import { useFlags } from "../hooks/useFlags";
+import type { SettingsTabId } from "../lib/settings-search";
 
 interface Props {
     isOpen: boolean;
@@ -29,6 +30,8 @@ interface Props {
     onPluginsChange?: () => void;
     /** A sync (or pack import) finished: content, enforced settings or the license may have changed. */
     onSyncComplete?: () => void;
+    /** Open on this page (each new object moves there, whether or not Settings is already open). */
+    openTo?: SettingsTarget;
     showSummarizeOllama?: boolean;
     showSummarizeVenice?: boolean;
     showSynthesizeVenice?: boolean;
@@ -36,7 +39,14 @@ interface Props {
     showSynthesizeUpload?: boolean;
 }
 
-type Tab = 'api' | 'db' | 'workspace' | 'display' | 'theme' | 'history' | 'plugins' | 'sync' | 'export';
+type Tab = SettingsTabId;
+
+/** A page to land on when opening Settings from elsewhere in the app (a new object each time asks again). */
+export interface SettingsTarget {
+    tab: Tab;
+    /** Which page of the API Key tab (YouTube Data API, Venice AI, Pixabay). */
+    apiSection?: ApiSection;
+}
 
 const TAB_CONFIG: { id: Tab; label: string; Icon: React.ElementType; badge?: string }[] = [
     { id: 'api',     label: 'API Key',  Icon: Key },
@@ -54,7 +64,7 @@ export function SettingsModal({
     isOpen, onClose, onStatusChange, onThemeChange,
     onVideoListModeChange, currentVideoListMode,
     onNavigationOrientationChange, currentNavigationOrientation,
-    onPluginsChange, onSyncComplete,
+    onPluginsChange, onSyncComplete, openTo,
     showSummarizeOllama = true, showSummarizeVenice = true,
     showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true
 }: Props) {
@@ -86,6 +96,12 @@ export function SettingsModal({
     const [reloadTick, setReloadTick] = useState(0);
     // Which page of the API Key tab is showing; Plugins can send you straight to one.
     const [apiSection, setApiSection] = useState<ApiSection>('youtube');
+    // Opened from a link elsewhere (a bad API key's error message): go to the page it names.
+    useEffect(() => {
+        if (!openTo) return;
+        setActiveTab(openTo.tab);
+        if (openTo.apiSection) setApiSection(openTo.apiSection);
+    }, [openTo]);
 
     useEffect(() => {
         if (!isOpen) return;
@@ -175,6 +191,7 @@ export function SettingsModal({
 
     return (
         <div
+            data-no-escape
             className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center animate-in fade-in duration-200"
             onClick={onClose}
         >

@@ -15,9 +15,10 @@ pub fn get_glossary_terms(app: tauri::AppHandle) -> Result<Vec<db::GlossaryEntry
 
 /// Deletes one entry: the term's rows in each of `drives` ('' = the uncategorized row).
 #[command]
-pub fn delete_glossary_term(app: tauri::AppHandle, term: String, drives: Vec<String>) -> Result<(), String> {
+pub fn delete_glossary_term(app: tauri::AppHandle, term: String, drives: Vec<String>) -> Result<Option<u64>, String> {
     let db_path = get_db_path(&app);
-    db::delete_glossary_group(&db_path, &term, &drives).map_err(|e| e.to_string())
+    // Through the Trash, so the delete can be undone this session.
+    crate::trash::delete_glossary(crate::trash::store(&app), &db_path, &term, &drives)
 }
 
 /// Adds or edits one definition and the top-level Drives it's filed under (one row per Drive).

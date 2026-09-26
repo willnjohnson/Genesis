@@ -1,10 +1,10 @@
 import { useState, useCallback, useRef, useEffect, useMemo, type RefObject } from "react";
 import {
-    getSavedVideos, searchLibrary, saveVideo, deleteVideo, bulkSaveVideos,
+    getSavedVideos, searchLibrary, saveVideo, deleteVideo, trashRestore, bulkSaveVideos,
     summarizeAllVideos, getSummarizedCount, getVideosByWdbs, getUnsortedVideos, UNSORTED_WDBS_FILTER,
     type Video, type LibrarySortField, type LibrarySortOrder, type LibraryFilterKind
 } from "../api";
-import { type NotificationType } from "../components/Notification";
+import { type NotificationContent } from "../components/Notification";
 import { useWorkspace } from "./useWorkspace";
 
 // Bumped from 100 -> 300 per the search revision doc ("empirically verified to work great in
@@ -52,7 +52,7 @@ function rememberPage(cache: Map<string, PageOne>, key: string, page: PageOne) {
 export function useLibrary(
     pluginSummarizeEnabled: boolean,
     filteredSearchVideos: Video[],
-    setNotification: (n: { message: string; type: NotificationType } | null) => void,
+    setNotification: (n: NotificationContent | null) => void,
     // App.tsx's one scrollable content pane — the page-1 reload below resets scroll to its top
     // (not window position 0, since the whole page no longer scrolls; see App.tsx/VideoList.tsx).
     scrollContainerRef: RefObject<HTMLDivElement | null>,
@@ -295,10 +295,26 @@ export function useLibrary(
     ) => {
         if (!confirmDelete) return;
         try {
-            await deleteVideo(confirmDelete.video.id);
+            const trashId = await deleteVideo(confirmDelete.video.id);
             setLibraryVideos(prev => prev.filter(v => v.id !== confirmDelete.video.id));
             setTotalCount(prev => Math.max(0, prev - 1));
-            setNotification({ message: `Deleted "${confirmDelete.video.title}"`, type: "success" });
+            setNotification({
+                message: `Deleted "${confirmDelete.video.title}"`,
+                type: "success",
+                // Undo: the delete went to the Trash, so this puts the video back (and its links).
+                action: trashId === null ? undefined : {
+                    label: "Undo",
+                    onClick: () => {
+                        trashRestore(trashId)
+                            .then(() => {
+                                refreshLibrary();
+                                refreshSummarizedCount();
+                                setNotification({ message: `Restored "${confirmDelete.video.title}"`, type: "success" });
+                            })
+                            .catch((e) => setNotification({ message: `Couldn't restore: ${typeof e === 'string' ? e : e?.message ?? e}`, type: "error" }));
+                    },
+                },
+            });
             if (confirmDelete.fromSidebar) onSidebarClose();
         } catch (e: any) {
             setNotification({ message: `Failed to delete: ${e.message}`, type: "error" });
@@ -306,7 +322,7 @@ export function useLibrary(
             setConfirmDelete(null);
             refreshSummarizedCount();
         }
-    }, [confirmDelete, refreshSummarizedCount, setNotification]);
+    }, [confirmDelete, refreshSummarizedCount, setNotification, refreshLibrary]);
 
     const handleSaveAll = useCallback(async () => {
         if (filteredSearchVideos.length === 0 || saveProgress) return;

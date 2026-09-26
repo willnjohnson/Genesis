@@ -325,6 +325,8 @@ pub fn list_videos_by_wdbs(
     let tag_clause = glossary_tag_clause(false, facets.tag_exact, ":tag");
     let term_clause = glossary_tag_clause(true, facets.term_exact, ":term");
     let handle_like = format!("%{handle_val}%");
+    let channel_val = facets.channel.as_str();
+    let channel_like = format!("%{channel_val}%");
     let video_like = format!("%{video_val}%");
 
     // GLOB (not LIKE) is required here: LIKE's '_' wildcard matches any single character, which
@@ -339,7 +341,7 @@ pub fn list_videos_by_wdbs(
         SELECT video_id FROM VideoWDBSLinks WHERE wdbs = :wdbs_prefix OR wdbs GLOB :wdbs_prefix || '_*'
     ";
     let facet_where = format!(
-        "(:handle = '' OR v.handle LIKE :handle_like)
+        "(:handle = '' OR v.handle LIKE :handle_like) AND (:channel = '' OR v.author LIKE :channel_like)
            AND (:video = '' OR v.video_id LIKE :video_like)
            AND {tag_clause}
            AND {term_clause}"
@@ -356,7 +358,7 @@ pub fn list_videos_by_wdbs(
             &format!("SELECT COUNT(*) FROM Videos AS v WHERE {where_sql}"),
             named_params! {
                 ":wdbs_prefix": wdbs_prefix,
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
             },
@@ -370,7 +372,7 @@ pub fn list_videos_by_wdbs(
         let iter = stmt.query_map(
             named_params! {
                 ":wdbs_prefix": wdbs_prefix,
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
                 ":limit": limit, ":offset": offset,
@@ -391,7 +393,7 @@ pub fn list_videos_by_wdbs(
             &count_sql,
             named_params! {
                 ":wdbs_prefix": wdbs_prefix, ":fts": fts_query,
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
             },
@@ -405,7 +407,7 @@ pub fn list_videos_by_wdbs(
         let iter = stmt.query_map(
             named_params! {
                 ":wdbs_prefix": wdbs_prefix, ":fts": fts_query,
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
                 ":limit": limit, ":offset": offset,
@@ -496,9 +498,11 @@ pub fn list_unsorted_videos(
     let tag_clause = glossary_tag_clause(false, facets.tag_exact, ":tag");
     let term_clause = glossary_tag_clause(true, facets.term_exact, ":term");
     let handle_like = format!("%{handle_val}%");
+    let channel_val = facets.channel.as_str();
+    let channel_like = format!("%{channel_val}%");
     let video_like = format!("%{video_val}%");
     let facet_where = format!(
-        "(:handle = '' OR v.handle LIKE :handle_like)
+        "(:handle = '' OR v.handle LIKE :handle_like) AND (:channel = '' OR v.author LIKE :channel_like)
            AND (:video = '' OR v.video_id LIKE :video_like)
            AND {tag_clause}
            AND {term_clause}"
@@ -512,7 +516,7 @@ pub fn list_unsorted_videos(
         total = conn.query_row(
             &format!("SELECT COUNT(*) FROM Videos AS v WHERE {where_sql}"),
             named_params! {
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
             },
@@ -522,7 +526,7 @@ pub fn list_unsorted_videos(
         let mut stmt = conn.prepare(&sql)?;
         let iter = stmt.query_map(
             named_params! {
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
                 ":limit": limit, ":offset": offset,
@@ -541,7 +545,7 @@ pub fn list_unsorted_videos(
             &count_sql,
             named_params! {
                 ":fts": fts_query,
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
             },
@@ -554,7 +558,7 @@ pub fn list_unsorted_videos(
         let iter = stmt.query_map(
             named_params! {
                 ":fts": fts_query,
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
                 ":limit": limit, ":offset": offset,

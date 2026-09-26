@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 use super::settings::get_setting_bool;
 
 // True if `summary` has real AI-generated content beyond the auto-appended "Channel Info: ..."
@@ -76,10 +76,40 @@ pub fn save_summary(db_path: &str, video_id: &str, summary: &str) -> Result<()> 
 }
 
 // Strips embedded `"` quote marks from any line of `summary` that starts with a markdown
-// blockquote marker (`>`), leaving all other lines untouched. Splits on newlines via a
-// recursive CTE (rowid-scoped to this one video), reassembles, and only writes back if the
-// result actually differs from what's stored.
+// blockquote marker (`>`), leaving all other lines untouched, and only writes back if the result
+// actually differs from what's stored. Done in one pass over the text in Rust: the SQL it replaced
+// (kept below for the tests) split the text with a recursive query that re-copied the rest of the
+// summary for every line, so a long summary took seconds (10 s for 5,000 lines) to save.
 pub(crate) fn clean_blockquote_lines(conn: &Connection, video_id: &str) -> Result<()> {
+    let summary: Option<String> = conn
+        .query_row("SELECT summary FROM Videos WHERE video_id = ?1", params![video_id], |r| r.get::<_, Option<String>>(0))
+        .optional()?
+        .flatten();
+    let Some(summary) = summary.filter(|s| !s.is_empty()) else { return Ok(()) };
+    let cleaned = clean_blockquotes(&summary);
+    if cleaned != summary {
+        conn.execute("UPDATE Videos SET summary = ?1 WHERE video_id = ?2", params![cleaned, video_id])?;
+    }
+    Ok(())
+}
+
+/// `text` with the `"` marks taken out of every line that starts with `>`. Reproduces the SQL's
+/// one quirk: a final empty line (text ending in a newline) is dropped, so one trailing newline goes.
+fn clean_blockquotes(text: &str) -> String {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if lines.last() == Some(&"") {
+        lines.pop();
+    }
+    lines
+        .iter()
+        .map(|line| if line.starts_with('>') { line.replace('"', "") } else { (*line).to_string() })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The SQL version, kept to check the Rust one against.
+#[cfg(test)]
+fn clean_blockquote_lines_sql(conn: &Connection, video_id: &str) -> Result<()> {
     conn.execute(
         "WITH RECURSIVE
         lines(rid, seq, line, rest) AS (
@@ -203,4 +233,70 @@ pub fn get_videos_with_summaries(db_path: &str) -> Result<Vec<String>> {
         }
     }
     Ok(ids)
+}
+
+#[cfg(test)]
+mod save_speed_tests {
+    use super::*;
+    use crate::db::init_db;
+
+    /// `cargo test --lib -- --ignored --nocapture summary_save_speed`: how long saving a summary takes,
+    /// for summaries of a few sizes, on a video that also has a long transcript.
+    #[test]
+    #[ignore]
+    fn summary_save_speed() {
+        let path = std::env::temp_dir().join(format!("kinesis_summary_speed_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = path.to_string_lossy().to_string();
+        init_db(&db).unwrap();
+        for (lines, clear) in [(50usize, false), (500, false), (5_000, false), (5_000, true)] {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("DELETE FROM Videos", []).unwrap();
+            let transcript = "word another words here ".repeat(20_000); // ~480k characters
+            conn.execute("INSERT INTO Videos (video_id, title, author, transcript) VALUES ('v', 'T', 'A', ?1)", params![transcript]).unwrap();
+            conn.execute("INSERT OR REPLACE INTO Settings (key, value) VALUES ('setTranscriptAfterSummarizeToNA', ?1)", params![clear.to_string()]).unwrap();
+            drop(conn);
+            let summary: String = (0..lines).map(|i| format!("- point {i}: a line of the summary text that is a typical length
+")).collect();
+            let t = std::time::Instant::now();
+            save_summary(&db, "v", &summary).unwrap();
+            println!("{:>6} lines ({:>7} bytes), clear transcript {clear}: {:?}", lines, summary.len(), t.elapsed());
+        }
+    }
+}
+
+#[cfg(test)]
+mod blockquote_tests {
+    use super::*;
+    use crate::db::init_db;
+
+    #[test]
+    fn the_rust_cleaner_matches_the_sql_it_replaced() {
+        let path = std::env::temp_dir().join(format!("kinesis_bq_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = path.to_string_lossy().to_string();
+        init_db(&db).unwrap();
+        let samples = [
+            "plain summary",
+            "> \"quoted\" line\nnormal \"kept\" line\n> another \"one\"",
+            "a\n\n\n> \"x\"\nb",
+            "ends with a newline\n",
+            "ends with two\n\n",
+            "> \"only\"\n",
+            "\n",
+            "line one\n  > \"indented is not a quote\"\nlast",
+            "Channel Info: Someone",
+        ];
+        for sample in samples {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("DELETE FROM Videos", []).unwrap();
+            conn.execute("INSERT INTO Videos (video_id, title, summary) VALUES ('v', 'T', ?1)", params![sample]).unwrap();
+            clean_blockquote_lines_sql(&conn, "v").unwrap();
+            let sql: String = conn.query_row("SELECT summary FROM Videos WHERE video_id='v'", [], |r| r.get(0)).unwrap();
+            conn.execute("UPDATE Videos SET summary = ?1 WHERE video_id = 'v'", params![sample]).unwrap();
+            clean_blockquote_lines(&conn, "v").unwrap();
+            let rust: String = conn.query_row("SELECT summary FROM Videos WHERE video_id='v'", [], |r| r.get(0)).unwrap();
+            assert_eq!(rust, sql, "different result for {sample:?}");
+        }
+    }
 }

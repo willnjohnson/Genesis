@@ -307,10 +307,11 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                 <h2 className="text-xl font-bold text-white">{labels.aliasBiography}</h2>
             </div>
 
-            {/* pb-10: AlphabetJumpNav (below) is a true fixed panel, always present, no longer part
+            {/* pb-20: room at the very bottom for the floating back-to-top button (App.tsx), so it never sits
+                on a row's edit/delete icons once scrolled all the way down. (AlphabetJumpNav, below, is a true fixed panel, always present, no longer part
                 of this page's own scroll — its ~24px height has to be reserved here instead, or
                 it'd sit over the last section once scrolled all the way down. */}
-            <div className="px-2 pb-10">
+            <div className="px-2 pb-20">
                 {entries.length === 0 ? (
                     <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                         <p className="text-xl font-bold text-white mb-2">No people yet</p>

@@ -191,7 +191,7 @@ impl LinkResolver {
     fn note_for(&self, kind: db::links::LinkKind, key: &str) -> Option<String> {
         use db::links::LinkKind;
         match kind {
-            LinkKind::Glossary => self.glossary.get(key).cloned(),
+            LinkKind::Glossary => self.glossary.get(&key.to_ascii_lowercase()).cloned(),
             LinkKind::Bio => self.biographies.get(&key.trim_start_matches('@').to_lowercase()).cloned(),
             LinkKind::Video => self.videos.get(key).cloned(),
             LinkKind::Drive => None,
@@ -277,9 +277,9 @@ fn build_video_note(video: &crate::Video, links: &LinkResolver, sequences: Optio
     if let Some(lines) = sequences.filter(|l| !l.is_empty()) {
         body.push_str("## Sequence\n\n");
         for line in lines {
-            let prev = line.prev.as_deref().map(|b| format!("[[{}]]", b)).unwrap_or_else(|| "—".to_string());
-            let next = line.next.as_deref().map(|b| format!("[[{}]]", b)).unwrap_or_else(|| "—".to_string());
-            body.push_str(&format!("- **{}** ({} of {}) — Prev: {} · Next: {}\n", line.drive, line.position, line.total, prev, next));
+            let prev = line.prev.as_deref().map(|b| format!("[[{}]]", b)).unwrap_or_else(|| "-".to_string());
+            let next = line.next.as_deref().map(|b| format!("[[{}]]", b)).unwrap_or_else(|| "-".to_string());
+            body.push_str(&format!("- **{}** ({} of {}) - Prev: {} · Next: {}\n", line.drive, line.position, line.total, prev, next));
         }
         body.push('\n');
     }
@@ -492,7 +492,7 @@ fn run_export_with(
         }
     };
     let mut note_basename: HashMap<(String, String), String> = HashMap::new(); // (term, drives joined) -> note name
-    let mut link_basename: HashMap<String, String> = HashMap::new(); // term -> what [[Term]] points at
+    let mut link_basename: HashMap<String, String> = HashMap::new(); // lowercase term -> what [[Term]] points at
     for (term, rows) in &rows_by_term {
         for row in rows {
             let name = if rows.len() == 1 {
@@ -504,7 +504,8 @@ fn run_export_with(
         }
         let primary = rows.iter().find(|r| r.drives.is_empty()).or_else(|| rows.first());
         if let Some(primary) = primary {
-            link_basename.insert(term.clone(), note_basename[&(term.clone(), primary.drives.join("|"))].clone());
+            // Keyed lowercase: a link may spell the term with other capitalization (names ignore case).
+            link_basename.insert(term.to_ascii_lowercase(), note_basename[&(term.clone(), primary.drives.join("|"))].clone());
         }
     }
     let resolver = LinkResolver {
@@ -1055,13 +1056,13 @@ mod tests {
         let v3 = fs::read_to_string(root.join("Library/_Unsorted/v3 (v3).md")).unwrap();
 
         // First in :UAP: no Prev; also 1 of 2 in :FIN, one line per Drive.
-        assert!(v1.contains("- **:UAP** (1 of 3) — Prev: — · Next: [[v2 (v2)]]"), "{v1}");
-        assert!(v1.contains("- **:FIN** (1 of 2) — Prev: — · Next: [[v2 (v2)]]"), "{v1}");
+        assert!(v1.contains("- **:UAP** (1 of 3) - Prev: - · Next: [[v2 (v2)]]"), "{v1}");
+        assert!(v1.contains("- **:FIN** (1 of 2) - Prev: - · Next: [[v2 (v2)]]"), "{v1}");
         // Middle of :UAP, last of :FIN: both neighbors in one Drive, no Next in the other.
-        assert!(v2.contains("- **:UAP** (2 of 3) — Prev: [[v1 (v1)]] · Next: [[v3 (v3)]]"), "{v2}");
-        assert!(v2.contains("- **:FIN** (2 of 2) — Prev: [[v1 (v1)]] · Next: —"), "{v2}");
+        assert!(v2.contains("- **:UAP** (2 of 3) - Prev: [[v1 (v1)]] · Next: [[v3 (v3)]]"), "{v2}");
+        assert!(v2.contains("- **:FIN** (2 of 2) - Prev: [[v1 (v1)]] · Next: -"), "{v2}");
         // Last of :UAP, not in :FIN at all: exactly one line.
-        assert!(v3.contains("- **:UAP** (3 of 3) — Prev: [[v2 (v2)]] · Next: —"), "{v3}");
+        assert!(v3.contains("- **:UAP** (3 of 3) - Prev: [[v2 (v2)]] · Next: -"), "{v3}");
         assert_eq!(v3.matches("## Sequence").count(), 1);
         assert!(!v3.contains(":FIN"), "{v3}");
 
@@ -1072,9 +1073,9 @@ mod tests {
         run_export(&db_path, &dropped.join("V"), |_| {}).unwrap();
         let v1_after = fs::read_to_string(dropped.join("V/Library/_Unsorted/v1 (v1).md")).unwrap();
         let v3_after = fs::read_to_string(dropped.join("V/Library/_Unsorted/v3 (v3).md")).unwrap();
-        assert!(v1_after.contains("- **:UAP** (1 of 2) — Prev: — · Next: [[v3 (v3)]]"), "{v1_after}");
-        assert!(v1_after.contains("- **:FIN** (1 of 1) — Prev: — · Next: —"), "{v1_after}");
-        assert!(v3_after.contains("- **:UAP** (2 of 2) — Prev: [[v1 (v1)]] · Next: —"), "{v3_after}");
+        assert!(v1_after.contains("- **:UAP** (1 of 2) - Prev: - · Next: [[v3 (v3)]]"), "{v1_after}");
+        assert!(v1_after.contains("- **:FIN** (1 of 1) - Prev: - · Next: -"), "{v1_after}");
+        assert!(v3_after.contains("- **:UAP** (2 of 2) - Prev: [[v1 (v1)]] · Next: -"), "{v3_after}");
 
         fs::remove_dir_all(&work_dir).ok();
         fs::remove_dir_all(&out).ok();

@@ -3,7 +3,8 @@ import { Shield } from "lucide-react";
 import { getSettings, setSetting } from "../../api";
 import { useFlags } from "../../hooks/useFlags";
 import { useLockedSettings, LOCKED_TITLE } from "../../hooks/useLockedSettings";
-import { READ_ONLY_OVERRIDE_KEYS, type FlagKey } from "../../lib/flags";
+import { READ_ONLY_OVERRIDE_KEYS, parseBool, type FlagKey } from "../../lib/flags";
+import { ConfirmDialog } from "../ConfirmDialog";
 import { ErrorBox } from "../workspace/shared";
 
 // Label/hint for each flag in READ_ONLY_OVERRIDE_KEYS that doesn't already have its own dedicated
@@ -51,11 +52,15 @@ export function PermissionsPanel() {
     const [error, setError] = useState<string | null>(null);
     const [savingKey, setSavingKey] = useState<string | null>(null);
 
-    const allKeys = ['workspaceReadOnly', ...ROWS.map(r => r.key)];
+    // Asked before turning "Confirm Before Deleting" off (a second confirmation).
+    const [confirmingOff, setConfirmingOff] = useState(false);
+
+    const allKeys = ['workspaceReadOnly', 'confirmBeforeDeleting', ...ROWS.map(r => r.key)];
 
     const load = () => {
         getSettings(allKeys)
-            .then(raw => setValues(Object.fromEntries(allKeys.map(k => [k, raw[k] === 'true']))))
+            // Confirm Before Deleting is on unless it was turned off (a missing value is the default, on).
+            .then(raw => setValues(Object.fromEntries(allKeys.map(k => [k, k === 'confirmBeforeDeleting' ? parseBool(raw[k], true) : raw[k] === 'true']))))
             .catch(e => setError(typeof e === 'string' ? e : e?.message ?? 'Could not load permissions.'));
     };
     useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -133,10 +138,53 @@ export function PermissionsPanel() {
                             </label>
                         );
                     })}
+                    {/* Last in the list. Not a permission Read-only turns off (that would mean "don't ask"): with
+                        Read-only on, deleting is off anyway, so it's greyed out and its stored value left alone. */}
+                    {(() => {
+                        const locked = isLocked('confirmBeforeDeleting');
+                        const disabled = locked || readOnly || savingKey === 'confirmBeforeDeleting';
+                        return (
+                            <label
+                                className={`flex items-start gap-3 px-4 py-3 bg-[#121212] transition-colors ${disabled ? 'opacity-50' : 'hover:bg-[#161616] cursor-pointer'}`}
+                                title={locked ? LOCKED_TITLE : readOnly ? 'Deleting is off while the workspace is read-only, above' : undefined}
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={values.confirmBeforeDeleting}
+                                    disabled={disabled}
+                                    // Turning it on needs no question. Turning it off does: it's the safety net.
+                                    onChange={e => (e.target.checked ? set('confirmBeforeDeleting', true) : setConfirmingOff(true))}
+                                    className="mt-0.5 shrink-0"
+                                />
+                                <span>
+                                    <span className="block text-xs font-bold text-white">Confirm Before Deleting</span>
+                                    <span className="block text-[11px] text-[#888888] mt-0.5">Ask "are you sure?" before deleting a video, a Glossary term or tag, or an attachment. Keep this on unless you really need it off.</span>
+                                </span>
+                            </label>
+                        );
+                    })()}
                 </div>
             </div>
 
             {error && <ErrorBox>{error}</ErrorBox>}
+
+            {confirmingOff && (
+                <ConfirmDialog
+                    title="Confirm Action"
+                    message={(
+                        <>
+                            Deleting will <strong className="text-white">no longer ask first</strong>, which makes mistakes easier to make.
+                            <br /><br />
+                            Most deletes can be undone from the Trash, <strong className="text-white">except attachments</strong>.
+                            <br /><br />
+                            It's best to keep this on unless you really need it off.
+                        </>
+                    )}
+                    confirmLabel="Proceed"
+                    onConfirm={() => { setConfirmingOff(false); void set('confirmBeforeDeleting', false); }}
+                    onCancel={() => setConfirmingOff(false)}
+                />
+            )}
         </div>
     );
 }

@@ -1,6 +1,6 @@
 import { Search, AtSign, Youtube, ListVideo, Filter, X, Lightbulb, History, Clock, Type, FileText } from 'lucide-react';
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { addSearchHistory, getSearchHistory, type HistoryEntry } from '../api';
+import { addSearchHistory, getSearchHistory, getGlossaryTerms, getSearchSuggestions, type HistoryEntry } from '../api';
 import { decodeHtmlEntities } from '../lib/utils';
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
@@ -20,7 +20,17 @@ interface Props {
     initialQuery?: string;
 }
 
-export type SearchFacet = 'handle' | 'playlist' | 'video' | 'title_search' | 'term_search' | 'definition_search' | 'tag_search' | 'person_search' | 'bio_search';
+/**
+ * A backslash in front of one of the characters that would otherwise start a filter (# ^ @ > and the ! shortcuts)
+ * makes it an ordinary character: `\@` searches for text with an @ in it and doesn't turn it into a handle
+ * chip, and `\\` is a backslash itself. The typed text stays as typed, and the escaping backslash is taken off
+ * when the search is run.
+ */
+function unescapeSpecial(text: string): string {
+    return text.replace(/^(\s*)\\([#^@>!\\])/, '$1$2');
+}
+
+export type SearchFacet = 'handle' | 'channel_name' | 'playlist' | 'video' | 'title_search' | 'term_search' | 'definition_search' | 'tag_search' | 'person_search' | 'bio_search';
 
 /**
  * Search input with facet detection and mode-specific keyboard shortcuts. Typing (or pasting) a
@@ -46,6 +56,102 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     const isGlossary = viewMode === 'glossary';
     const isBiography = viewMode === 'biography';
     const isLibraryOrGlossary = isLibrary || isGlossary || isBiography;
+    // Ghost-text completion: as a value is typed into a filter chip, the rest of the first saved one that starts
+    // that way is drawn faintly after it. Tab (or the right arrow at the end) takes it, and Up/Down step through
+    // the other ones that fit. Nothing is drawn over the results. What it completes depends on the chip:
+    // a Tag or Term (Library) from the glossary, a handle from the saved channels, and a video ID from the
+    // saved videos. A handle also says which channel it is (its name) and a video ID which video (its title),
+    // in parentheses.
+    const [suggestionData, setSuggestionData] = useState<{ tags: string[]; terms: string[]; handles: { handle: string; name: string }[]; channels: { name: string; handle: string }[]; videos: { id: string; title: string }[] }>(
+        { tags: [], terms: [], handles: [], channels: [], videos: [] });
+    // Library only: Search looks things up on YouTube, so what's saved here isn't what it's after.
+    const wantsSuggestions = isLibrary;
+    const loadSuggestions = useCallback(() => {
+        getGlossaryTerms().then(rows => {
+            // A name is a Term when any of its rows (one per Drive) has a definition; otherwise a Quick Tag.
+            const isTerm = new Map<string, boolean>();
+            for (const r of rows) isTerm.set(r.term, (isTerm.get(r.term) ?? false) || r.definition.trim() !== '');
+            const names = [...isTerm.keys()].sort((a, b) => a.localeCompare(b));
+            setSuggestionData(d => ({ ...d, tags: names.filter(n => !isTerm.get(n)), terms: names.filter(n => isTerm.get(n)) }));
+        }).catch(() => {});
+        getSearchSuggestions().then(({ handles, channels, videos }) => setSuggestionData(d => ({ ...d, handles, channels, videos }))).catch(() => {});
+    }, []);
+    useEffect(() => { if (wantsSuggestions) loadSuggestions(); }, [wantsSuggestions, loadSuggestions]);
+    const facetType = facets.length === 1 ? facets[0].type : null;
+    const suggestKind = wantsSuggestions && (facetType === 'handle' || facetType === 'video' || (facetType === 'tag_search' || facetType === 'term_search' || facetType === 'channel_name')) ? facetType : null;
+    // A * in what's typed stands for any run of characters (`*beast` finds "mrbeast"), so a name that starts
+    // with the typed text, or, with a *, fits the pattern from its start. The filter itself reads the * the
+    // same way (see star_to_like in db/search.rs).
+    const wildcard = query.includes('*');
+    const suggestions = useMemo((): { text: string; title?: string }[] => {
+        if (!suggestKind || !query || query.startsWith('"')) return [];
+        const caseSensitive = suggestKind === 'video'; // IDs are case-sensitive
+        const pattern = wildcard
+            ? new RegExp('^' + query.split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'), caseSensitive ? '' : 'i')
+            : null;
+        const fits = (name: string) => pattern
+            ? pattern.test(name)
+            : name.length > query.length && (caseSensitive ? name.startsWith(query) : name.toLowerCase().startsWith(query.toLowerCase()));
+        switch (suggestKind) {
+            case 'tag_search': return suggestionData.tags.filter(fits).map(text => ({ text }));
+            case 'term_search': return suggestionData.terms.filter(fits).map(text => ({ text }));
+            case 'handle': return suggestionData.handles.filter(h => fits(h.handle)).map(h => ({ text: h.handle, title: h.name }));
+            case 'channel_name': return suggestionData.channels.filter(c => fits(c.name)).map(c => ({ text: c.name, title: c.handle ? `@${c.handle}` : undefined }));
+            // IDs are random, so a single character would only be noise.
+            case 'video': return query.length < 2 ? [] : suggestionData.videos.filter(v => fits(v.id)).map(v => ({ text: v.id, title: v.title }));
+            default: return [];
+        }
+    }, [suggestKind, query, wildcard, suggestionData]);
+    const [suggestionPick, setSuggestionPick] = useState(0);
+    useEffect(() => setSuggestionPick(0), [query, suggestKind]);
+    const suggestion = suggestions.length > 0 ? suggestions[suggestionPick % suggestions.length] : null;
+    // Taking a suggestion sets the box's text from code, which the browser's own undo doesn't know about, so
+    // Ctrl+Z (and Ctrl+Y / Ctrl+Shift+Z to redo) is handled here: it puts back what was typed before, as long as
+    // the box still holds what the suggestion filled in.
+    const undoRef = useRef<{ before: string; after: string } | null>(null);
+    const redoRef = useRef<{ before: string; after: string } | null>(null);
+    const applySuggestion = (text: string) => {
+        userActionRef.current = true;
+        undoRef.current = { before: query, after: text };
+        redoRef.current = null;
+        setQuery(text);
+        setMenuTouched(false);
+    };
+    const acceptSuggestion = () => {
+        if (suggestion) applySuggestion(suggestion.text);
+    };
+
+    // Holding Shift (a moment, on its own) opens the whole list of what fits, below the bar. Up/Down move
+    // through it and letting go of Shift takes the one that was moved to; letting go having chosen nothing
+    // just closes it, and so does clicking a row while Shift is still down. The short wait keeps it from
+    // flashing open on every capital letter typed, since those hold Shift too.
+    const [menuOpen, setMenuOpen] = useState(false);
+    const [menuTouched, setMenuTouched] = useState(false);
+    const shiftTimerRef = useRef<number | null>(null);
+    const cancelShiftTimer = () => {
+        if (shiftTimerRef.current !== null) window.clearTimeout(shiftTimerRef.current);
+        shiftTimerRef.current = null;
+    };
+    const closeMenu = () => { cancelShiftTimer(); setMenuOpen(false); setMenuTouched(false); };
+    useEffect(() => { if (suggestions.length === 0) closeMenu(); }, [suggestions.length]);
+    // With a * there's no ghost text to show (the suggestion doesn't start with what's typed), so the list
+    // opens by itself instead, and stays until Esc, the choice, or the * going away. Enter picks the row
+    // moved to (with none moved to, it searches what's typed), and so does Tab.
+    const [wildcardDismissed, setWildcardDismissed] = useState(false);
+    useEffect(() => { setWildcardDismissed(false); setMenuTouched(false); }, [query]);
+    const shiftMenu = menuOpen && !wildcard;
+    const showMenu = suggestions.length > 0 && (shiftMenu || (wildcard && !wildcardDismissed));
+    useEffect(() => cancelShiftTimer, []);
+    const menuListRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        // Keep the row moved to in view (by hand, so nothing but the list itself scrolls).
+        const list = menuListRef.current;
+        const row = list?.querySelector<HTMLElement>('[data-active="true"]');
+        if (!list || !row) return;
+        if (row.offsetTop < list.scrollTop) list.scrollTop = row.offsetTop;
+        else if (row.offsetTop + row.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = row.offsetTop + row.offsetHeight - list.clientHeight;
+    }, [suggestionPick, menuTouched, menuOpen]);
+
     const isFilterSearchActive = facets.some(f => f.type === 'title_search' || f.type === 'term_search' || f.type === 'definition_search');
 
     // Reset when view mode changes
@@ -83,7 +189,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             const val = f.value || query;
             const escapedValue = (val.includes(' ') && !val.startsWith('"')) ? `"${val}"` : val;
             return `${f.type}:${escapedValue}`;
-        }).join(' ') + (facets.length === 0 ? query : "");
+        }).join(' ') + (facets.length === 0 ? unescapeSpecial(query) : "");
 
         if (isLibrary) {
             onSearch(fullQuery);
@@ -121,6 +227,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     const getFacetIcon = (type: string) => {
         switch (type) {
             case 'handle': return <AtSign className="w-3 h-3" />;
+            case 'channel_name': return <span className="text-xs font-bold">@@</span>;
             case 'playlist': return <ListVideo className="w-3 h-3" />;
             case 'video': return <span className="text-xs font-bold">{'>'}</span>;
             case 'definition_search': return <FileText className="w-3 h-3" />;
@@ -145,6 +252,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             patterns['tag_search:'] = 'tag_search';
             patterns['term_search:'] = 'term_search';
             patterns['handle:'] = 'handle';
+            patterns['channel_name:'] = 'channel_name';
             patterns['video:'] = 'video';
         } else {
             patterns['title_search:'] = 'title_search';
@@ -212,7 +320,15 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                 setFacets([{ type: 'term_search', value: '' }]);
                 setQuery(termMatch[1]);
                 return;
-            } else if (handle && (val.includes('youtube.com') || (val.startsWith('@') && val.length > 3))) {
+            } else if (isLibrary && val.startsWith('@@')) {
+                // "@@" is a channel's display name (Library only). Like "@", it stays plain text until something
+                // follows it, so a lone "@" or "@@" doesn't start a filter that has nothing in it yet.
+                if (val.slice(2).trim()) {
+                    setFacets([{ type: 'channel_name', value: "" }]);
+                    setQuery(val.slice(2));
+                    return;
+                }
+            } else if (handle && handle.trim() && (val.includes('youtube.com') || val.startsWith('@'))) {
                 setFacets([{ type: 'handle', value: "" }]);
                 setQuery(handle);
                 return;
@@ -267,12 +383,93 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         setQuery(val);
     };
 
+    const handleKeyUp = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key !== 'Shift') return;
+        cancelShiftTimer();
+        if (shiftMenu && menuTouched && suggestion) acceptSuggestion();
+        closeMenu();
+    };
+
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Shift') {
+            if (!e.repeat && suggestions.length > 0 && !menuOpen && !wildcard) {
+                cancelShiftTimer();
+                shiftTimerRef.current = window.setTimeout(() => { setMenuOpen(true); setMenuTouched(false); }, 200);
+            }
+            return;
+        }
+        cancelShiftTimer();
+        if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+            const key = e.key.toLowerCase();
+            const undo = undoRef.current;
+            const redo = redoRef.current;
+            if (key === 'z' && !e.shiftKey && undo && query === undo.after) {
+                e.preventDefault();
+                userActionRef.current = true;
+                setQuery(undo.before);
+                undoRef.current = null;
+                redoRef.current = undo;
+                return;
+            }
+            if ((key === 'y' || (key === 'z' && e.shiftKey)) && redo && query === redo.before) {
+                e.preventDefault();
+                userActionRef.current = true;
+                setQuery(redo.after);
+                redoRef.current = null;
+                undoRef.current = redo;
+                return;
+            }
+        }
+        if (showMenu) {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                // "Nothing chosen" is a stop above the first row and below the last, so the way back to it is
+                // to keep going the same way (Up from the top row, Down from the bottom one).
+                const n = suggestions.length;
+                const pick = suggestionPick % n;
+                if (e.key === 'ArrowDown') {
+                    if (!menuTouched) { setSuggestionPick(0); setMenuTouched(true); }
+                    else if (pick === n - 1) { setSuggestionPick(0); setMenuTouched(false); }
+                    else setSuggestionPick(pick + 1);
+                } else {
+                    if (!menuTouched) { setSuggestionPick(n - 1); setMenuTouched(true); }
+                    else if (pick === 0) setMenuTouched(false);
+                    else setSuggestionPick(pick - 1);
+                }
+                return;
+            }
+            if (wildcard) {
+                if ((e.key === 'Enter' && menuTouched) || (e.key === 'Tab' && !e.shiftKey)) {
+                    e.preventDefault();
+                    acceptSuggestion();
+                    return;
+                }
+                if (e.key === 'Escape') { setWildcardDismissed(true); return; }
+            } else {
+                // Anything else typed while the Shift list is open is just typing: the list steps aside.
+                closeMenu();
+            }
+        }
+        if (suggestion && !wildcard) {
+            const atEnd = e.currentTarget.selectionStart === query.length && e.currentTarget.selectionEnd === query.length;
+            if ((e.key === 'Tab' && !e.shiftKey) || (e.key === 'ArrowRight' && atEnd)) {
+                e.preventDefault();
+                acceptSuggestion();
+                return;
+            }
+            if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && suggestions.length > 1) {
+                e.preventDefault();
+                const step = e.key === 'ArrowDown' ? 1 : -1;
+                setSuggestionPick(i => (i + step + suggestions.length) % suggestions.length);
+                return;
+            }
+        }
         if (e.key === 'Backspace' && query === '' && facets.length > 0 && e.currentTarget.selectionStart === 0) {
             userActionRef.current = true;
             const lastFacet = facets[facets.length - 1];
             setFacets(facets.slice(0, -1));
-            setQuery(lastFacet.type + ':');
+            // A handle chip goes back to the "@" that made it, so one more Backspace clears it.
+            setQuery(lastFacet.type === 'handle' ? '@' : lastFacet.type === 'channel_name' ? '@@' : lastFacet.type + ':');
             e.preventDefault();
         }
         if (e.key === 'Escape') {
@@ -290,7 +487,9 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         e.preventDefault();
         const isYouTubeMode = !isLibraryOrGlossary && facets.some(f => f.type === 'handle' || f.type === 'video' || f.type === 'playlist');
         if (isFilterSearchActive && !isLibraryOrGlossary && !isYouTubeMode) return;
-        const fullQuery = facets.map(f => `${f.type}:${query}`).join(' ') + (facets.length === 0 ? query : "");
+        // A chip with nothing after it (just typed "@") has nothing to look up.
+        if (isYouTubeMode && !query.trim()) return;
+        const fullQuery = facets.map(f => `${f.type}:${query}`).join(' ') + (facets.length === 0 ? unescapeSpecial(query) : "");
         const trimmed = fullQuery.trim();
         if (trimmed) {
             onSearch(trimmed);
@@ -314,6 +513,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     };
 
     const handleFocus = () => {
+        if (wantsSuggestions) loadSuggestions();
         if (!isLibrary && flags.showSearchHistory) {
             loadHistory();
             setShowHistory(true);
@@ -322,6 +522,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
 
     const [facetMenuIndex, setFacetMenuIndex] = useState<number | null>(null);
 
+    // The order here is the order of the tips list (the lightbulb) above, so the two always read the same.
     const availableFacets = useMemo(() => {
         if (viewMode === 'glossary') {
             return [
@@ -338,17 +539,18 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         if (viewMode === 'search') {
             return [
                 { type: 'title_search' as const, label: 'Title (!n)' },
-                { type: 'handle' as const, label: 'Channel (@)' },
                 { type: 'playlist' as const, label: 'Playlist (!p)' },
                 { type: 'video' as const, label: 'Video ID (>)' },
+                { type: 'handle' as const, label: 'Channel (@)' },
             ];
         }
         // Library mode
         return [
             { type: 'tag_search' as const, label: 'Tag (#)' },
             { type: 'term_search' as const, label: 'Term (^)' },
-            { type: 'handle' as const, label: 'Channel (@)' },
             { type: 'video' as const, label: 'Video ID (>)' },
+            { type: 'handle' as const, label: 'Handle (@)' },
+            { type: 'channel_name' as const, label: 'Channel Name (@@)' },
         ];
     }, [viewMode]);
 
@@ -376,7 +578,8 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
 
     return (
         <form onSubmit={handleSubmit} className="w-full mb-2 px-4 relative z-50">
-            <div className={`flex items-stretch justify-center transition-all ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
+            {/* data-search-bar: the command palette (CommandPalette.tsx) lines itself up with this row. */}
+            <div data-search-bar className={`flex items-stretch justify-center transition-all ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
                 <div ref={containerRef} className="relative flex-1">
                     <div className={`flex flex-wrap items-center bg-[#121212] border border-[#404040] ${isLibraryOrGlossary ? 'rounded-full' : 'rounded-l-full'} focus-within:ring-1 focus-within:ring-[var(--k-accent)] transition-all min-h-11 py-1 px-3 gap-2`}>
                         {facets.map((f, i) => (
@@ -423,17 +626,38 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                             </div>
                         ))}
 
-                        <input
-                            ref={inputRef}
-                            type="text"
-                            value={query}
-                            onChange={(e) => handleInput(e.target.value)}
-                            onKeyDown={handleKeyDown}
-                            onFocus={handleFocus}
-                            placeholder={(query || facets.length > 0) ? "" : (placeholder || "Search YouTube handle, playlist URL, or video URL")}
-                            className="flex-1 min-w-[120px] bg-transparent text-white px-2 focus:outline-none placeholder-gray-500 text-[16px] h-full"
-                            disabled={loading}
-                        />
+                        <div className="relative flex-1 min-w-[120px]">
+                            <input
+                                ref={inputRef}
+                                type="text"
+                                value={query}
+                                onChange={(e) => handleInput(e.target.value)}
+                                onKeyDown={handleKeyDown}
+                                onKeyUp={handleKeyUp}
+                                onBlur={closeMenu}
+                                onFocus={handleFocus}
+                                placeholder={(query || facets.length > 0) ? "" : (placeholder || "Search YouTube handle, playlist URL, or video URL")}
+                                className="w-full bg-transparent text-white px-2 focus:outline-none placeholder-gray-500 text-[16px] h-full"
+                                disabled={loading}
+                            />
+                            {/* The rest of the suggested value, faint, right after what's typed (the typed part is only
+                                there to push it along, so it's invisible). A video ID adds its title, and a handle its channel name, in parentheses,
+                                cut short with an ellipsis when it doesn't fit. */}
+                            {suggestion && !wildcard && (
+                                <div aria-hidden className="absolute inset-0 flex items-center px-2 text-[16px] pointer-events-none whitespace-pre overflow-hidden">
+                                    <span className="invisible shrink-0">{query}</span>
+                                    <span className="text-gray-500 shrink-0">{suggestion.text.slice(query.length)}</span>
+                                    <span className="ml-2 px-1 rounded border border-[#444444] text-[10px] leading-4 text-gray-500 shrink-0">TAB</span>
+                                    {suggestion.title && (
+                                        <span className="ml-2 min-w-0 flex text-gray-500">
+                                            <span>(</span>
+                                            <span className="truncate">{suggestion.title}</span>
+                                            <span>)</span>
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+                        </div>
 
                          {/* Hints Lightbulb */}
                         {!isBiography && (
@@ -498,6 +722,12 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                                     <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">@</span>/ ID / URL</span>
                                                 </code>
                                             )}
+                                            {isLibrary && (
+                                                <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                    <span>channel_name:</span>
+                                                    <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">@@</span>/ Channel Name</span>
+                                                </code>
+                                            )}
                                         </div>
                                     </div>
 
@@ -506,6 +736,45 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                         </div>
                         )}
                     </div>
+
+                    {/* Every value that fits, while Shift is held (see menuOpen above). */}
+                    {showMenu && (
+                        <div className="absolute top-full left-0 right-0 mt-1.5 bg-[#141414] border border-[#303030] rounded-xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150">
+                            <div ref={menuListRef} className="max-h-64 overflow-y-auto custom-scrollbar py-1 relative">
+                                {suggestions.map((sug, i) => {
+                                    const active = menuTouched && i === suggestionPick % suggestions.length;
+                                    return (
+                                        <div
+                                            key={sug.text}
+                                            data-active={active}
+                                            // Keeps focus in the search box, so Shift being let go is still seen there.
+                                            onMouseDown={(e) => e.preventDefault()}
+                                            onClick={() => { applySuggestion(sug.text); closeMenu(); }}
+                                            className={`flex items-center justify-between gap-4 px-4 py-2 text-[14px] cursor-pointer transition-colors ${active ? 'bg-[#272727] text-white' : 'text-gray-300 hover:bg-[#1f1f1f]'}`}
+                                        >
+                                            <span className="shrink-0">
+                                                {wildcard ? <span className="text-gray-200">{sug.text}</span> : (
+                                                    <>
+                                                        <span className="text-white font-semibold">{sug.text.slice(0, query.length)}</span>
+                                                        <span className="text-gray-400">{sug.text.slice(query.length)}</span>
+                                                    </>
+                                                )}
+                                            </span>
+                                            {sug.title && <span className="min-w-0 truncate text-[12px] text-gray-500">{sug.title}</span>}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            {/* The same footer as the command palette's. Past either end of the list clears the choice. */}
+                            <div className="flex items-center gap-4 px-4 py-2 border-t border-[#303030] text-[10px] text-gray-600">
+                                <span title="Past either end of the list clears the choice"><kbd className="text-gray-400">↑↓</kbd> Move</span>
+                                {wildcard
+                                    ? <span><kbd className="text-gray-400">Enter</kbd> Select</span>
+                                    : <span><kbd className="text-gray-400">Shift</kbd> Release to select</span>}
+                                <span className="ml-auto">Suggestions</span>
+                            </div>
+                        </div>
+                    )}
 
                     {/* Search History Dropdown */}
                     {flags.showSearchHistory && showHistory && !isLibraryOrGlossary && filteredHistory.length > 0 && (

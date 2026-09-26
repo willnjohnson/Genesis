@@ -3,6 +3,7 @@ import { Image as ImageIcon, Search, Loader2, Upload } from 'lucide-react';
 import { uploadToImgur, generateImage as generateVeniceImage, searchPixabay, getPixabayApiKey, setPixabayApiKey as savePixabayApiKey, getVeniceApiKey, setVeniceApiKey as saveVeniceApiKey, getKeyStatus } from '../../api';
 import { saveImageAs } from '../../lib/save-image-as';
 import photosynthesisLogo from '../../assets/photosynthesis.png';
+import { HowToSetUp, API_GUIDES } from '../settings/ApiPanelHeading';
 
 interface Props {
     showSynthesizeVenice: boolean;
@@ -147,7 +148,7 @@ export function PhotosynthesisPanel({
     return (
         <div className="flex flex-col h-full bg-transparent relative">
             {/* Image Tool Header */}
-            <div className="px-6 py-4 border-b border-[#303030] flex flex-col gap-4 bg-white/5">
+            <div data-panel-anchor className="px-6 py-4 border-b border-[#303030] flex flex-col gap-4 bg-white/5">
                 <div className="flex items-center gap-2">
                     <img src={photosynthesisLogo} alt="Photosynthesis" className="w-5 h-5" />
                     <div className="flex flex-col -gap-0.5">
@@ -203,7 +204,10 @@ export function PhotosynthesisPanel({
                     <div className="space-y-4">
                         {!veniceApiKeySaved ? (
                             <div className="space-y-3">
-                                <p className="text-[10px] font-bold uppercase tracking-wider text-[#888888]">Venice API Key</p>
+                                <div className="flex items-baseline justify-between gap-3">
+                                    <p className="text-[10px] font-bold uppercase tracking-wider text-[#888888]">Venice API Key</p>
+                                    <HowToSetUp guideUrl={API_GUIDES.venice.url} costNote={API_GUIDES.venice.costNote} />
+                                </div>
                                 <div className="flex gap-2">
                                     <input
                                         type="password"
@@ -303,7 +307,10 @@ export function PhotosynthesisPanel({
                     <div className="space-y-4">
                         {!pixabayApiKeySaved ? (
                             <div className="space-y-3">
-                                <p className="text-[10px] font-bold uppercase tracking-wider text-[#888888]">Pixabay API Key</p>
+                                <div className="flex items-baseline justify-between gap-3">
+                                    <p className="text-[10px] font-bold uppercase tracking-wider text-[#888888]">Pixabay API Key</p>
+                                    <HowToSetUp guideUrl={API_GUIDES.pixabay.url} />
+                                </div>
                                 <div className="flex gap-2">
                                     <input
                                         id="pixabay-api-key-input"

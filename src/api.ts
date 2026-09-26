@@ -150,8 +150,11 @@ export async function getTagVideosPreview(tag: string, limit?: number): Promise<
     return await invoke("get_tag_videos_preview", { tag, limit });
 }
 
-export async function deleteVideo(id: string): Promise<void> {
-    await invoke("delete_video", { videoId: id });
+/** Deletes a saved video. It goes to the Trash (see `trashList`); the Trash id comes back so the delete can be undone. */
+export async function deleteVideo(id: string): Promise<number | null> {
+    const trashId = await invoke<number | null>("delete_video", { videoId: id });
+    notifyTrashChanged();
+    return trashId;
 }
 
 export async function bulkSaveVideos(ids: string[]): Promise<any[]> {
@@ -455,8 +458,54 @@ export async function getGlossaryTerms(): Promise<GlossaryTerm[]> {
 }
 
 /** Deletes one entry: the row of `term` filed under exactly `drives` (empty = the uncategorized row). */
-export async function deleteGlossaryTerm(term: string, drives: string[]): Promise<void> {
-    await invoke("delete_glossary_term", { term, drives });
+export async function deleteGlossaryTerm(term: string, drives: string[]): Promise<number | null> {
+    const trashId = await invoke<number | null>("delete_glossary_term", { term, drives });
+    notifyTrashChanged();
+    return trashId;
+}
+
+// ─── Trash ───────────────────────────────────────────────────────────────────
+// What was deleted this session, kept in the app's memory (never saved), so a delete can be undone. It's emptied
+// when the app closes or the workspace changes.
+
+export type TrashKind = 'video' | 'glossary';
+
+export interface TrashEntry {
+    id: number;
+    kind: TrashKind;
+    label: string;
+    detail: string;
+    /** Milliseconds since the epoch. */
+    deleted_at: number;
+}
+
+/** Fired on `window` whenever the Trash changes, so every place that shows it can refresh. */
+export const TRASH_CHANGED_EVENT = 'kinesis-trash-changed';
+function notifyTrashChanged() {
+    window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
+}
+
+export async function trashList(kind: TrashKind): Promise<TrashEntry[]> {
+    return await invoke("trash_list", { kind });
+}
+
+/** Puts a deleted item back. Rejects with the reason when it can't be (say, it was made again since). */
+export async function trashRestore(id: number): Promise<void> {
+    try {
+        await invoke("trash_restore", { id });
+    } finally {
+        notifyTrashChanged();
+    }
+}
+
+export async function trashDiscard(id: number): Promise<void> {
+    await invoke("trash_discard", { id });
+    notifyTrashChanged();
+}
+
+export async function trashEmpty(kind: TrashKind): Promise<void> {
+    await invoke("trash_empty", { kind });
+    notifyTrashChanged();
 }
 
 /** A top-level Drive (level 1) a Standard Glossary Tag can be filed under. */
@@ -661,6 +710,11 @@ export async function saveAttachmentAs(id: number): Promise<boolean> {
 /** Curated aliases for the given Drive paths (storage form), keyed by path. Drives without an alias are left out. */
 export async function getWdbsAliases(paths: string[]): Promise<Record<string, string>> {
     return await invoke("get_wdbs_aliases", { paths });
+}
+
+/** What the search box completes from: saved channels (handle without "@", and their name) and every saved video's ID and title. */
+export async function getSearchSuggestions(): Promise<{ handles: { handle: string; name: string }[]; channels: { name: string; handle: string }[]; videos: { id: string; title: string }[] }> {
+    return await invoke("get_search_suggestions");
 }
 
 /** Every Drive a channel's saved videos appear in (its category or an "Also in" link). */
@@ -1259,4 +1313,35 @@ export async function importKinpak(filePath: string, name: string, open: boolean
         filePath, name, open, location: location ?? null,
     });
     return { workspace: toWorkspace(r.workspace), summary: r.summary, merged: r.merged };
+}
+
+// ─── Tray (Windows) ──────────────────────────────────────────────────────────
+// The tray icon and its quick-save popup (src/components/QuickAdd.tsx). Other platforms have neither.
+
+/** Whether this platform has the tray icon and popup. */
+export async function traySupported(): Promise<boolean> {
+    return await invoke("tray_supported");
+}
+
+/** "Keep running in the tray": closing the main window hides it instead of quitting. */
+export async function getCloseToTray(): Promise<boolean> {
+    return await invoke("get_close_to_tray");
+}
+
+export async function setCloseToTray(enabled: boolean): Promise<void> {
+    await invoke("set_close_to_tray", { enabled });
+}
+
+/** The text on the clipboard, if there is any. */
+export async function readClipboardText(): Promise<string | null> {
+    return await invoke("read_clipboard_text");
+}
+
+export async function hideQuickAdd(): Promise<void> {
+    await invoke("hide_quick_add");
+}
+
+/** Brings the main window to the front (from the popup): out of the tray, restored, or just focused. */
+export async function showMainWindow(): Promise<void> {
+    await invoke("show_main_window");
 }

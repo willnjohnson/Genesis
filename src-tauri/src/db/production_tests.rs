@@ -132,3 +132,25 @@ fn a_biography_without_a_channel_id_is_accepted_by_the_production_schema() {
     drop(conn);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn a_deleted_video_can_be_restored_on_the_production_schema() {
+    use crate::trash::{delete_video, list, restore, TrashKind, TrashStore};
+    let path = production_db("trash");
+    schema::init_db(&path).unwrap();
+    let trash = std::sync::Mutex::new(TrashStore::default());
+    biography::upsert_biography_from_video(&path, "@creator", "The Creator", Some("UC123"), -1).unwrap();
+    videos::save_video(&path, "vid1", "Freebird live", "The Creator", 240, "some words about a free bird", 1000, "2024-05-01", "@creator", Some("A summary")).unwrap();
+    videos::save_tags(&path, "vid1", "music, live").unwrap();
+
+    delete_video(&trash, &path, "vid1").unwrap();
+    let gone: i64 = Connection::open(&path).unwrap().query_row("SELECT COUNT(*) FROM Videos", [], |r| r.get(0)).unwrap();
+    assert_eq!(gone, 0);
+    let id = list(&trash, &path, TrashKind::Video)[0].id;
+    restore(&trash, &path, id).unwrap_or_else(|e| panic!("restore failed on the production schema: {e}"));
+    let video = videos::get_video_by_id(&path, "vid1", true).unwrap().expect("restored");
+    assert_eq!(video.title, "Freebird live");
+    assert!(video.summary.as_deref().is_some_and(|s| s.starts_with("A summary")), "its summary came back: {:?}", video.summary);
+    let tags: String = Connection::open(&path).unwrap().query_row("SELECT tags FROM Videos WHERE video_id='vid1'", [], |r| r.get(0)).unwrap();
+    assert_eq!(tags, "music, live", "its tags came back too");
+}

@@ -11,6 +11,7 @@ import { useLockedSettings, LOCKED_TITLE } from "../../hooks/useLockedSettings";
 import { useFlags } from "../../hooks/useFlags";
 import { PromptEditor, DefaultBadge, TooltipLightbulb } from "./pluginShared";
 import { settingsPrimaryBtn, settingsSecondaryBtn } from "./buttons";
+import { Toggle } from "./Toggle";
 
 // ─── Local (Ollama) sub-tab ─────────────────────────────────────────────────
 
@@ -298,18 +299,17 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
                                             <span className="text-xs font-bold text-white">Show Custom Prompt in Sidebar</span>
                                             <TooltipLightbulb />
                                         </div>
-                                        <button
-                                            onClick={async () => {
+                                        <Toggle
+                                            on={showCustomPrompt}
+                                            label="Show Custom Prompt in Sidebar"
+                                            onChange={async () => {
                                                 const newValue = !showCustomPrompt;
                                                 setShowCustomPrompt(newValue);
                                                 await setSetting('showCustomPrompt', newValue.toString());
                                             }}
                                             disabled={isLocked('showCustomPrompt')}
                                             title={isLocked('showCustomPrompt') ? LOCKED_TITLE : undefined}
-                                            className={`w-10 h-5 rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default ${showCustomPrompt ? 'bg-blue-600' : 'bg-[#333333]'}`}
-                                        >
-                                            <div className={`w-4 h-4 bg-white rounded-full transition-transform ${showCustomPrompt ? 'translate-x-5' : 'translate-x-0.5'}`} />
-                                        </button>
+                                        />
                                     </div>
 
                                     {/* Clear Transcript After Summarizing Toggle */}
@@ -322,18 +322,17 @@ export function PluginsTab({ plugins, onTogglePlugin, loading, showSummarizeOlla
                                                 Clear Transcript After Summarizing
                                             </span>
                                         </div>
-                                        <button
-                                            onClick={async () => {
+                                        <Toggle
+                                            on={clearTranscriptOnSummarize}
+                                            label="Clear Transcript After Summarizing"
+                                            onChange={async () => {
                                                 const newValue = !clearTranscriptOnSummarize;
                                                 setClearTranscriptOnSummarize(newValue);
                                                 await setSetting('setTranscriptAfterSummarizeToNA', newValue.toString());
                                             }}
                                             disabled={isLocked('setTranscriptAfterSummarizeToNA')}
                                             title={isLocked('setTranscriptAfterSummarizeToNA') ? LOCKED_TITLE : undefined}
-                                            className={`w-10 h-5 rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default ${clearTranscriptOnSummarize ? 'bg-blue-600' : 'bg-[#333333]'}`}
-                                        >
-                                            <div className={`w-4 h-4 bg-white rounded-full transition-transform ${clearTranscriptOnSummarize ? 'translate-x-5' : 'translate-x-0.5'}`} />
-                                        </button>
+                                        />
                                     </div>
 
                                     {/* Sub-tabs */}

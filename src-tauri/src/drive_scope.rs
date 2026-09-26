@@ -190,7 +190,8 @@ impl ScopePlan {
                     continue;
                 }
                 if scope.terms == TermsMode::Drop {
-                    dropped_terms.insert(term);
+                    // Kept lowercase: links to a term ignore its capitalization (see LinkKind::Glossary in db/links.rs).
+                    dropped_terms.insert(term.to_ascii_lowercase());
                 } else {
                     rehomed_terms.insert(term, left_out[0].clone());
                 }
@@ -282,7 +283,7 @@ impl ScopePlan {
         rewrite_links(text, |link| {
             let gone = match link.kind {
                 LinkKind::Video => self.dropped_videos.contains(&link.key),
-                LinkKind::Glossary => self.dropped_terms.contains(&link.key),
+                LinkKind::Glossary => self.dropped_terms.contains(&link.key.to_ascii_lowercase()),
                 LinkKind::Bio => self.dropped_handles.contains(&normalize_handle(&link.key)),
                 // A Drive link carries either a display path or a storage one.
                 LinkKind::Drive => root_of_display(&link.key)

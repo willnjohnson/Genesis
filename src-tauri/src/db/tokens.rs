@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
 /// The SQL only looks for words that start within this many characters of the (normalized) text.
 const MAX_WORD_START: usize = 50_000;
@@ -78,6 +78,21 @@ pub fn load_stop_words(conn: &Connection) -> HashSet<String> {
 pub fn set_tokens_from_transcript(conn: &Connection, video_id: &str, transcript: &str, stop_words: &HashSet<String>) -> Result<()> {
     if let Some(tokens) = transcript_tokens(transcript, stop_words) {
         conn.execute("UPDATE Videos SET tokens = ?1 WHERE video_id = ?2", params![tokens, video_id])?;
+    }
+    Ok(())
+}
+
+/// Rebuilds a video's tokens from the transcript stored for it. What every save uses: the SQL version
+/// (`regenerate_tokens_from_transcript`, kept for the tests to compare against) took 13 seconds for a
+/// 50,000-character transcript and nearly two minutes for a million, where this takes well under a
+/// second, and gives the same words.
+pub fn regenerate_tokens(conn: &Connection, video_id: &str) -> Result<()> {
+    let transcript: Option<String> = conn
+        .query_row("SELECT transcript FROM Videos WHERE video_id = ?1", params![video_id], |r| r.get::<_, Option<String>>(0))
+        .optional()?
+        .flatten();
+    if let Some(transcript) = transcript {
+        set_tokens_from_transcript(conn, video_id, &transcript, &load_stop_words(conn))?;
     }
     Ok(())
 }
@@ -170,5 +185,35 @@ mod tests {
         let tokens = transcript_tokens(&text, &HashSet::new()).unwrap();
         assert!(tokens.split(' ').count() > 1_000);
         assert!(started.elapsed().as_secs() < 5, "took {:?}", started.elapsed());
+    }
+
+    /// `cargo test --lib -- --ignored --nocapture save_speed`: how long saving a long transcript takes
+    /// through the old SQL tokenizer versus the Rust one.
+    #[test]
+    #[ignore]
+    fn save_speed() {
+        let db = temp_db("speed");
+        let words = ["alpha", "beta", "gamma", "delta", "mitochondria", "epsilon", "zeta,", "eta.", "theta"];
+        for chars in [50_000usize, 300_000, 1_000_000] {
+            let mut text = String::with_capacity(chars + 16);
+            let mut i = 0;
+            while text.len() < chars {
+                text.push_str(words[i % words.len()]);
+                text.push_str(if i % 12 == 11 { "
+" } else { " " });
+                i += 1;
+            }
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("DELETE FROM Videos", []).unwrap();
+            conn.execute("INSERT INTO Videos (video_id, transcript, tokens) VALUES ('v', ?1, '')", params![text]).unwrap();
+            let t = std::time::Instant::now();
+            regenerate_tokens_from_transcript(&conn, "v").unwrap();
+            let sql = t.elapsed();
+            let stop = load_stop_words(&conn);
+            let t = std::time::Instant::now();
+            set_tokens_from_transcript(&conn, "v", &text, &stop).unwrap();
+            let rust = t.elapsed();
+            println!("{chars:>9} chars: SQL {sql:?}, Rust {rust:?}");
+        }
     }
 }

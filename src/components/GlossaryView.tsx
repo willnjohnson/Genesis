@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState, useMemo, type RefObject } from 'react';
-import { getGlossaryTerms, deleteGlossaryTerm, saveGlossaryTerm, getWdbsRoots, type GlossaryTerm, type WdbsRoot, type Video } from '../api';
+import { getGlossaryTerms, deleteGlossaryTerm, trashRestore, saveGlossaryTerm, getWdbsRoots, type GlossaryTerm, type WdbsRoot, type Video } from '../api';
 import { Plus, X, Pencil, Check, ChevronDown } from 'lucide-react';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { ConfirmDialog } from './ConfirmDialog';
+import { Modal } from './Modal';
 import { AlphabetJumpNav } from './AlphabetJumpNav';
+import { TrashChip } from './TrashChip';
+import type { NotificationContent } from './Notification';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { normalizeText } from '../lib/utils';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
@@ -107,7 +110,7 @@ function DrivePicker({ roots, selected, onChange }: { roots: WdbsRoot[], selecte
     );
 }
 
-export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allowModification = true, onChange, scrollContainerRef }: { searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'term' | 'library') => void, onOpenVideo?: (video: Video) => void, allowModification?: boolean, onChange?: () => void, scrollContainerRef: RefObject<HTMLDivElement | null> }) {
+export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allowModification = true, onChange, onNotify, onOpenTrash, reloadSignal, scrollContainerRef }: { onNotify?: (n: NotificationContent) => void, onOpenTrash?: () => void, reloadSignal?: number, searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'term' | 'library') => void, onOpenVideo?: (video: Video) => void, allowModification?: boolean, onChange?: () => void, scrollContainerRef: RefObject<HTMLDivElement | null> }) {
     const { labels } = useWorkspace();
     const glossaryLower = labels.aliasGlossary.toLowerCase();
     const [terms, setTerms] = useState<GlossaryTerm[]>([]);
@@ -143,6 +146,12 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
         loadTerms();
         loadRoots();
     }, []);
+    // Something was put back from the Trash (its window is App's): reload, and tell whoever wants to know.
+    useEffect(() => {
+        if (!reloadSignal) return;
+        loadTerms();
+        onChange?.();
+    }, [reloadSignal]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Every term row (one per term per drive): small, and all the default "All Terms" view needs,
     // so the list shows as soon as they arrive.
@@ -188,11 +197,36 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
         onChange?.();
     };
 
+    // With Confirm Before Deleting on, a delete asks first (the dialog below); off, it happens at once.
+    const askDelete = (t: GlossaryTerm) => {
+        if (flags.confirmBeforeDeleting) setTermToDelete(t);
+        else void deleteEntry(t);
+    };
     const handleDelete = async () => {
-        if (!termToDelete) return;
-        await deleteGlossaryTerm(termToDelete.term, termToDelete.drives);
+        if (termToDelete) await deleteEntry(termToDelete);
+    };
+    const deleteEntry = async (target: GlossaryTerm) => {
+        const trashId = await deleteGlossaryTerm(target.term, target.drives);
+        const deleted = target;
         setTermToDelete(null);
-        if (selectedTerm?.term === termToDelete.term && sameDrives(selectedTerm.drives, termToDelete.drives)) setSelectedTerm(null);
+        // The delete went to the Trash: say so, with an Undo that puts the entry (and its links) back.
+        onNotify?.({
+            message: `Deleted "${deleted.term}"`,
+            type: 'success',
+            action: trashId === null ? undefined : {
+                label: 'Undo',
+                onClick: () => {
+                    trashRestore(trashId)
+                        .then(() => {
+                            loadTerms();
+                            onChange?.();
+                            onNotify({ message: `Restored "${deleted.term}"`, type: 'success' });
+                        })
+                        .catch((e) => onNotify({ message: `Couldn't restore: ${typeof e === 'string' ? e : e?.message ?? e}`, type: 'error' }));
+                },
+            },
+        });
+        if (selectedTerm?.term === target.term && sameDrives(selectedTerm.drives, target.drives)) setSelectedTerm(null);
         loadTerms();
         onChange?.();
     };
@@ -297,10 +331,11 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                 </div>
             </div>
 
-            {/* pb-10: AlphabetJumpNav (below) is a true fixed panel, always present, no longer part
+            {/* pb-20: room at the very bottom for the floating back-to-top button (App.tsx), so it never sits
+                on a row's edit/delete icons once scrolled all the way down. (AlphabetJumpNav, below, is a true fixed panel, always present, no longer part
                 of this page's own scroll — its ~24px height has to be reserved here instead, or
                 it'd sit over the last section once scrolled all the way down. */}
-            <div className="px-2 pb-10">
+            <div className="px-2 pb-20">
                 {terms.length === 0 ? (
                     <div className="text-center text-gray-500 py-24 bg-[#121212] rounded-xl border border-[#272727]">
                         <p className="text-xl font-bold text-white mb-2">No glossary terms have been added</p>
@@ -352,7 +387,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                                                         <Pencil className="w-3.5 h-3.5" />
                                                     </button>
                                                     <button
-                                                        onClick={(e) => { e.stopPropagation(); setTermToDelete(t); }}
+                                                        onClick={(e) => { e.stopPropagation(); askDelete(t); }}
                                                         className="text-gray-500 hover:text-red-500 transition-colors cursor-pointer p-1"
                                                         title="Delete term"
                                                     >
@@ -369,69 +404,23 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                               )}
                          </div>
 
-            <AlphabetJumpNav idPrefix="glossary-az" available={groupKeys} scrollContainerRef={scrollContainerRef} />
+            <AlphabetJumpNav
+                idPrefix="glossary-az"
+                available={groupKeys}
+                scrollContainerRef={scrollContainerRef}
+                trailing={onOpenTrash ? <TrashChip kind="glossary" labelFrom="2xl" onOpen={onOpenTrash} /> : undefined}
+            />
 
             {/* Add Modal */}
             {showAddModal && (
-                <div
-                    className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200"
-                    onClick={() => setShowAddModal(false)}
-                >
-                    <form
-                        onSubmit={handleAdd}
-                        onClick={e => e.stopPropagation()}
-                        className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-md flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"
-                    >
-                        {/* Header */}
-                        <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
-                            <div className="flex items-center gap-2 text-gray-200">
-                                <Plus className="w-4 h-4" />
-                                <h2 className="text-lg font-bold">Add {showGlossaryTags ? "Term" : "Tag"}</h2>
-                            </div>
-                            <button type="button" onClick={() => setShowAddModal(false)} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
-                                <X className="w-5 h-5" />
-                            </button>
-                        </div>
-
-                        {/* Content */}
-                        <div className="p-6 space-y-6">
-                             <div>
-                                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">{showGlossaryTags ? "Term" : "Tag"} Name</label>
-                                 <input
-                                     type="text"
-                                     autoFocus
-                                     required
-                                     value={newTerm}
-                                     onChange={e => setNewTerm(e.target.value)}
-                                     className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600 transition-all placeholder-gray-600"
-                                     placeholder="Enter term..."
-                                 />
-                             </div>
-                             {showGlossaryTags && (
-                                 <div>
-                                     <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Definition</label>
-                                     <textarea
-                                         required
-                                         value={newDefinition}
-                                         onChange={e => setNewDefinition(e.target.value)}
-                                         onContextMenu={handleMarkdownContextMenu}
-                                         onKeyDown={(e) => handleMarkdownKeyDown(e, newDefinition, setNewDefinition)}
-                                         rows={8}
-                                         className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600 transition-all resize-none placeholder-gray-600"
-                                         placeholder="Enter definition (Markdown supported)..."
-                                     />
-                                 </div>
-                             )}
-                             {showGlossaryTags && flags.glossaryDrivePickerVisible && (
-                                 <DrivePicker roots={roots} selected={newDrives} onChange={setNewDrives} />
-                             )}
-                             {saveError && (
-                                 <div className="text-xs text-red-400 bg-red-900/20 border border-red-500/30 rounded-lg px-3 py-2">{saveError}</div>
-                             )}
-                        </div>
-
-                        {/* Footer */}
-                        <div className="px-6 py-4 border-t border-[#303030] flex justify-end gap-3 bg-[#141414]">
+                <Modal
+                    onClose={() => setShowAddModal(false)}
+                    icon={Plus}
+                    title={<>Add {showGlossaryTags ? "Term" : "Tag"}</>}
+                    onSubmit={handleAdd}
+                    bodyClassName="p-6 space-y-6"
+                    footer={
+                        <>
                             <button
                                 type="button"
                                 onClick={() => setShowAddModal(false)}
@@ -445,73 +434,55 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                             >
                                 Save {showGlossaryTags ? "Term" : "Tag"}
                             </button>
+                        </>
+                    }
+                >
+                    <div>
+                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">{showGlossaryTags ? "Term" : "Tag"} Name</label>
+                        <input
+                            type="text"
+                            autoFocus
+                            required
+                            value={newTerm}
+                            onChange={e => setNewTerm(e.target.value)}
+                            className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600 transition-all placeholder-gray-600"
+                            placeholder="Enter term..."
+                        />
+                    </div>
+                    {showGlossaryTags && (
+                        <div>
+                            <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Definition</label>
+                            <textarea
+                                required
+                                value={newDefinition}
+                                onChange={e => setNewDefinition(e.target.value)}
+                                onContextMenu={handleMarkdownContextMenu}
+                                onKeyDown={(e) => handleMarkdownKeyDown(e, newDefinition, setNewDefinition)}
+                                rows={8}
+                                className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600 transition-all resize-none placeholder-gray-600"
+                                placeholder="Enter definition (Markdown supported)..."
+                            />
                         </div>
-                    </form>
-                </div>
+                    )}
+                    {showGlossaryTags && flags.glossaryDrivePickerVisible && (
+                        <DrivePicker roots={roots} selected={newDrives} onChange={setNewDrives} />
+                    )}
+                    {saveError && (
+                        <div className="text-xs text-red-400 bg-red-900/20 border border-red-500/30 rounded-lg px-3 py-2">{saveError}</div>
+                    )}
+                </Modal>
             )}
 
             {/* Edit Modal */}
             {termToEdit && (
-                <div
-                    className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200"
-                    onClick={() => setTermToEdit(null)}
-                >
-                    <form
-                        onSubmit={handleEditSave}
-                        onClick={e => e.stopPropagation()}
-                        className="bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full max-w-md flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"
-                    >
-                        {/* Header */}
-                        <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
-                            <div className="flex items-center gap-2 text-gray-200">
-                                <Pencil className="w-4 h-4" />
-                                <h2 className="text-lg font-bold">Edit {showGlossaryTags ? "Term" : "Tag"}</h2>
-                            </div>
-                            <button type="button" onClick={() => setTermToEdit(null)} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
-                                <X className="w-5 h-5" />
-                            </button>
-                        </div>
-
-                        {/* Content */}
-                        <div className="p-6 space-y-6">
-                             <div>
-                                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">{showGlossaryTags ? "Term" : "Tag"} Name</label>
-                                 <input
-                                     type="text"
-                                     required
-                                     value={termToEdit.term}
-                                     onChange={e => setTermToEdit({ ...termToEdit, term: e.target.value })}
-                                     className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all placeholder-gray-600"
-                                 />
-                             </div>
-                             {showGlossaryTags && (
-                                 <div>
-                                     <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Definition</label>
-                                      <textarea
-                                          required
-                                          value={termToEdit.definition}
-                                          onChange={e => setTermToEdit(prev => (prev ? { ...prev, definition: e.target.value } : prev))}
-                                          onContextMenu={handleMarkdownContextMenu}
-                                          onKeyDown={(e) => handleMarkdownKeyDown(e, termToEdit.definition, (val) => setTermToEdit(prev => (prev ? { ...prev, definition: val } : prev)))}
-                                          rows={8}
-                                          className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all resize-none placeholder-gray-600"
-                                      />
-                                 </div>
-                             )}
-                             {showGlossaryTags && flags.glossaryDrivePickerVisible && (
-                                 <DrivePicker
-                                     roots={roots}
-                                     selected={termToEdit.drives}
-                                     onChange={drives => setTermToEdit(prev => (prev ? { ...prev, drives } : prev))}
-                                 />
-                             )}
-                             {saveError && (
-                                 <div className="text-xs text-red-400 bg-red-900/20 border border-red-500/30 rounded-lg px-3 py-2">{saveError}</div>
-                             )}
-                        </div>
-
-                        {/* Footer */}
-                        <div className="px-6 py-4 border-t border-[#303030] flex justify-end gap-3 bg-[#141414]">
+                <Modal
+                    onClose={() => setTermToEdit(null)}
+                    icon={Pencil}
+                    title={<>Edit {showGlossaryTags ? "Term" : "Tag"}</>}
+                    onSubmit={handleEditSave}
+                    bodyClassName="p-6 space-y-6"
+                    footer={
+                        <>
                             <button
                                 type="button"
                                 onClick={() => setTermToEdit(null)}
@@ -525,9 +496,44 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                             >
                                 Save Changes
                             </button>
+                        </>
+                    }
+                >
+                    <div>
+                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">{showGlossaryTags ? "Term" : "Tag"} Name</label>
+                        <input
+                            type="text"
+                            required
+                            value={termToEdit.term}
+                            onChange={e => setTermToEdit({ ...termToEdit, term: e.target.value })}
+                            className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all placeholder-gray-600"
+                        />
+                    </div>
+                    {showGlossaryTags && (
+                        <div>
+                            <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Definition</label>
+                             <textarea
+                                 required
+                                 value={termToEdit.definition}
+                                 onChange={e => setTermToEdit(prev => (prev ? { ...prev, definition: e.target.value } : prev))}
+                                 onContextMenu={handleMarkdownContextMenu}
+                                 onKeyDown={(e) => handleMarkdownKeyDown(e, termToEdit.definition, (val) => setTermToEdit(prev => (prev ? { ...prev, definition: val } : prev)))}
+                                 rows={8}
+                                 className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all resize-none placeholder-gray-600"
+                             />
                         </div>
-                    </form>
-                </div>
+                    )}
+                    {showGlossaryTags && flags.glossaryDrivePickerVisible && (
+                        <DrivePicker
+                            roots={roots}
+                            selected={termToEdit.drives}
+                            onChange={drives => setTermToEdit(prev => (prev ? { ...prev, drives } : prev))}
+                        />
+                    )}
+                    {saveError && (
+                        <div className="text-xs text-red-400 bg-red-900/20 border border-red-500/30 rounded-lg px-3 py-2">{saveError}</div>
+                    )}
+                </Modal>
             )}
 
             {/* View Definition Modal */}

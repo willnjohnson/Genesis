@@ -1,4 +1,5 @@
 import { RefreshCw, PlugZap, Unplug, Lock, KeyRound, X } from "lucide-react";
+import { Toggle } from "./Toggle";
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useFlags } from "../../hooks/useFlags";
@@ -304,14 +305,11 @@ export function SyncTab({ onSyncComplete }: Props) {
                                 <div className="text-sm font-bold">Sync automatically</div>
                                 <div className="text-[11px] text-[#aaaaaa]">When the app starts, and then on a schedule while it's open.</div>
                             </div>
-                            <button
-                                onClick={() => handleOptions(!status.auto_sync, status.interval_minutes)}
-                                className={`w-10 h-5 rounded-full relative transition-colors cursor-pointer shrink-0 ${status.auto_sync ? "bg-blue-600" : "bg-[#333333]"}`}
-                                aria-pressed={status.auto_sync}
-                                aria-label="Sync automatically"
-                            >
-                                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${status.auto_sync ? "left-5" : "left-0.5"}`} />
-                            </button>
+                            <Toggle
+                                on={status.auto_sync}
+                                label="Sync automatically"
+                                onChange={() => handleOptions(!status.auto_sync, status.interval_minutes)}
+                            />
                         </div>
                         {status.auto_sync && (
                             <select

@@ -722,6 +722,8 @@ pub(crate) fn activate(app: &tauri::AppHandle, ws_dir: &Path) -> Result<Workspac
     *lock_state(&app.state::<crate::DbPathState>().0) = Some(db_str);
     *active = Some(ActiveWorkspace { ws_dir: ws_dir.to_path_buf(), _lock: lock });
     drop(active);
+    // The Trash holds what was deleted from the workspace being left; it can't be restored into another.
+    crate::trash::clear(crate::trash::store(app));
     crate::refresh_window_title(app);
     let mut i = info(ws_dir);
     i.current = true;

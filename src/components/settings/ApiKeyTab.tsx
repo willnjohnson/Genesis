@@ -2,6 +2,7 @@ import { Check } from "lucide-react";
 import { useState } from "react";
 import { setApiKey as saveApiKeyCmd, removeApiKey as removeApiKeyCmd } from "../../api";
 import { ApiKeyField } from "./ApiKeyField";
+import { ApiPanelHeading, API_GUIDES } from "./ApiPanelHeading";
 import { PixabayApiPanel } from "./PixabayApiPanel";
 import { VeniceApiPanel } from "./VeniceApiPanel";
 
@@ -30,7 +31,7 @@ function YouTubePanel({ hasKey: initialHasKey, licensedBy, onKeyChange }: Pick<P
 
     return (
         <div>
-            <h3 className="text-base font-bold mb-1">YouTube Data API</h3>
+            <ApiPanelHeading title="YouTube Data API" guideUrl={API_GUIDES.youtube.url} />
             <p className="text-xs text-[#aaaaaa] mb-4">
                 Optional. Improves search quality and fills in channel subscriber counts.
             </p>

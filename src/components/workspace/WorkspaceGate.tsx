@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { getWorkspaceStatus, type WorkspaceStatus } from "../../api";
 import { WorkspaceLauncher } from "./WorkspaceLauncher";
 import { errText, secondaryBtn } from "./helpers";
+import { revealAfterSwitch } from "../../lib/transitions";
 
 /**
  * Holds the app back until a workspace is open. The backend opens the most recent one by itself at
@@ -16,6 +17,11 @@ export function WorkspaceGate({ children }: { children: ReactNode }) {
     useEffect(() => {
         getWorkspaceStatus().then(setStatus).catch(e => setError(errText(e)));
     }, [attempt]);
+
+    // Once there's something to show (the app or the launcher), take down the switching screen.
+    useEffect(() => {
+        if (status || error) revealAfterSwitch();
+    }, [status, error]);
 
     if (error) {
         return (

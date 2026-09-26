@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Toggle } from "./Toggle";
 import { History, Clock, Trash2, X, Settings } from "lucide-react";
 import { getSetting, setSetting, type HistoryEntry } from "../../api";
 import { decodeHtmlEntities } from "../../lib/utils";
@@ -132,16 +133,13 @@ export function HistoryTab({ entries, onDeleteEntry, onClearDate, onClearAll, on
                             <div className="text-sm font-bold">Keep search history</div>
                             <div className="text-[11px] text-[#aaaaaa]">When off, new searches aren't saved. Entries already saved stay until you clear them.</div>
                         </div>
-                        <button
-                            onClick={handleKeepChange}
+                        <Toggle
+                            on={keepHistory}
+                            label="Keep search history"
+                            onChange={handleKeepChange}
                             disabled={isLocked(SAVE_KEY)}
                             title={isLocked(SAVE_KEY) ? LOCKED_TITLE : undefined}
-                            aria-pressed={keepHistory}
-                            aria-label="Keep search history"
-                            className={`w-10 h-5 rounded-full relative transition-colors cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-default ${keepHistory ? 'bg-blue-600' : 'bg-[#333333]'}`}
-                        >
-                            <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${keepHistory ? 'left-5' : 'left-0.5'}`} />
-                        </button>
+                        />
                     </div>
                     <div className="flex items-center justify-between gap-4 px-4 py-3">
                         <div>

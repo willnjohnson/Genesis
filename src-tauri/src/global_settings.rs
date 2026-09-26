@@ -32,6 +32,8 @@ pub(crate) struct GlobalDisplaySettings {
     /// The window was maximized when it was last closed (its `resolution` is then the size it
     /// restores to, not the maximized one).
     pub maximized: bool,
+    /// Windows: closing the main window hides it to the tray icon instead of quitting (see tray.rs).
+    pub close_to_tray: bool,
 }
 
 impl Default for GlobalDisplaySettings {
@@ -44,6 +46,7 @@ impl Default for GlobalDisplaySettings {
             window_x: None,
             window_y: None,
             maximized: false,
+            close_to_tray: false,
         }
     }
 }

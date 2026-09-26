@@ -148,7 +148,7 @@ export function KinpakExport() {
 
             {loading && (
                 <div className="mt-4 space-y-1.5">
-                    <ProgressLine message={progress ?? "Starting export..."} variant="runner" />
+                    <ProgressLine message={progress ?? "Starting export..."} />
                     <p className="text-[11px] text-[#666666] leading-relaxed">
                         Writing {exportState.file}. It keeps going if you close Settings, and you'll get a message here when it's done.
                         Don't close Kinesis until then.

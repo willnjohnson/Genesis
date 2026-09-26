@@ -3,14 +3,30 @@ import { X, Check, Info } from "lucide-react";
 
 export type NotificationType = "success" | "info" | "error";
 
+/** A button on the message (Undo, say). Clicking it runs `onClick` and dismisses the message. */
+export interface NotificationAction {
+    label: string;
+    onClick: () => void;
+}
+
+/** What App shows: the message, its kind, and optionally an action button. */
+export interface NotificationContent {
+    message: string;
+    type: NotificationType;
+    action?: NotificationAction;
+}
+
 interface NotificationProps {
     message: string;
     type?: NotificationType;
+    action?: NotificationAction;
     onClose: () => void;
     duration?: number;
 }
 
-export function Notification({ message, type = "info", onClose, duration = 3000 }: NotificationProps) {
+export function Notification({ message, type = "info", action, onClose, duration }: NotificationProps) {
+    // A message with a button stays long enough to reach for it.
+    duration = duration ?? (action ? 8000 : 3000);
     const [isVisible, setIsVisible] = useState(false);
 
     useEffect(() => {
@@ -43,6 +59,16 @@ export function Notification({ message, type = "info", onClose, duration = 3000 
         >
             <Icon className="w-5 h-5 flex-shrink-0" />
             <span className="font-semibold text-sm tracking-tight text-white">{message}</span>
+            {action && (
+                <button
+                    // Closed first, then run: the action may show its own message (how it went), which a delayed
+                    // close would wipe.
+                    onClick={() => { onClose(); action.onClick(); }}
+                    className="font-bold text-sm text-white underline underline-offset-2 hover:text-[var(--k-accent)] transition-colors cursor-pointer"
+                >
+                    {action.label}
+                </button>
+            )}
             <button onClick={() => setIsVisible(false)} className="opacity-50 hover:opacity-100 transition-opacity ml-2 text-[#aaaaaa] cursor-pointer hover:text-white">
                 <X className="w-4 h-4" />
             </button>

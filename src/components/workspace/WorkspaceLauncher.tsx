@@ -12,6 +12,7 @@ import { ImportKinpakPanel } from "./ImportKinpakPanel";
 import { LifeBackground } from "./LifeBackground";
 import { ErrorBox } from "./shared";
 import { errText, reloadApp } from "./helpers";
+import { LEAVE_MS, prefersReducedMotion } from "../../lib/transitions";
 
 interface Props {
     status: WorkspaceStatus;
@@ -37,6 +38,24 @@ export function WorkspaceLauncher({ status: initial, onClose }: Props) {
     const { flags } = useFlags();
     const canImport = !status.current || flags.allowSyncImport;
 
+    // Closing the screen zooms it away before it unmounts (lib/transitions.ts's LEAVE_MS).
+    const [leaving, setLeaving] = useState(false);
+    const close = useCallback(() => {
+        if (!onClose) return;
+        if (prefersReducedMotion()) { onClose(); return; }
+        document.documentElement.classList.add("k-switching");
+        setLeaving(true);
+        window.setTimeout(onClose, LEAVE_MS);
+    }, [onClose]);
+
+    // No scrollbars flashing at the window's edge while the screen zooms in (or, above, away).
+    useEffect(() => {
+        const html = document.documentElement;
+        html.classList.add("k-switching");
+        const done = window.setTimeout(() => html.classList.remove("k-switching"), 400);
+        return () => { window.clearTimeout(done); html.classList.remove("k-switching"); };
+    }, []);
+
     // Opened over the running app, this covers the page but not the page's own scrollbar (the app is
     // taller than the window), which would show through at the window's edge. Freeze the page's
     // scrolling for as long as the launcher is up.
@@ -52,12 +71,12 @@ export function WorkspaceLauncher({ status: initial, onClose }: Props) {
     }, []);
 
     const open = async (w: WorkspaceInfo) => {
-        if (w.current) { onClose?.(); return; }
+        if (w.current) { close(); return; }
         setError(null);
         setBusyFolder(w.folder);
         try {
             await openWorkspace(w.folder);
-            reloadApp();
+            reloadApp(w.name);
         } catch (e) {
             setError(errText(e));
             setBusyFolder(null);
@@ -111,7 +130,7 @@ export function WorkspaceLauncher({ status: initial, onClose }: Props) {
     ];
 
     return (
-        <div className="fixed inset-0 z-[70] bg-[#0f0f0f] text-white font-sans select-none flex">
+        <div className={`fixed inset-0 z-[70] bg-[#0f0f0f] text-white font-sans select-none flex ${leaving ? "k-leave-back" : "k-enter-back"}`}>
             <aside className="w-80 shrink-0 border-r border-[#303030] bg-white/5 flex flex-col">
                 {/* The same lockup as the app's own header (logo, name with the accent on its first three
                     letters, and the workspace name underneath), with "Workspaces" in the subtitle's place. It sits at
@@ -179,7 +198,7 @@ export function WorkspaceLauncher({ status: initial, onClose }: Props) {
                     // The same bar as the workspace switcher in the app's vertical layout: full width, flush
                     // with the bottom edge, 24px tall, with a rule above it.
                     <button
-                        onClick={onClose}
+                        onClick={close}
                         className="w-full h-6 shrink-0 flex items-center justify-center gap-1.5 border-t border-[#303030] text-xs font-normal text-[#aaaaaa] hover:text-white hover:bg-[#272727] transition-colors cursor-pointer"
                     >
                         <ArrowLeft className="w-3.5 h-3.5" />

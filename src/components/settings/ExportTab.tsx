@@ -160,7 +160,7 @@ function ObsidianExport() {
                     Export to Obsidian
                 </button>
 
-                {status && <div className="mt-4"><ProgressLine message={status} variant="runner" /></div>}
+                {status && <div className="mt-4"><ProgressLine message={status} /></div>}
 
                 {error && (
                     <div className="mt-4 p-3 bg-red-900/20 border border-red-500/30 rounded-lg text-red-400 text-xs">

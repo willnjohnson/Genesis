@@ -181,7 +181,7 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
             {/* This panel gets its own independent scroll (App.tsx no longer shares
                 scrollContainerRef with it) — scrolling the video grid shouldn't move the Drive
                 tree, and vice versa. */}
-            <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable] custom-scrollbar">
+            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
                 {loading ? (
                     <div className="text-center text-gray-500 py-16 bg-[#121212] rounded-xl border border-[#272727]">
                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mx-auto mb-3" />
@@ -322,7 +322,7 @@ function UnsortedRow({ count, selected, onSelect }: { count: number; selected: b
         >
             {/* Invisible spacer matching TreeRow's toggle button, so the icon/label line up with every real node's. */}
             <span className="p-1.5 shrink-0 invisible"><ChevronRight className="w-3.5 h-3.5" /></span>
-            <Inbox className={`w-3.5 h-3.5 shrink-0 ${selected ? 'text-white/80' : 'text-gray-500'}`} />
+            <Inbox className={`w-3.5 h-3.5 shrink-0 mr-1 ${selected ? 'text-white/80' : 'text-gray-500'}`} />
             <span className="flex-1 min-w-0 text-sm py-1.5 truncate italic">Unsorted</span>
             <span className={`text-[11px] font-medium px-2 shrink-0 ${selected ? 'text-white/80' : 'text-gray-500'}`}>{count}</span>
         </div>
@@ -358,7 +358,7 @@ function TreeRow({ label, alias, icon, count, depth, hasChildren, expanded, sele
             >
                 {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
             </button>
-            {Icon && <Icon className={`w-3.5 h-3.5 shrink-0 ${selected ? 'text-white/80' : 'text-gray-500'}`} />}
+            {Icon && <Icon className={`w-3.5 h-3.5 shrink-0 mr-1 ${selected ? 'text-white/80' : 'text-gray-500'}`} />}
             <span className="flex-1 min-w-0 text-sm py-1.5 truncate" title={alias ?? undefined}>{label}</span>
             <span className={`text-[11px] font-medium px-2 shrink-0 ${selected ? 'text-white/80' : 'text-gray-500'}`}>{count}</span>
         </div>

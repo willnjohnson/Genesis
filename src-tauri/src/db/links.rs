@@ -150,6 +150,8 @@ fn same_key(kind: LinkKind, a: &str, b: &str) -> bool {
     match kind {
         // Handles are matched the way the rest of the app does: ignoring case and a leading "@".
         LinkKind::Bio => a.trim_start_matches('@').eq_ignore_ascii_case(b.trim_start_matches('@')),
+        // Term names ignore (ASCII) case, like the Glossary table's own key.
+        LinkKind::Glossary => a.eq_ignore_ascii_case(b),
         _ => a == b,
     }
 }
@@ -178,17 +180,45 @@ const TEXT_COLUMNS: &[(&str, &str)] = &[
     ("VideoNotes", "note"),
 ];
 
+/// A stored text that link editing changed, kept so the change can be undone (the Trash restores it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextChange {
+    pub table: &'static str,
+    pub column: &'static str,
+    pub rowid: i64,
+    pub before: String,
+    pub after: String,
+}
+
+/// Puts back the texts `changes` edited, but only those still exactly as the edit left them: a text that
+/// has been edited since keeps its newer wording. Returns how many were restored.
+pub fn undo_text_changes(conn: &Connection, changes: &[TextChange]) -> Result<usize> {
+    let mut restored = 0;
+    for c in changes {
+        restored += conn.execute(
+            &format!("UPDATE {} SET {} = ?1 WHERE rowid = ?2 AND {} = ?3", c.table, c.column, c.column),
+            params![c.before, c.rowid, c.after],
+        )?;
+    }
+    Ok(restored)
+}
+
 /// Applies `edits` to every stored text that contains an internal link, and returns how many texts
 /// changed. One pass covers any number of edits: the database is scanned once per column for text
 /// containing `kinesis://` at all (about a tenth of a second for the summaries of 5,000 videos and
 /// a bit over a second including their transcripts), and only those texts are looked at further.
 pub fn apply_link_edits(db_path: &str, edits: &[LinkEdit]) -> Result<usize> {
+    Ok(apply_link_edits_recorded(db_path, edits)?.len())
+}
+
+/// `apply_link_edits`, returning each text it changed with its wording before and after.
+pub fn apply_link_edits_recorded(db_path: &str, edits: &[LinkEdit]) -> Result<Vec<TextChange>> {
     if edits.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let mut conn = Connection::open(db_path)?;
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
-    let mut changed = 0;
+    let mut changed = Vec::new();
     for (table, column) in TEXT_COLUMNS {
         if !table_exists(&conn, table)? {
             continue;
@@ -207,7 +237,7 @@ pub fn apply_link_edits(db_path: &str, edits: &[LinkEdit]) -> Result<usize> {
         for (rowid, text) in rows {
             if let Some(new_text) = apply_edits(&text, edits) {
                 tx.execute(&format!("UPDATE {table} SET {column} = ?1 WHERE rowid = ?2"), params![new_text, rowid])?;
-                changed += 1;
+                changed.push(TextChange { table, column, rowid, before: text, after: new_text });
             }
         }
         tx.commit()?;

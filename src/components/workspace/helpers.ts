@@ -1,8 +1,10 @@
+import { reloadWithTransition } from "../../lib/transitions";
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
-/** Every workspace switch reloads the window, so the whole UI starts fresh against the new database. */
-export const reloadApp = () => window.location.reload();
+/** Every workspace switch reloads the window, so the whole UI starts fresh against the new database.
+ *  The page zooms away first and the new one zooms in (lib/transitions.ts). */
+export const reloadApp = (workspaceName?: string) => reloadWithTransition(workspaceName);
 
 export const errText = (e: unknown): string => (typeof e === "string" ? e : (e as { message?: string })?.message ?? String(e));
 

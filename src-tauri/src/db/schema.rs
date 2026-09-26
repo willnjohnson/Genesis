@@ -1,4 +1,6 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
+use regex::Regex;
+use std::collections::HashMap;
 
 // Common English words culled from generated FTS tokens (videos.tokens). Words are stored with
 // apostrophes stripped since the token-generation query strips punctuation before comparing
@@ -71,6 +73,95 @@ fn rebuild_glossary_keyed_by_drive(conn: &Connection) -> Result<()> {
             "INSERT OR IGNORE INTO Glossary_new (term, definition, drives) VALUES (?1, ?2, ?3)",
             params![term, definition, key],
         )?;
+    }
+    tx.execute("DROP TABLE Glossary", [])?;
+    tx.execute("ALTER TABLE Glossary_new RENAME TO Glossary", [])?;
+    tx.commit()
+}
+
+/// True once `Glossary.term` itself is declared `COLLATE NOCASE`, so names ignore (ASCII) case in the key, in
+/// `=` and in ordering alike. Read from the table's own SQL. A collation on the key alone
+/// (`PRIMARY KEY (term COLLATE NOCASE, ...)`) doesn't count: it makes the key case-insensitive but leaves
+/// `ORDER BY term` and `term = 'x'` case-sensitive, which is not what a term name should do.
+fn glossary_term_ignores_case(conn: &Connection) -> Result<bool> {
+    let sql: Option<String> = conn
+        .query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='Glossary'", [], |r| r.get(0))
+        .optional()?;
+    let declared = Regex::new(r"(?is)\bterm\s+text\b[^,]*\bcollate\s+nocase\b").unwrap();
+    Ok(sql.is_some_and(|s| declared.is_match(&s)))
+}
+
+/// Folds glossary rows `(term, definition, drives)`, given oldest first, into rows that can live under a
+/// case-insensitive name. A name has one spelling: the oldest row's. Rows that came out the same (same
+/// name, Drives and definition) collapse to one. A row whose definition clashes with an earlier row's for
+/// the same name (the same Drive, or both uncategorized) can't share the name any more, so it's renamed
+/// "<name> (2)", "(3)"... and keeps its text: nothing is dropped. (Same-definition rows that differ only
+/// in their Drives stay separate here; `merge_glossary_duplicates` joins them afterwards.)
+/// SQLite's NOCASE only folds ASCII, so that's all this folds too.
+pub(crate) fn fold_glossary_rows(rows: Vec<(String, String, String)>) -> Vec<(String, String, String)> {
+    let fold = |s: &str| s.to_ascii_lowercase();
+    let mut spelling: HashMap<String, String> = HashMap::new();
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for (term, definition, key) in rows {
+        let f = fold(&term);
+        let name = spelling.entry(f.clone()).or_insert_with(|| term.clone()).clone();
+        let drives = super::glossary::decode_drives(&key);
+        let mut duplicate = false;
+        let mut clash = false;
+        for (t, d, k) in out.iter().filter(|(t, _, _)| fold(t) == f) {
+            if *k == key && *d == definition {
+                duplicate = true;
+                break;
+            }
+            let other = super::glossary::decode_drives(k);
+            let overlap = (drives.is_empty() && other.is_empty()) || drives.iter().any(|x| other.contains(x));
+            if *d != definition && overlap {
+                clash = true;
+            }
+            let _ = t;
+        }
+        if duplicate {
+            continue;
+        }
+        if clash {
+            let mut n = 2;
+            let renamed = loop {
+                let candidate = format!("{name} ({n})");
+                if !spelling.contains_key(&fold(&candidate)) {
+                    break candidate;
+                }
+                n += 1;
+            };
+            spelling.insert(fold(&renamed), renamed.clone());
+            out.push((renamed, definition, key));
+        } else {
+            out.push((name, definition, key));
+        }
+    }
+    out
+}
+
+/// Rebuilds `Glossary` with `term` declared `COLLATE NOCASE` (see `fold_glossary_rows` for what happens to
+/// names that only differ by case). One transaction, so a failure part-way leaves the old table intact.
+fn rebuild_glossary_case_insensitive(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DROP TABLE IF EXISTS Glossary_new", [])?;
+    tx.execute(
+        "CREATE TABLE Glossary_new (
+            term TEXT NOT NULL COLLATE NOCASE,
+            definition TEXT NOT NULL,
+            drives TEXT NOT NULL DEFAULT '',
+            CONSTRAINT GLOSSARY_PK PRIMARY KEY (term, drives)
+        ) STRICT",
+        [],
+    )?;
+    let old_rows: Vec<(String, String, String)> = {
+        let mut stmt = tx.prepare("SELECT term, definition, drives FROM Glossary ORDER BY rowid")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<Result<_>>()?
+    };
+    for (term, definition, drives) in fold_glossary_rows(old_rows) {
+        tx.execute("INSERT INTO Glossary_new (term, definition, drives) VALUES (?1, ?2, ?3)", params![term, definition, drives])?;
     }
     tx.execute("DROP TABLE Glossary", [])?;
     tx.execute("ALTER TABLE Glossary_new RENAME TO Glossary", [])?;
@@ -539,7 +630,9 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     )?;
 
-    // Create glossary table. One row per definition: `drives` is the newline-joined Drive roots (level
+    // Create glossary table. Names ignore case (`COLLATE NOCASE` on the column, so the key, `=` and ordering all
+    // agree: "mTor" sorts between "Magnesium" and "Zenith", and "MTOR" is the same entry, kept as first spelled).
+    // One row per definition: `drives` is the newline-joined Drive roots (level
     // 1 only, e.g. ":CRYPTO") it's filed under, sorted, or '' for uncategorized (shown under "All"), so
     // the same term can carry a different definition in different Drives ("Magnesium" the element vs.
     // the supplement). A Drive belongs to at most one of a term's definitions (enforced in
@@ -547,7 +640,7 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // `ON CONFLICT(term, drives) DO UPDATE SET definition = excluded.definition`.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS Glossary (
-            term TEXT NOT NULL,
+            term TEXT NOT NULL COLLATE NOCASE,
             definition TEXT NOT NULL,
             drives TEXT NOT NULL DEFAULT '',
             CONSTRAINT GLOSSARY_PK PRIMARY KEY (term, drives)
@@ -578,6 +671,11 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // (the one-row-per-Drive layout) into one row holding all their Drives.
     if !glossary_keyed_by_drive(&conn)? {
         rebuild_glossary_keyed_by_drive(&conn)?;
+    }
+    // A Glossary from before names ignored case: rebuild it that way, folding any names that only
+    // differed by case (see fold_glossary_rows). Then join same-definition rows.
+    if !glossary_term_ignores_case(&conn)? {
+        rebuild_glossary_case_insensitive(&conn)?;
     }
     merge_glossary_duplicates(&conn)?;
 
@@ -1575,5 +1673,128 @@ mod tests {
         assert_eq!(changed, 1, "set_wdbs_alias's UPDATE must actually match the backfilled row");
         drop(conn);
         let _ = fs::remove_file(&db_path);
+    }
+}
+
+#[cfg(test)]
+mod glossary_case_tests {
+    use super::*;
+    use crate::db::init_db;
+
+    fn row(term: &str, def: &str, drives: &str) -> (String, String, String) {
+        (term.to_string(), def.to_string(), drives.to_string())
+    }
+
+    fn temp_path(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("kinesis_glcase_{}_{}.db", name, std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        path.to_string_lossy().to_string()
+    }
+
+    fn ordered_terms(conn: &Connection) -> Vec<String> {
+        conn.prepare("SELECT term FROM Glossary ORDER BY term")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
+    #[test]
+    fn names_that_only_differ_by_case_fold_to_the_first_spelling() {
+        let out = fold_glossary_rows(vec![row("mTor", "A kinase.", ""), row("MTOR", "A kinase.", ""), row("mtor", "A kinase.", "")]);
+        assert_eq!(out, vec![row("mTor", "A kinase.", "")], "the same entry three times is one");
+    }
+
+    #[test]
+    fn different_drives_do_not_clash_and_take_one_spelling() {
+        let out = fold_glossary_rows(vec![row("Magnesium", "Element.", ":CHEM"), row("magnesium", "Supplement.", ":HEALTH")]);
+        assert_eq!(out, vec![row("Magnesium", "Element.", ":CHEM"), row("Magnesium", "Supplement.", ":HEALTH")]);
+    }
+
+    #[test]
+    fn a_clashing_definition_is_kept_under_a_qualified_name_never_dropped() {
+        // Same Drive, different text: the later ones can't share the name.
+        let out = fold_glossary_rows(vec![row("Mg", "Magnesium.", ":CHEM"), row("mg", "Milligram.", ":CHEM"), row("MG", "Another.", ":CHEM")]);
+        assert_eq!(out, vec![row("Mg", "Magnesium.", ":CHEM"), row("Mg (2)", "Milligram.", ":CHEM"), row("Mg (3)", "Another.", ":CHEM")]);
+    }
+
+    #[test]
+    fn two_uncategorized_names_with_different_text_clash_too() {
+        let out = fold_glossary_rows(vec![row("Mtor", "One.", ""), row("mtor", "Two.", "")]);
+        assert_eq!(out, vec![row("Mtor", "One.", ""), row("Mtor (2)", "Two.", "")]);
+    }
+
+    #[test]
+    fn fresh_databases_order_and_compare_names_ignoring_case() {
+        let db = temp_path("fresh");
+        init_db(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        for t in ["Zenith", "mTor", "Magnesium"] {
+            conn.execute("INSERT INTO Glossary (term, definition) VALUES (?1, 'd')", params![t]).unwrap();
+        }
+        assert_eq!(ordered_terms(&conn), ["Magnesium", "mTor", "Zenith"], "no COLLATE needed in the query");
+        let found: i64 = conn.query_row("SELECT COUNT(*) FROM Glossary WHERE term = 'MTOR'", [], |r| r.get(0)).unwrap();
+        assert_eq!(found, 1);
+        assert!(conn.execute("INSERT INTO Glossary (term, definition) VALUES ('MTOR', 'x')", []).is_err(), "the key ignores case");
+    }
+
+    #[test]
+    fn an_older_database_is_rebuilt_folding_names_that_differed_by_case() {
+        let db = temp_path("migrate");
+        {
+            // The shape before names ignored case: the same key, but case-sensitive.
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "CREATE TABLE Glossary (term TEXT NOT NULL, definition TEXT NOT NULL, drives TEXT NOT NULL DEFAULT '', CONSTRAINT GLOSSARY_PK PRIMARY KEY (term, drives)) STRICT",
+                [],
+            )
+            .unwrap();
+            for (t, d, k) in [("Zenith", "Last.", ""), ("mTor", "A kinase.", ""), ("MTOR", "A kinase.", ""), ("Mg", "Element.", ":CHEM"), ("mg", "Unit.", ":CHEM")] {
+                conn.execute("INSERT INTO Glossary (term, definition, drives) VALUES (?1, ?2, ?3)", params![t, d, k]).unwrap();
+            }
+        }
+        init_db(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        assert!(glossary_term_ignores_case(&conn).unwrap());
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT term, definition FROM Glossary ORDER BY term")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let expected: Vec<(String, String)> = [("Mg", "Element."), ("Mg (2)", "Unit."), ("mTor", "A kinase."), ("Zenith", "Last.")]
+            .iter()
+            .map(|(t, d)| (t.to_string(), d.to_string()))
+            .collect();
+        assert_eq!(rows, expected, "the duplicate is one entry, and the clash keeps its text under a qualified name");
+        // Running it again changes nothing.
+        init_db(&db).unwrap();
+        let again: i64 = conn.query_row("SELECT COUNT(*) FROM Glossary", [], |r| r.get(0)).unwrap();
+        assert_eq!(again, 4);
+    }
+
+    #[test]
+    fn a_key_only_collation_is_not_enough_and_gets_rebuilt() {
+        let db = temp_path("keyonly");
+        {
+            // Case-insensitive uniqueness, but ordering and `=` still case-sensitive.
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "CREATE TABLE Glossary (term TEXT NOT NULL, definition TEXT NOT NULL, drives TEXT NOT NULL DEFAULT '', CONSTRAINT GLOSSARY_PK PRIMARY KEY (term COLLATE NOCASE, drives)) STRICT",
+                [],
+            )
+            .unwrap();
+            for t in ["Zenith", "mTor", "Magnesium"] {
+                conn.execute("INSERT INTO Glossary (term, definition) VALUES (?1, 'd')", params![t]).unwrap();
+            }
+            assert!(!glossary_term_ignores_case(&conn).unwrap());
+            assert_eq!(ordered_terms(&conn), ["Magnesium", "Zenith", "mTor"], "that's the problem with it");
+        }
+        init_db(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        assert!(glossary_term_ignores_case(&conn).unwrap());
+        assert_eq!(ordered_terms(&conn), ["Magnesium", "mTor", "Zenith"]);
     }
 }

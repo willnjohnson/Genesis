@@ -4,8 +4,11 @@ import {
     getApiKey, getKeyStatus, getSetting, openExternalUrl, bulkUpdateVideoWdbs, addToDriveSequence,
     type Video, type BiographyEntry, saveTags, getBiography,
     getVideoById, getGlossaryTerms, getWdbsTree, decodeWdbs, type WdbsNode,
-    UNSORTED_WDBS_FILTER,
+    UNSORTED_WDBS_FILTER, type TrashKind,
 } from "./api";
+import { useTrash } from "./hooks/useTrash";
+import { useNavHistory } from "./hooks/useNavHistory";
+import { TrashModal } from "./components/TrashModal";
 import { driveSegmentLabel, formatBytes } from "./lib/utils";
 import { resolveEntry } from "./lib/glossary";
 import { setInternalLinkHandler, linkKindLabel, type LinkKind } from "./lib/internal-links";
@@ -20,10 +23,12 @@ import { Sidebar } from "./components/Sidebar";
 import { BRAND } from "./branding";
 import { BrandLogo } from "./components/BrandLogo";
 import { WorkspaceSwitcher } from "./components/workspace/WorkspaceSwitcher";
-import { Notification, type NotificationType } from "./components/Notification";
+import { Notification, type NotificationContent } from "./components/Notification";
 import { ConfirmDialog } from "./components/ConfirmDialog";
-import { SettingsModal } from "./components/SettingsModal";
-import { Settings, ChevronUp, LayoutGrid, List, ChevronDown, Sparkles, Search, BookMarked, BookA, UserSearch, HardDrive, MousePointerClick } from "lucide-react";
+import { SettingsModal, type SettingsTarget } from "./components/SettingsModal";
+import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
+import { SETTINGS_ENTRIES, TAB_LABELS, type SettingsTabId } from "./lib/settings-search";
+import { Settings, ChevronUp, LayoutGrid, List, ChevronDown, Sparkles, Search, BookMarked, BookA, UserSearch, HardDrive, MousePointerClick, Key, Layers, Monitor, Palette, History, Cpu, RefreshCw, FileDown, Trash2, ArrowLeft, ArrowRight } from "lucide-react";
 import { GlossaryView } from "./components/GlossaryView";
 import { BiographyView } from "./components/BiographyView";
 import { BiographyModal } from "./components/BiographyView";
@@ -38,7 +43,7 @@ import { useWorkspace } from "./hooks/useWorkspace";
 
 type ViewMode = 'search' | 'library' | 'glossary' | 'biography';
 
-const VALID_FACETS = ['handle', 'playlist', 'video', 'title_search', 'transcript_search', 'summary_search', 'term_search', 'definition_search', 'tag_search', 'person_search', 'bio_search'];
+const VALID_FACETS = ['handle', 'channel_name', 'playlist', 'video', 'title_search', 'transcript_search', 'summary_search', 'term_search', 'definition_search', 'tag_search', 'person_search', 'bio_search'];
 const DEFAULT_GLOSSARY_FACET = [{ type: 'term_search', value: '' }] as Facet[];
 
 function getLibraryFacets(q: string, viewMode: ViewMode): Facet[] {
@@ -47,7 +52,7 @@ function getLibraryFacets(q: string, viewMode: ViewMode): Facet[] {
         ? ['term_search', 'definition_search']
         : viewMode === 'biography'
             ? ['person_search', 'bio_search']
-            : ['tag_search', 'term_search', 'video', 'handle'];
+            : ['tag_search', 'term_search', 'video', 'handle', 'channel_name'];
 
     const FACET_RE = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
     const facets: Facet[] = [];
@@ -64,7 +69,7 @@ function getLibraryQuery(q: string, viewMode: ViewMode): string {
         ? ['term_search', 'definition_search']
         : viewMode === 'biography'
             ? ['person_search', 'bio_search']
-            : ['tag_search', 'term_search', 'video', 'handle'];
+            : ['tag_search', 'term_search', 'video', 'handle', 'channel_name'];
 
     // Check if q starts with a facet prefix and has exactly one colon
     const colonIndex = q.indexOf(':');
@@ -115,13 +120,15 @@ function App() {
     const [bulkAssignError, setBulkAssignError] = useState<string | null>(null);
     const [glossarySearchQuery, setGlossarySearchQuery] = useState("term_search:");
     const [biographySearchQuery, setBiographySearchQuery] = useState("person_search:");
-    const [notification, setNotification] = useState<{ message: string; type: NotificationType } | null>(null);
+    const [notification, setNotification] = useState<NotificationContent | null>(null);
     const [showScrollTop, setShowScrollTop] = useState(false);
     // The one scrollable region (see the `mt-4 flex-1 overflow-y-auto` div in the return below) —
     // everywhere that used to assume the whole window scrolls (this file, VideoList.tsx's
     // virtualizer, AlphabetJumpNav.tsx, useLibrary.ts's scroll-reset) now targets this instead.
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const [showSettings, setShowSettings] = useState(false);
+    // Where Settings should open when a link elsewhere sends you to a particular page of it.
+    const [settingsTarget, setSettingsTarget] = useState<SettingsTarget | undefined>(undefined);
     const [hasApiKey, setHasApiKey] = useState(false);
     const [videoListMode, setVideoListMode] = useState<'grid' | 'compact'>('grid');
     const [navigationOrientation, setNavigationOrientation] = useState<'horizontal' | 'vertical'>('horizontal');
@@ -341,13 +348,17 @@ function App() {
     }), []);
 
     // ── Scroll-to-top ────────────────────────────────────────────────────────
+    // Re-attached whenever the view changes: Library renders its own scroll pane (beside the Drive
+    // panel), a different element from the one Search/Glossary/Biography share, so a listener put
+    // on the first pane never hears the Library's scrolling.
     useEffect(() => {
         const el = scrollContainerRef.current;
         if (!el) return;
         const onScroll = () => setShowScrollTop(el.scrollTop > 400);
+        onScroll();
         el.addEventListener("scroll", onScroll);
         return () => el.removeEventListener("scroll", onScroll);
-    }, []);
+    }, [viewMode]);
 
     // ── Load library when switching to Library mode ──────────────────────────
     // Paging, sorting, filtering, and re-fetching on search-text change all happen inside
@@ -538,6 +549,177 @@ function App() {
 
     useEffect(() => setInternalLinkHandler(handleOpenLink), [handleOpenLink]);
 
+    // ── Command palette (Ctrl/Cmd+K) ─────────────────────────────────────────
+    const [paletteOpen, setPaletteOpen] = useState(false);
+    // Latest values for the key handler below, which is set up once.
+    const paletteState = useRef({ open: false, sidebarOpen: false });
+    paletteState.current = { open: paletteOpen, sidebarOpen };
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== 'k' || e.defaultPrevented) return;
+            // In a markdown editor Ctrl+K is "insert link" (lib/markdown-editor.ts): leave it be.
+            if ((e.target as HTMLElement | null)?.tagName === 'TEXTAREA') return;
+            e.preventDefault();
+            if (paletteState.current.open) { setPaletteOpen(false); return; }
+            // Only from the plain pages: not over the video sidebar, and not with anything else covering the
+            // window (a modal, Settings, the Workspaces screen, a confirmation). Every one of those is a
+            // full-window `fixed inset-0` layer, same as the Esc handler above relies on.
+            const covered = paletteState.current.sidebarOpen
+                || Array.from(document.querySelectorAll<HTMLElement>('div.fixed.inset-0'))
+                    .some(el => el.id !== 'k-life' && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden');
+            if (!covered) setPaletteOpen(true);
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, []);
+    // ── Esc closes the topmost modal ─────────────────────────────────────────
+    // Every modal here is a full-window `fixed inset-0` backdrop that closes when the backdrop itself
+    // is clicked, so Esc "clicks" the topmost one. Marking a backdrop `data-no-escape` (Settings) makes
+    // Esc leave it alone — and whatever is under it, since the topmost is the one that decides. Anything
+    // that handles Esc itself (the palette, the link picker, a dropdown) calls preventDefault first.
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+            const backdrops = Array.from(document.querySelectorAll<HTMLElement>('div.fixed.inset-0'))
+                .filter(el => el.id !== 'k-life' && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden');
+            if (backdrops.length === 0) return;
+            const z = (el: HTMLElement) => Number.parseInt(getComputedStyle(el).zIndex, 10) || 0;
+            // Highest z-index wins; among equals, the one added to the page last.
+            const top = backdrops.reduce((best, el) => (z(el) >= z(best) ? el : best));
+            if (top.closest('[data-no-escape]')) return;
+            e.preventDefault();
+            top.click();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, []);
+    // The palette's actions: only what this workspace has switched on.
+    // Back and forward (Alt+Left / Alt+Right, or the mouse's back and forward buttons) through the places visited:
+    // a section, the Drive picked in the Library, the video open in the sidebar. Search text in a section is kept
+    // with its place but typing in it doesn't make a new one (see hooks/useNavHistory.ts).
+    const navPlace = {
+        view: viewMode,
+        libraryQuery: library.librarySearch,
+        wdbs: library.wdbsFilter,
+        driveLabel: driveFilterLabel,
+        driveAlias: driveFilterAlias,
+        showDrivePanel,
+        glossaryQuery: glossarySearchQuery,
+        biographyQuery: biographySearchQuery,
+        video: sidebarOpen ? selectedVideo : null,
+    };
+    const nav = useNavHistory(
+        navPlace,
+        p => `${p.view}|${p.wdbs ?? ''}|${p.video?.id ?? ''}`,
+        p => {
+            setBulkAssignMode(false);
+            setBulkSelectedIds(new Set());
+            setBulkAssignMenu(null);
+            setViewMode(p.view);
+            // The Drive first: choosing one (or none) resets the Library's search text, so that goes in after.
+            library.setWdbsFilter(p.wdbs);
+            library.setLibrarySearch(p.libraryQuery);
+            setDriveFilterLabel(p.driveLabel);
+            setDriveFilterAlias(p.driveAlias);
+            setShowDrivePanel(p.showDrivePanel);
+            setGlossarySearchQuery(p.glossaryQuery);
+            setBiographySearchQuery(p.biographyQuery);
+            if (p.video) {
+                void handleSelectVideo(p.video);
+            } else {
+                setSidebarOpen(false);
+                setSidebarInitialTab(undefined);
+            }
+        },
+    );
+    useEffect(() => {
+        // Not while something is on top of the page (a dialog, Settings, the Trash): those aren't places. The
+        // sidebar's own dimming layer is marked so it doesn't count.
+        const covered = () => !!document.querySelector('div.fixed.inset-0:not(#k-life):not([data-nav-ok])');
+        // Option+Arrow moves by word in a text box on a Mac; Cmd+[ and Cmd+] are its own back and forward.
+        const mac = /Mac/i.test(navigator.platform);
+        const onKey = (e: KeyboardEvent) => {
+            let dir = 0;
+            if (mac) {
+                if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === '[' || e.key === ']')) dir = e.key === '[' ? -1 : 1;
+            } else if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+                dir = e.key === 'ArrowLeft' ? -1 : 1;
+            }
+            if (dir === 0) return;
+            e.preventDefault();
+            if (covered()) return;
+            if (dir < 0) nav.back(); else nav.forward();
+        };
+        const onMouse = (e: MouseEvent) => {
+            // The side buttons of a mouse: 3 is back, 4 is forward.
+            if (e.button !== 3 && e.button !== 4) return;
+            e.preventDefault();
+            if (covered()) return;
+            if (e.button === 3) nav.back(); else nav.forward();
+        };
+        window.addEventListener('keydown', onKey, true);
+        window.addEventListener('mouseup', onMouse, true);
+        return () => {
+            window.removeEventListener('keydown', onKey, true);
+            window.removeEventListener('mouseup', onMouse, true);
+        };
+    }, [nav.back, nav.forward]);
+
+    // The Trash window is App's, so the status bar chips and the command palette both open it. Nothing in it is
+    // saved anywhere: it's emptied when the app closes.
+    const [trashOpen, setTrashOpen] = useState<TrashKind | null>(null);
+    const videoTrash = useTrash('video');
+    const glossaryTrash = useTrash('glossary');
+    // Bumped when a term is put back, so a mounted Glossary reloads.
+    const [glossaryReload, setGlossaryReload] = useState(0);
+
+    const paletteCommands = useMemo<PaletteCommand[]>(() => {
+        const cmds: PaletteCommand[] = [];
+        if (flags.viewVisible.search) cmds.push({ id: 'view-search', label: `Go to ${labels.aliasSearch}`, icon: Search, keywords: 'search youtube find', run: () => setViewMode('search') });
+        if (flags.viewVisible.library) cmds.push({ id: 'view-library', label: `Go to ${labels.aliasLibrary}`, icon: BookMarked, keywords: 'library saved videos', run: () => setViewMode('library') });
+        if (flags.viewVisible.glossary) cmds.push({ id: 'view-glossary', label: `Go to ${labels.aliasGlossary}`, icon: BookA, keywords: 'glossary terms tags', run: () => { setGlossarySearchQuery(""); setViewMode('glossary'); } });
+        if (flags.viewVisible.biography) cmds.push({ id: 'view-biography', label: `Go to ${labels.aliasBiography}`, icon: UserSearch, keywords: 'biography people channels creators', run: () => { setBiographySearchQuery(""); setViewMode('biography'); } });
+        if (flags.settingsVisible) cmds.push({ id: 'settings', label: 'Open Settings', icon: Settings, keywords: 'preferences options', run: () => setShowSettings(true) });
+        // Each page of Settings, and the particular settings people look for, found by what they're
+        // called (lib/settings-search.ts). Only pages this workspace shows; Sync only in development.
+        if (flags.settingsVisible) {
+            const tabIcons: Record<SettingsTabId, React.ElementType> = {
+                api: Key, db: HardDrive, workspace: Layers, display: Monitor, theme: Palette,
+                history: History, plugins: Cpu, sync: RefreshCw, export: FileDown,
+            };
+            for (const entry of SETTINGS_ENTRIES) {
+                if (!flags.tabVisible[entry.tab] || (entry.tab === 'sync' && !import.meta.env.DEV)) continue;
+                // The tray setting only exists on Windows.
+                if (entry.label === 'Keep running in the tray' && !/Win/i.test(navigator.platform)) continue;
+                cmds.push({
+                    id: `settings:${entry.tab}:${entry.apiSection ?? ''}:${entry.label}`,
+                    group: 'Settings',
+                    label: entry.label,
+                    hint: `Settings > ${TAB_LABELS[entry.tab]}`,
+                    icon: tabIcons[entry.tab],
+                    keywords: entry.keywords,
+                    run: () => { setSettingsTarget({ tab: entry.tab, apiSection: entry.apiSection }); setShowSettings(true); },
+                });
+            }
+        }
+        // The Trash of each section that has something in it, from anywhere: the two live in different views
+        // (the Library's videos, the Glossary's terms), so each gets its own entry, named for its section.
+        if (flags.viewVisible.library && videoTrash.count > 0) {
+            cmds.push({ id: 'trash-video', label: `Open Trash: ${labels.aliasLibrary}`, hint: `${videoTrash.count} in Trash`, icon: Trash2, keywords: 'trash deleted restore undo videos', run: () => setTrashOpen('video') });
+        }
+        if (flags.viewVisible.glossary && glossaryTrash.count > 0) {
+            cmds.push({ id: 'trash-glossary', label: `Open Trash: ${labels.aliasGlossary}`, hint: `${glossaryTrash.count} in Trash`, icon: Trash2, keywords: 'trash deleted restore undo terms tags', run: () => setTrashOpen('glossary') });
+        }
+        if (nav.canBack) cmds.push({ id: 'nav-back', label: 'Go back', hint: 'Alt + Left', icon: ArrowLeft, keywords: 'previous back history return', run: nav.back });
+        if (nav.canForward) cmds.push({ id: 'nav-forward', label: 'Go forward', hint: 'Alt + Right', icon: ArrowRight, keywords: 'next forward history', run: nav.forward });
+        if (flags.showListModeToggle) {
+            cmds.push({ id: 'layout', label: videoListMode === 'grid' ? 'Switch to compact layout' : 'Switch to grid layout', icon: videoListMode === 'grid' ? List : LayoutGrid, keywords: 'layout list grid compact view', run: () => { void toggleVideoListMode(); } });
+        }
+        return cmds;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [flags, labels, videoListMode, videoTrash.count, glossaryTrash.count, nav.canBack, nav.canForward]);
+
+
     const handleAddTag = async (term: string) => {
         if (!videoTags.includes(term)) {
             const newTags = [...videoTags, term];
@@ -710,6 +892,21 @@ function App() {
         return { text: `L${segments.length}`, tooltip: ancestors.length > 0 ? `:${ancestors.join('-')}` : undefined };
     })();
 
+    // Deleting the video the dialog asked about (or, with Confirm Before Deleting off, the one a delete button asked
+    // about, with no dialog at all).
+    const runConfirmedDelete = async () => {
+        await library.confirmDeleteAction(() => { setSidebarOpen(false); setSelectedVideo(null); });
+        // The Drive tree's per-category video counts (and any category that just
+        // emptied) are computed server-side, so re-fetch instead of leaving them stale.
+        setDriveVersion(v => v + 1);
+    };
+    const autoDeletingRef = useRef(false);
+    useEffect(() => {
+        if (!library.confirmDelete || flags.confirmBeforeDeleting || autoDeletingRef.current) return;
+        autoDeletingRef.current = true;
+        void runConfirmedDelete().finally(() => { autoDeletingRef.current = false; });
+    }, [library.confirmDelete, flags.confirmBeforeDeleting]); // eslint-disable-line react-hooks/exhaustive-deps
+
     return (
         <div className="h-screen overflow-hidden bg-[#0f0f0f] text-white font-sans selection:bg-red-500/30 selection:text-white select-none flex flex-col">
             {/* Navigation - conditional rendering */}
@@ -774,7 +971,7 @@ function App() {
                                 className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
                                 title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}
                             >
-                                {videoListMode === 'grid' ? <List className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
+                                {videoListMode === 'grid' ? <List className="w-5 h-5 k-reveal" /> : <LayoutGrid className="w-5 h-5 k-pop" />}
                             </button>
                         )}
                         {flags.settingsVisible && (
@@ -783,7 +980,7 @@ function App() {
                                 className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
                                 title="Settings"
                             >
-                                <Settings className="w-5 h-5" />
+                                <Settings className="w-5 h-5 k-spin-once" />
                             </button>
                         )}
                     </div>
@@ -807,7 +1004,8 @@ function App() {
                                         handleSaveImageAs(BRAND.logo);
                                     }}
                                 />
-                                <div className="flex flex-col">
+                                {/* ml-0.5: the wordmark and the workspace name under it sit 2px further from the logo. */}
+                                <div className="flex flex-col ml-0.5">
                                     <h1 className="text-2xl font-bold tracking-tighter text-white">
                                         <span className="text-[var(--k-accent)]">{BRAND.name.substring(0, 3)}</span>{BRAND.name.substring(3)}
                                     </h1>
@@ -869,7 +1067,7 @@ function App() {
                                         className="p-2 ml-2 text-gray-400 hover:text-white transition-all cursor-pointer bg-[#272727] rounded-lg"
                                         title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}
                                     >
-                                        {videoListMode === 'grid' ? <List className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
+                                        {videoListMode === 'grid' ? <List className="w-5 h-5 k-reveal" /> : <LayoutGrid className="w-5 h-5 k-pop" />}
                                     </button>
                                 )}
                                 {flags.settingsVisible && (
@@ -878,7 +1076,7 @@ function App() {
                                         className="p-2 ml-1 text-gray-400 hover:text-white transition-all cursor-pointer"
                                         title="Settings"
                                     >
-                                        <Settings className="w-5 h-5" />
+                                        <Settings className="w-5 h-5 k-spin-once" />
                                     </button>
                                 )}
                             </div>
@@ -1040,6 +1238,7 @@ function App() {
                                     : undefined}
                                 driveLabelPrefix={showDrivePanel ? driveLabelPrefix.text : undefined}
                                 driveLabelPrefixTooltip={driveLabelPrefix.tooltip}
+                                onOpenTrash={() => setTrashOpen('video')}
                                 scrollContainerRef={scrollContainerRef}
                             />
                         </div>
@@ -1054,6 +1253,9 @@ function App() {
                                 onSearchInLibrary={handleSearchInLibrary}
                                 onOpenVideo={handleSelectVideo}
                                 allowModification={allowModificationGlossary}
+                                onNotify={setNotification}
+                                onOpenTrash={() => setTrashOpen('glossary')}
+                                reloadSignal={glossaryReload}
                                 scrollContainerRef={scrollContainerRef}
                             />
                         ) : viewMode === 'biography' ? (
@@ -1068,6 +1270,9 @@ function App() {
                                     saveProgress={library.saveProgress}
                                     compact={videoListMode === 'compact'}
                                     error={search.error}
+                                    loading={search.loading}
+                                    idle={!search.hasSearched && !search.error}
+                                    onOpenApiKeySettings={flags.settingsVisible && flags.tabVisible.api ? () => { setSettingsTarget({ tab: 'api', apiSection: 'youtube' }); setShowSettings(true); } : undefined}
                                     sortField={searchSortField}
                                     onSortFieldChange={setSearchSortField}
                                     sortOrder={searchSortOrder}
@@ -1077,7 +1282,7 @@ function App() {
                                     scrollContainerRef={scrollContainerRef}
                                 />
                                 {displayedVideos.length > 0 && search.continuationToken && !search.isSearch && (
-                                    <div className="mt-16 text-center flex justify-center gap-4">
+                                    <div className="mt-16 pb-10 text-center flex justify-center gap-4">
                                         <button
                                             onClick={search.handleLoadMore}
                                             disabled={search.loadingMore}
@@ -1165,6 +1370,7 @@ function App() {
             />
 
             <SettingsModal
+                openTo={settingsTarget}
                 isOpen={showSettings && flags.settingsVisible}
                 onClose={() => {
                     setShowSettings(false);
@@ -1192,10 +1398,19 @@ function App() {
                 showSynthesizeUpload={showSynthesizeUpload}
             />
 
+            {trashOpen && (
+                <TrashModal
+                    kind={trashOpen}
+                    onClose={() => setTrashOpen(null)}
+                    onRestored={trashOpen === 'video' ? library.refreshLibrary : () => setGlossaryReload(n => n + 1)}
+                />
+            )}
+
             {notification && (
                 <Notification
                     message={notification.message}
                     type={notification.type}
+                    action={notification.action}
                     onClose={() => setNotification(null)}
                 />
             )}
@@ -1230,17 +1445,22 @@ function App() {
             )}
 
             <LinkPicker />
+
+            <CommandPalette
+                open={paletteOpen}
+                onClose={() => setPaletteOpen(false)}
+                commands={paletteCommands}
+                onOpenVideo={video => { void handleSelectVideo(video); }}
+                onOpenDrive={(path, label, alias) => goToLibraryDrive(path, label, alias)}
+                onOpenTerm={term => { void handleOpenLink('glossary', term); }}
+                onOpenBio={handle => { void handleOpenLink('bio', handle); }}
+            />
             <MarkdownContextMenu />
 
-            {library.confirmDelete && (
+            {library.confirmDelete && flags.confirmBeforeDeleting && (
                 <ConfirmDialog
                     message={`Are you sure you want to delete "${library.confirmDelete.video.title}"?`}
-                    onConfirm={async () => {
-                        await library.confirmDeleteAction(() => { setSidebarOpen(false); setSelectedVideo(null); });
-                        // The Drive tree's per-category video counts (and any category that just
-                        // emptied) are computed server-side, so re-fetch instead of leaving them stale.
-                        setDriveVersion(v => v + 1);
-                    }}
+                    onConfirm={runConfirmedDelete}
                     onCancel={() => library.setConfirmDelete(null)}
                 />
             )}
@@ -1254,7 +1474,7 @@ function App() {
                 // well short of 0. A single instant jump happens before the virtualizer gets a
                 // chance to do that.
                 onClick={() => scrollContainerRef.current?.scrollTo({ top: 0, behavior: "auto" })}
-                className={`fixed right-6 p-3 bg-red-600 hover:bg-red-500 text-white rounded-full shadow-lg transition-opacity duration-200 cursor-pointer z-39 active:scale-95 ${showScrollTop ? "opacity-100" : "opacity-0 pointer-events-none"}`}
+                className={`fixed right-11 p-2.5 bg-red-600 hover:bg-red-500 text-white rounded-full shadow-lg transition-opacity duration-200 cursor-pointer z-39 active:scale-95 ${showScrollTop ? "opacity-100" : "opacity-0 pointer-events-none"}`}
                 // `max`, not a flat add: this button's resting spot (3rem) already clears every
                 // other view with nothing docked at the bottom (including Library/Search with the
                 // setting off). --k-bottom-bar-height (VideoList.tsx) only needs to push it up
@@ -1263,7 +1483,7 @@ function App() {
                 style={{ bottom: 'max(3rem, calc(var(--k-bottom-bar-height, 0px) + 1rem))' }}
                 title="Back to Top"
             >
-                <ChevronUp className="w-6 h-6" style={{ color: '#ffffff' }} />
+                <ChevronUp className="w-5 h-5" style={{ color: '#ffffff' }} />
             </button>
 
             {viewMode === 'library' && effectivePluginSummarizeEnabled && showSummarizeButton && flags.allowSummarizeAll && !sidebarOpen && (

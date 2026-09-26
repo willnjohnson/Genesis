@@ -1,6 +1,8 @@
 import { LayoutGrid, List, AlignJustify, AlignLeft } from "lucide-react";
 import { BRAND } from "../../branding";
-import { type DisplaySettings } from "../../api";
+import { useEffect, useState } from "react";
+import { Toggle } from "./Toggle";
+import { getCloseToTray, setCloseToTray, traySupported, type DisplaySettings } from "../../api";
 
 const RESOLUTIONS = [
     "800x600", "1024x768", "1280x720",
@@ -16,15 +18,25 @@ interface Props {
     onToggleSortControlButtons: () => void;
 }
 
-/** A simple toggle-switch button */
-function Toggle({ on, onChange }: { on: boolean; onChange: () => void }) {
+/** Windows only: closing the window keeps Kinesis running in the tray, so the tray icon's save popup keeps working. */
+function KeepInTrayRow() {
+    const [supported, setSupported] = useState(false);
+    const [on, setOn] = useState(false);
+    useEffect(() => {
+        traySupported().then(ok => {
+            setSupported(ok);
+            if (ok) getCloseToTray().then(setOn).catch(() => {});
+        }).catch(() => {});
+    }, []);
+    if (!supported) return null;
     return (
-        <button
-            onClick={onChange}
-            className={`w-12 h-6 rounded-full transition-colors relative cursor-pointer ${on ? 'bg-red-600' : 'bg-[#303030]'}`}
-        >
-            <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${on ? 'left-7' : 'left-1'}`} />
-        </button>
+        <div className="flex items-center justify-between">
+            <div>
+                <span className="text-sm font-semibold text-white block">Keep Running in the Tray</span>
+                <span className="text-xs text-[#aaaaaa]">Closing the window hides it to the tray icon, so its save popup keeps working. Quit from the icon's menu</span>
+            </div>
+            <Toggle on={on} label="Keep running in the tray" onChange={() => { const next = !on; setOn(next); void setCloseToTray(next); }} />
+        </div>
     );
 }
 
@@ -121,6 +133,8 @@ export function DisplayTab({ settings, showSortControlButtons, currentVideoListM
                             </button>
                         </div>
                     </div>
+
+                    <KeepInTrayRow />
 
                 </div>
             </div>

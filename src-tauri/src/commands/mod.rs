@@ -14,6 +14,8 @@ pub mod workspace;
 pub mod workspaces;
 pub mod kinpak;
 pub mod sequences;
+pub mod trash;
+pub mod tray;
 
 pub use settings::*;
 pub use youtube::*;
@@ -31,3 +33,5 @@ pub use workspace::*;
 pub use workspaces::*;
 pub use kinpak::*;
 pub use sequences::*;
+pub use trash::*;
+pub use tray::*;

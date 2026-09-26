@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Plus, X } from 'lucide-react';
 import type { GlossaryTerm } from '../../api';
 import { resolveEntry, termKinds } from '../../lib/glossary';
@@ -37,6 +38,9 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives
     );
     const [showTagDropdown, setShowTagDropdown] = useState(false);
     const [tagFilter, setTagFilter] = useState("");
+    const plusRef = useRef<HTMLButtonElement>(null);
+    // Where the open dropdown sits, in window coordinates (see `place`).
+    const [menuPos, setMenuPos] = useState<{ left: number; top?: number; bottom?: number; maxHeight: number } | null>(null);
 
     const handleClickOutside = useCallback((e: MouseEvent) => {
         const target = e.target as HTMLElement;
@@ -45,6 +49,37 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives
             setTagFilter("");
         }
     }, [showTagDropdown]);
+
+    // The list is drawn on the page itself (a portal), not inside the sidebar: the sidebar's own
+    // layers (its header and player) would otherwise sit over it, and its edges would clip it. It's
+    // placed from the + button's spot: above it when there's room (or more room than below), else
+    // below, its height limited to the space there, and kept inside the window sideways.
+    const place = useCallback(() => {
+        const button = plusRef.current;
+        if (!button) return;
+        const r = button.getBoundingClientRect();
+        const margin = 8;
+        const width = 240;
+        const left = Math.min(Math.max(r.left, margin), Math.max(margin, window.innerWidth - width - margin));
+        const above = r.top - margin * 2;
+        const below = window.innerHeight - r.bottom - margin * 2;
+        const wanted = Math.min(520, window.innerHeight * 0.6);
+        const up = above >= Math.min(wanted, 240) || above >= below;
+        const room = Math.max(120, up ? above : below);
+        setMenuPos(up
+            ? { left, bottom: window.innerHeight - r.top + margin, maxHeight: Math.min(wanted, room) }
+            : { left, top: r.bottom + margin, maxHeight: Math.min(wanted, room) });
+    }, []);
+    useEffect(() => {
+        if (!showTagDropdown) { setMenuPos(null); return; }
+        place();
+        window.addEventListener('resize', place);
+        window.addEventListener('scroll', place, true);
+        return () => {
+            window.removeEventListener('resize', place);
+            window.removeEventListener('scroll', place, true);
+        };
+    }, [showTagDropdown, place]);
 
     useEffect(() => {
         if (showTagDropdown) {
@@ -122,6 +157,7 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives
                 {canEdit && (
                 <div className="relative tag-dropdown-container">
                     <button
+                        ref={plusRef}
                         onClick={(e) => {
                             e.stopPropagation();
                             setShowTagDropdown(!showTagDropdown);
@@ -131,8 +167,12 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives
                         <Plus className="w-3 h-3" />
                     </button>
 
-                    {showTagDropdown && (
-                        <div className="absolute bottom-full left-0 mb-2 bg-[#1a1a1a] border border-[#383838] rounded-lg max-h-[min(60vh,520px)] overflow-hidden flex flex-col z-50 w-[240px]">
+                    {showTagDropdown && menuPos && createPortal(
+                        // tag-dropdown-container: the outside-click check treats a click in here as inside.
+                        <div
+                            className="tag-dropdown-container fixed bg-[#1a1a1a] border border-[#383838] rounded-lg overflow-hidden flex flex-col z-[150] w-[240px]"
+                            style={{ left: menuPos.left, top: menuPos.top, bottom: menuPos.bottom, maxHeight: menuPos.maxHeight }}
+                        >
                             <div className="p-3 border-b border-[#303030] bg-white/5">
                                 <input
                                     type="text"
@@ -163,7 +203,8 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives
                                     </>
                                 )}
                             </div>
-                        </div>
+                        </div>,
+                        document.body,
                     )}
                 </div>
                 )}

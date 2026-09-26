@@ -6,6 +6,7 @@ import {
     pickAttachmentFiles, removeAttachment, saveAttachmentAs, saveVideoNote, type AttachmentInfo,
 } from '../../api';
 import { ConfirmDialog } from '../ConfirmDialog';
+import { useFlags } from '../../hooks/useFlags';
 
 // Keep in step with MAX_ATTACHMENTS and MAX_LINKS in src-tauri/src/db/attachments.rs (the backend enforces them).
 const MAX_ATTACHMENTS = 5;
@@ -41,6 +42,7 @@ function FileIcon({ ext }: { ext: string }) {
  *  backend, so their contents never pass through the webview. Opening one hands it to the system's
  *  default app; nothing (HTML and SVG included) is rendered inside Kinesis. */
 export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
+    const { flags } = useFlags();
     const [note, setNote] = useState('');
     const [savedNote, setSavedNote] = useState('');
     const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
@@ -261,7 +263,7 @@ export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
                         </button>
                     )}
                     {canEdit && (
-                        <button onClick={() => setConfirmRemoveId(a.id)} title="Remove" className="text-gray-500 hover:text-red-400 transition-colors cursor-pointer p-1">
+                        <button onClick={() => (flags.confirmBeforeDeleting ? setConfirmRemoveId(a.id) : void handleRemove(a.id))} title="Remove" className="text-gray-500 hover:text-red-400 transition-colors cursor-pointer p-1">
                             <Trash2 className="w-3.5 h-3.5" />
                         </button>
                     )}

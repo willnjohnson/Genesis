@@ -1,8 +1,9 @@
-import { X } from "lucide-react";
-import { createPortal } from "react-dom";
+import type { ReactNode } from "react";
+import { Modal } from "./Modal";
 
 interface ConfirmDialogProps {
-    message: string;
+    /** Plain text, or markup to bold parts of it. Line breaks in it are kept. */
+    message: ReactNode;
     onConfirm: () => void;
     onCancel: () => void;
     /** The confirm button's text; "Delete" unless the action is something else (e.g. "Remove"). */
@@ -12,33 +13,13 @@ interface ConfirmDialogProps {
 }
 
 export function ConfirmDialog({ message, onConfirm, onCancel, confirmLabel = "Delete", title = "Please Confirm" }: ConfirmDialogProps) {
-    // Rendered on the page itself, not inside whatever opened it: the video panel slides in with a CSS
-    // transform, which would make a "fixed" dialog inside it position against the panel instead of the
-    // window (and scroll the panel's contents when the dialog took focus).
-    return createPortal(
-        <div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 animate-in fade-in duration-200"
-            // Stops here, so clicking outside the dialog dismisses only the dialog, not a window it was opened from.
-            onClick={(e) => { e.stopPropagation(); onCancel(); }}
-        >
-            <div
-                className="bg-[#0f0f0f] border border-[#303030] rounded-lg p-6 max-w-md mx-4 animate-in zoom-in-95 duration-200"
-                onClick={(e) => e.stopPropagation()}
-            >
-                <div className="flex items-start justify-between mb-4">
-                    <h3 className="text-lg font-bold text-white">{title}</h3>
-                    <button
-                        onClick={onCancel}
-                        className="text-[#aaaaaa] hover:text-white cursor-pointer transition-colors"
-                    >
-                        <X className="w-5 h-5" />
-                    </button>
-                </div>
-
-                {/* Line breaks in a message are kept, and a long unbroken word (a web address) wraps instead of overflowing. */}
-                <p className="text-[#aaaaaa] mb-6 leading-relaxed whitespace-pre-line break-words">{message}</p>
-
-                <div className="flex gap-3 justify-end">
+    return (
+        <Modal
+            onClose={onCancel}
+            title={title}
+            layer="top"
+            footer={
+                <>
                     <button
                         onClick={onCancel}
                         className="px-4 py-2 rounded-lg bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] cursor-pointer text-white text-sm font-semibold transition-colors"
@@ -51,9 +32,11 @@ export function ConfirmDialog({ message, onConfirm, onCancel, confirmLabel = "De
                     >
                         {confirmLabel}
                     </button>
-                </div>
-            </div>
-        </div>,
-        document.body,
+                </>
+            }
+        >
+            {/* Line breaks in a message are kept, and a long unbroken word (a web address) wraps instead of overflowing. */}
+            <p className="text-[#aaaaaa] leading-relaxed whitespace-pre-line break-words">{message}</p>
+        </Modal>
     );
 }

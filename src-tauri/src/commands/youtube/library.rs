@@ -315,10 +315,10 @@ pub async fn get_tag_videos_preview(app: tauri::AppHandle, tag: String, limit: O
 }
 
 #[command]
-pub async fn delete_video(app: tauri::AppHandle, video_id: String) -> Result<String, String> {
+pub async fn delete_video(app: tauri::AppHandle, video_id: String) -> Result<Option<u64>, String> {
     let db_path = get_db_path(&app);
-    db::delete_video(&db_path, &video_id).map_err(|e| e.to_string())?;
-    Ok("Deleted".to_string())
+    // Through the Trash, so the delete can be undone this session.
+    crate::trash::delete_video(crate::trash::store(&app), &db_path, &video_id)
 }
 
 /// One saved video (with its summary and transcript), for opening a link that points at it.

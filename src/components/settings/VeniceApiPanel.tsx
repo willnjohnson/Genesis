@@ -7,6 +7,7 @@ import {
 import { useLockedSettings, LOCKED_TITLE } from "../../hooks/useLockedSettings";
 import { DEFAULT_VENICE_MODEL } from "../../lib/venice";
 import { ApiKeyField } from "./ApiKeyField";
+import { ApiPanelHeading, API_GUIDES } from "./ApiPanelHeading";
 import { settingsSecondaryBtn } from "./buttons";
 import { PromptEditor, TooltipLightbulb } from "./pluginShared";
 
@@ -58,7 +59,11 @@ export function VeniceApiPanel() {
     return (
         <div className="space-y-6">
             <div>
-                <h3 className="text-base font-bold mb-1">Venice AI</h3>
+                <ApiPanelHeading
+                    title="Venice AI"
+                    guideUrl={API_GUIDES.venice.url}
+                    costNote={API_GUIDES.venice.costNote}
+                />
                 <p className="text-xs text-[#aaaaaa] mb-4">Powers cloud summaries and AI image generation.</p>
 
                 {keyStatus?.venice.licensed && (

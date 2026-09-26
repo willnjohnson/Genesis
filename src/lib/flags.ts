@@ -34,6 +34,10 @@ export const FLAG_DEFAULTS = {
     allowSaveToLibrary: true,
     allowSaveAll: true,
     allowDeletionLibrary: true,
+    // Ask "are you sure?" before deleting a video, a Glossary term or tag, or an attachment. On by default; turning it
+    // off (Settings > Workspace > Permissions) asks for a second confirmation. Not forced by Read-only (that would
+    // mean "don't ask"); with Read-only on, deleting is off anyway and the setting is greyed out.
+    confirmBeforeDeleting: true,
     allowSummarizeAll: true,
     // Video detail panel
     showVideoPlayer: true,

@@ -75,7 +75,7 @@ export function WorkspaceSwitcher({ variant, name }: Props) {
         setSwitching(folder);
         try {
             await openWorkspace(folder);
-            reloadApp();
+            reloadApp(status?.recents.find(r => r.folder === folder)?.name);
         } catch (e) {
             setError(errText(e));
             setSwitching(null);

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, HardDrive } from "lucide-react";
 import { checkWorkspaceName, selectFolder, type NameCheck } from "../../api";
-import { PixelLoader, type PixelLoaderVariant } from "../PixelLoader";
+import { LifeLoader } from "../LifeLoader";
 import { fieldLabel, inputClass, secondaryBtn } from "./helpers";
 
-/** What shows while something long runs: the pixel-art animation and the latest progress message. */
-export function ProgressLine({ message, variant = "invader" }: { message: string; variant?: PixelLoaderVariant }) {
+/** What shows while something long runs: the Game of Life animation and the latest progress message. */
+export function ProgressLine({ message }: { message: string }) {
     return (
         <div
             role="status"
@@ -13,7 +13,7 @@ export function ProgressLine({ message, variant = "invader" }: { message: string
             className="px-3 py-2 rounded-lg border flex items-center gap-3"
             style={{ backgroundColor: "var(--k-bg)", borderColor: "var(--k-border-303030)" }}
         >
-            <PixelLoader variant={variant} />
+            <LifeLoader />
             <span className="min-w-0 text-[10px] font-bold uppercase tracking-wider break-words" style={{ color: "var(--k-accent)" }}>{message}</span>
         </div>
     );

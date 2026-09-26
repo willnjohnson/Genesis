@@ -86,16 +86,22 @@ pub fn get_glossary_terms(db_path: &str) -> Result<Vec<GlossaryEntry>> {
 /// row). Links to the term are only dropped once no row for it is left (links are by name, so
 /// another definition still satisfies them).
 pub fn delete_glossary_group(db_path: &str, term: &str, drives: &[String]) -> Result<()> {
+    delete_glossary_group_recorded(db_path, term, drives).map(|_| ())
+}
+
+/// `delete_glossary_group`, returning the texts whose links to the term were removed (the Trash puts them back).
+pub fn delete_glossary_group_recorded(db_path: &str, term: &str, drives: &[String]) -> Result<Vec<super::links::TextChange>> {
     let conn = Connection::open(db_path)?;
     conn.execute("DELETE FROM Glossary WHERE term = ?1 AND drives = ?2", params![term, encode_drives(drives)])?;
     let left: i64 = conn.query_row("SELECT COUNT(*) FROM Glossary WHERE term = ?", params![term], |r| r.get(0))?;
     if left == 0 {
         // Links to a term that no longer exists are dropped, leaving their text.
-        if let Err(e) = super::links::apply_link_edits(db_path, &[super::links::LinkEdit::Unlink(super::links::LinkKind::Glossary, term.to_string())]) {
-            log::warn!("Couldn't remove links to deleted term {term}: {e}");
+        match super::links::apply_link_edits_recorded(db_path, &[super::links::LinkEdit::Unlink(super::links::LinkKind::Glossary, term.to_string())]) {
+            Ok(changes) => return Ok(changes),
+            Err(e) => log::warn!("Couldn't remove links to deleted term {term}: {e}"),
         }
     }
-    Ok(())
+    Ok(Vec::new())
 }
 
 /// Adds or edits one definition and every Drive it's filed under, atomically. `original` is the
@@ -119,27 +125,41 @@ pub fn save_glossary_group(
     let mut conn = Connection::open(db_path)?;
     let tx = conn.transaction()?;
 
-    let others: Vec<(String, String)> = {
-        let mut stmt = tx.prepare("SELECT definition, drives FROM Glossary WHERE term = ?")?;
-        let rows = stmt.query_map(params![term], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    // Names ignore case (the column is COLLATE NOCASE), so this finds the term's rows under any capitalization.
+    let others: Vec<(String, String, String)> = {
+        let mut stmt = tx.prepare("SELECT term, definition, drives FROM Glossary WHERE term = ?")?;
+        let rows = stmt.query_map(params![term], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
         rows.collect::<Result<_>>()?
     };
     let mut absorbed: Vec<String> = Vec::new();
-    for (other_def, other_key) in others {
-        if orig.as_ref().is_some_and(|(t, k)| t == term && *k == other_key) {
+    // How the name is already spelled by a row that stays (a name has one spelling).
+    let mut existing_spelling: Option<String> = None;
+    for (other_term, other_def, other_key) in others {
+        if orig.as_ref().is_some_and(|(t, k)| t.eq_ignore_ascii_case(term) && *k == other_key) {
             continue; // the row being edited: replaced below
         }
+        existing_spelling.get_or_insert_with(|| other_term.clone());
         let other = decode_drives(&other_key);
         if other_def == definition {
             targets.extend(other); // same text: that row's Drives join this entry
             absorbed.push(other_key);
         } else if (targets.is_empty() && other.is_empty()) || other.iter().any(|d| targets.contains(d)) {
             let place = other.iter().find(|d| targets.contains(d)).cloned().unwrap_or_else(|| "Uncategorized".to_string());
-            return Err(invalid(format!("'{term}' already has a different definition in {place}.")));
+            let exists = if other_term == term {
+                format!("'{term}' already has a different definition in {place}.")
+            } else {
+                format!("'{term}' already exists as '{other_term}' (names ignore capitalization) with a different definition in {place}.")
+            };
+            return Err(invalid(format!("{exists} To keep both, give one a qualifier, like '{term} (chem)'.")));
         }
     }
     let targets = sorted_unique(targets);
     let key = encode_drives(&targets);
+    // A name has one spelling. Re-capitalizing an entry's own name (an edit) sets it for the whole name; anything else
+    // (a new entry, or a rename into a name that exists) takes the spelling already there.
+    let recased = orig.as_ref().is_some_and(|(t, _)| t.eq_ignore_ascii_case(term));
+    let stored = if recased { term.to_string() } else { existing_spelling.unwrap_or_else(|| term.to_string()) };
+    let term = stored.as_str();
 
     if let Some((orig_term, orig_key)) = &orig {
         tx.execute("DELETE FROM Glossary WHERE term = ?1 AND drives = ?2", params![orig_term, orig_key])?;
@@ -151,11 +171,14 @@ pub fn save_glossary_group(
         "INSERT INTO Glossary (term, definition, drives) VALUES (?1, ?2, ?3) ON CONFLICT(term, drives) DO UPDATE SET definition = excluded.definition",
         params![term, definition, key],
     )?;
-    // A renamed term keeps the links that pointed at it, unless another row still holds the old name.
+    // Every row of the name carries the one spelling.
+    tx.execute("UPDATE Glossary SET term = ?1 WHERE term = ?1 AND term <> ?1 COLLATE BINARY", params![term])?;
+    // A renamed term keeps the links that pointed at it, unless another row still holds the old name. (Only the
+    // capitalization changing isn't a rename: links ignore case.)
     let renamed_from = orig
         .as_ref()
         .map(|(t, _)| t.as_str())
-        .filter(|t| *t != term)
+        .filter(|t| !t.eq_ignore_ascii_case(term))
         .filter(|t| {
             tx.query_row("SELECT COUNT(*) FROM Glossary WHERE term = ?", params![t], |r| r.get::<_, i64>(0))
                 .map(|n| n == 0)
@@ -346,5 +369,86 @@ mod tests {
         let other = get_glossary_terms(&db).unwrap().into_iter().find(|e| e.term == "Other").unwrap();
         assert!(!other.definition.contains("kinesis://glossary/Magnesium"), "no rows left, so the link is dropped");
         let _ = std::fs::remove_file(&db);
+    }
+}
+
+#[cfg(test)]
+mod case_insensitive_name_tests {
+    use super::*;
+    use crate::db::init_db;
+
+    fn temp_db(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("kinesis_glnames_{}_{}.db", name, std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let p = path.to_string_lossy().to_string();
+        init_db(&p).unwrap();
+        p
+    }
+
+    fn names(db: &str) -> Vec<(String, String)> {
+        get_glossary_terms(db).unwrap().into_iter().map(|e| (e.term, e.definition)).collect()
+    }
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn summary_of(db: &str, id: &str) -> String {
+        Connection::open(db).unwrap().query_row("SELECT summary FROM Videos WHERE video_id = ?1", params![id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_different_definition_under_another_capitalization_is_refused_with_a_hint() {
+        let db = temp_db("refuse");
+        save_glossary_group(&db, None, "Mg", "Magnesium.", &[]).unwrap();
+        let err = save_glossary_group(&db, None, "mg", "Milligram.", &[]).unwrap_err().to_string();
+        assert!(err.contains("already exists as 'Mg'") && err.contains("qualifier"), "{err}");
+        assert_eq!(names(&db), [("Mg".to_string(), "Magnesium.".to_string())], "nothing was changed");
+    }
+
+    #[test]
+    fn a_new_entry_for_another_drive_takes_the_spelling_already_there() {
+        let db = temp_db("spelling");
+        save_glossary_group(&db, None, "Magnesium", "Element.", &v(&[":CHEM"])).unwrap();
+        save_glossary_group(&db, None, "magnesium", "Supplement.", &v(&[":HEALTH"])).unwrap();
+        let got = names(&db);
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|(t, _)| t == "Magnesium"), "one spelling: {got:?}");
+    }
+
+    #[test]
+    fn recapitalizing_an_entry_recases_every_row_of_the_name() {
+        let db = temp_db("recase");
+        save_glossary_group(&db, None, "Mtor", "Kinase.", &v(&[":CHEM"])).unwrap();
+        save_glossary_group(&db, None, "Mtor", "Pathway.", &v(&[":HEALTH"])).unwrap();
+        save_glossary_group(&db, Some(("Mtor", &v(&[":CHEM"]))), "mTOR", "Kinase.", &v(&[":CHEM"])).unwrap();
+        let got = names(&db);
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|(t, _)| t == "mTOR"), "{got:?}");
+    }
+
+    #[test]
+    fn deleting_removes_links_whatever_their_capitalization() {
+        let db = temp_db("links");
+        save_glossary_group(&db, None, "mTor", "Kinase.", &[]).unwrap();
+        Connection::open(&db)
+            .unwrap()
+            .execute("INSERT INTO Videos (video_id, title, summary) VALUES ('v', 'T', 'See [it](kinesis://glossary/MTOR) here.')", [])
+            .unwrap();
+        delete_glossary_group(&db, "MTOR", &[]).unwrap();
+        assert!(names(&db).is_empty(), "the entry went, whatever its capitalization");
+        assert_eq!(summary_of(&db, "v"), "See it here.", "the link is gone and its text stays");
+    }
+
+    #[test]
+    fn a_capitalization_only_edit_keeps_the_links() {
+        let db = temp_db("keeplinks");
+        save_glossary_group(&db, None, "Mtor", "Kinase.", &[]).unwrap();
+        Connection::open(&db)
+            .unwrap()
+            .execute("INSERT INTO Videos (video_id, title, summary) VALUES ('v', 'T', '[it](kinesis://glossary/Mtor)')", [])
+            .unwrap();
+        save_glossary_group(&db, Some(("Mtor", &[])), "mTOR", "Kinase.", &[]).unwrap();
+        assert!(summary_of(&db, "v").contains("kinesis://glossary/"), "still a link");
     }
 }

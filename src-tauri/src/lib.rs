@@ -8,7 +8,7 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.4.6";
+const VERSION: &str = "0.4.7";
 
 /// The smallest the window can be dragged to (logical pixels). 800 is also the smallest size
 /// offered under Settings > Display, so every choice there still fits; below this the header
@@ -59,6 +59,8 @@ mod kinpak;
 mod drive_scope;
 mod global_settings;
 mod window_state;
+mod trash;
+mod tray;
 
 pub use types::{Video, ChannelInfo, VideoResponse, DisplaySettings, DbDetails};
 pub use types::{parse_view_count, extract_handle_from_url};
@@ -264,6 +266,17 @@ pub fn run() {
             commands::save_glossary_term,
             commands::get_wdbs_roots,
             commands::get_handle_drives,
+            commands::get_search_suggestions,
+            commands::trash_list,
+            commands::trash_restore,
+            commands::trash_discard,
+            commands::trash_empty,
+            commands::tray_supported,
+            commands::get_close_to_tray,
+            commands::set_close_to_tray,
+            commands::read_clipboard_text,
+            commands::hide_quick_add,
+            commands::show_main_window,
             commands::get_wdbs_aliases,
             commands::get_video_by_id,
             commands::get_video_attachments,
@@ -305,6 +318,7 @@ pub fn run() {
         .manage(workspaces::BusyState(Mutex::new(None)))
         .manage(EmbedServerPortState(Mutex::new(None)))
         .manage(sync::SyncState::default())
+        .manage(trash::TrashState::default())
         .setup(move |app| {
             let app_handle = app.handle();
             // Opens the most recent workspace (adopting an older single-database install first).
@@ -328,14 +342,14 @@ pub fn run() {
             commands::clear_attachment_temp();
 
             let (_, _, fullscreen) = window_prefs(app_handle);
-            // Opens where it was left (size, position, maximized), corrected first when that no
-            // longer fits the screens; hidden until it's in place so it doesn't flash at the default spot.
+            // Opens the way it was left, corrected first where that no longer fits the screens (see
+            // window_state.rs for what's remembered on each platform); hidden until it's in place, where a
+            // position is set, so it doesn't flash at the default spot.
             let plan = window_state::plan_for_launch(app_handle);
-
 
             // Load from bundled index.html
             let url = WebviewUrl::App("index.html".into());
-            
+
             // Create the main window
             let window = WebviewWindowBuilder::new(app_handle, "main", url)
                 .title(&get_window_title(&db_path))
@@ -343,15 +357,22 @@ pub fn run() {
                 .min_inner_size(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
                 .fullscreen(fullscreen)
                 .maximized(plan.maximized)
-                .visible(false)
+                .visible(plan.position.is_none())
                 .build()?;
             if let Some((x, y)) = plan.position {
                 let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
             }
             window_state::track(&window);
+            // Windows: the tray icon and its quick-save popup, and closing to the tray when that's on.
+            #[cfg(windows)]
+            {
+                if let Err(e) = tray::init(app_handle) {
+                    log::error!("Couldn't create the tray icon: {e}");
+                }
+                tray::keep_in_tray(app_handle, &window);
+            }
             let _ = window.show();
-            window_state::settle_position(&window, plan.position);
-            
+
             Ok(())
         })
         .build(tauri::generate_context!())

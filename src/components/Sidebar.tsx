@@ -1,12 +1,17 @@
 import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, ClipboardPaste, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, BookA, ListVideo, Paperclip, Monitor, Cloud } from 'lucide-react';
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { PixelLoader } from './PixelLoader';
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
+import { flushSync } from 'react-dom';
+import { LifeLoader } from './LifeLoader';
 import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, getWdbsAliases, getHandleDrives, getVideoById, getVideoAttachments, type Video, type GlossaryTerm } from '../api';
 import { DriveComboBox } from './DriveComboBox';
 import { saveImageAs } from '../lib/save-image-as';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
 import { useFindReplace } from './sidebar/useFindReplace';
 import { FindReplacePanel } from './sidebar/FindReplacePanel';
+import { GlossaryDetectPanel } from './sidebar/GlossaryDetectPanel';
+import { ConfirmDialog } from './ConfirmDialog';
+import { TranscriptText } from './sidebar/TranscriptText';
+import { useReadFind } from './sidebar/useReadFind';
 import { PhotosynthesisPanel } from './sidebar/PhotosynthesisPanel';
 import { VideoTagsPanel } from './sidebar/VideoTagsPanel';
 import { SequenceDock } from './sidebar/SequenceDock';
@@ -15,6 +20,7 @@ import { AttachmentsPanel } from './sidebar/AttachmentsPanel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../lib/remark-highlight';
+import { remarkSourceLines, lineAt, indexOfLine, caretY, scrollPreviewToLine, topVisibleLine } from '../lib/preview-sync';
 import { markdownUrlTransform } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
 import { TermDefinitionModal } from './TermDefinitionModal';
@@ -28,6 +34,29 @@ type LeftTab = 'terms' | 'tags' | 'similar' | 'attachments';
 // video/transcript split ratio survives closing and reopening the sidebar, and relaunching
 // the app, instead of resetting to the 65% default every time.
 const SPLIT_PERCENT_SETTING_KEY = 'sidebarSplitPercent';
+// The divider is a percentage, which on a narrow window leaves the transcript pane too thin to hold its
+// header buttons or a readable line. So each pane also has a pixel floor. On a window too small for both,
+// the transcript pane keeps its floor and the video pane gets what's left.
+const MIN_VIDEO_PANE_PX = 300;
+const MIN_TRANSCRIPT_PANE_PX = 340;
+// The panel is 1378px wide at most until the window is wide enough to leave a strip of the page showing to its
+// left (the click-outside-to-close area): that strip is what a 1440px window shows (1440 - 1378 = 62px, enough
+// to clear the Kinesis "K" logo in the navigation rail), and beyond that width the panel grows with the window
+// and keeps the strip the same. The transcript / AI summary side keeps the width it has at 1378px; all the extra
+// goes to the video side.
+const SIDEBAR_BASE_WIDTH = 1378;
+const SIDEBAR_SIDE_GAP = 62;
+/** The divider position (percent from the left) held within the 30-85 range and both panes' floors. */
+function clampSplit(percent: number, sidebarWidth: number): number {
+    let lo = 30;
+    let hi = 85;
+    if (sidebarWidth > 0) {
+        lo = Math.max(lo, (MIN_VIDEO_PANE_PX / sidebarWidth) * 100);
+        hi = Math.min(hi, 100 - (MIN_TRANSCRIPT_PANE_PX / sidebarWidth) * 100);
+    }
+    if (lo > hi) return Math.max(0, hi);
+    return Math.min(hi, Math.max(lo, percent));
+}
 
 interface Props {
     isOpen: boolean;
@@ -96,6 +125,20 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const [checkingDb, setCheckingDb] = useState(false);
     const [splitPercent, setSplitPercent] = useState(65);
     const splitPercentRef = useRef(splitPercent);
+    // The panel's width follows the window, so the pane floors are applied against it as it changes.
+    const [sidebarWidth, setSidebarWidth] = useState(0);
+    useEffect(() => {
+        const el = document.getElementById('sidebar-container');
+        if (!el) return;
+        const observer = new ResizeObserver(() => setSidebarWidth(el.offsetWidth));
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, []);
+    // splitPercent is a share of the panel at its base width (at most 1378px); a wider panel keeps the
+    // transcript side at that same pixel width and gives the rest to the video side.
+    const baseWidth = Math.min(sidebarWidth, SIDEBAR_BASE_WIDTH);
+    const transcriptPx = ((100 - clampSplit(splitPercent, baseWidth)) / 100) * baseWidth;
+    const effectiveSplit = sidebarWidth > 0 ? (1 - transcriptPx / sidebarWidth) * 100 : splitPercent;
     const [isResizing, setIsResizing] = useState(false);
     const isResizingRef = useRef(false);
     const autoSwitchedToSummaryRef = useRef(false);
@@ -182,24 +225,28 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     const transcriptBackdropRef = useRef<HTMLDivElement>(null);
     const summaryBackdropRef = useRef<HTMLDivElement>(null);
 
-    // How much "Back to Transcript" says, by how much room the transcript/summary header row has:
-    // full label, then "Back", then just the arrow — and the same tiering for whichever of
-    // Summarize/AI Summary or Find & Replace is showing instead, since they occupy the same spot
-    // and are exactly as prone to running out of room. Same ResizeObserver approach as the sequence
-    // bar's Previous/Next labels (SequenceDock.tsx) — this row's width depends on the draggable
-    // divider (splitPercent) as well as the window, so a fixed breakpoint can't drive it.
+    // How much the buttons in the transcript/summary header row say: full labels, then short ones
+    // ("Back", "Find", "Detect"), then just their icons. Which tier fits depends on how many buttons the
+    // row has (editing adds Find & Replace and Detect Glossary beside Back) as well as its width, which
+    // the draggable divider (splitPercent) changes along with the window, so it's found by trying: start
+    // from full whenever the width or the set of buttons changes, and step down while they don't fit.
+    // Room kept between the title and the buttons: a tier is dropped while there is still this much to
+    // spare, so the two never get close enough to touch.
+    const HEADER_BUTTONS_SLACK = 20;
     const transcriptHeaderRef = useRef<HTMLDivElement>(null);
+    const headerButtonsRef = useRef<HTMLDivElement>(null);
+    const [headerWidth, setHeaderWidth] = useState(0);
     const [headerActionMode, setHeaderActionMode] = useState<'full' | 'short' | 'icon'>('full');
     useEffect(() => {
         const el = transcriptHeaderRef.current;
         if (!el) return;
-        const observer = new ResizeObserver(([entry]) => {
-            const width = entry.contentRect.width;
-            setHeaderActionMode(width >= 260 ? 'full' : width >= 190 ? 'short' : 'icon');
-        });
+        // flushSync: the tier is re-chosen before the browser paints, so a drag of the divider never shows
+        // a frame with the buttons on top of the title.
+        const observer = new ResizeObserver(([entry]) => flushSync(() => setHeaderWidth(entry.contentRect.width)));
         observer.observe(el);
         return () => observer.disconnect();
     }, []);
+
 
     const {
         findText, setFindText,
@@ -214,6 +261,158 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         setEditedTranscript, setEditedSummary,
         transcriptEditRef, summaryEditRef, transcriptBackdropRef, summaryBackdropRef,
     });
+
+    // Asked before opening the transcript editor when summarizing replaces the transcript with N/A.
+    const [confirmEditTranscript, setConfirmEditTranscript] = useState(false);
+    const startEditingTranscript = () => {
+        setIsEditingTranscript(true);
+        setIsEditingSummary(false);
+        setEditedTranscript(transcript);
+    };
+
+    // "Detect Glossary": suggests glossary terms in the text being edited to link (never on its own).
+    // It shares the editor's top-right corner with Find & Replace, so opening one closes the other.
+    const [showGlossaryDetect, setShowGlossaryDetect] = useState(false);
+    // Ctrl+F while reading the transcript or AI summary: search-only (no Replace), see useReadFind.
+    const [showReadFind, setShowReadFind] = useState(false);
+    useEffect(() => {
+        if (!isEditingTranscript && !isEditingSummary) setShowGlossaryDetect(false);
+    }, [isEditingTranscript, isEditingSummary]);
+    // Header button labels (see headerActionMode above): back to full whenever the width or the set of
+    // buttons changes, then down a tier for as long as they overflow.
+    useLayoutEffect(() => {
+        setHeaderActionMode('full');
+    }, [headerWidth, showSummary, isEditingTranscript, isEditingSummary, showPromptEditor, showFindReplace, showGlossaryDetect, pluginSummarizeEnabled, hasExistingSummary]);
+    useLayoutEffect(() => {
+        const box = headerButtonsRef.current;
+        const row = transcriptHeaderRef.current;
+        const title = row?.firstElementChild as HTMLElement | null;
+        if (!box || !row || !title) return;
+        // The buttons' box is only as wide as they are, so it can't say whether there's room to spare. The
+        // room is what's left of the row after the title and the gap between them. Add up the buttons'
+        // widths (they're right-aligned, so a squeeze spills out of the box's left edge, which scrollWidth
+        // doesn't count) and step down while that plus some breathing room doesn't fit.
+        const kids = Array.from(box.children) as HTMLElement[];
+        const boxGap = parseFloat(getComputedStyle(box).columnGap) || 0;
+        const rowGap = parseFloat(getComputedStyle(row).columnGap) || 0;
+        const needed = kids.reduce((sum, k) => sum + k.offsetWidth, 0) + boxGap * Math.max(0, kids.length - 1);
+        const available = row.clientWidth - title.offsetWidth - rowGap;
+        if (needed + HEADER_BUTTONS_SLACK > available) {
+            setHeaderActionMode(m => (m === 'full' ? 'short' : m === 'short' ? 'icon' : m));
+        }
+    });
+    // Esc closes the Find & Replace or Detect Glossary box that's open, rather than reaching App's Esc,
+    // which would close this whole panel. Listened for in the capture phase, ahead of that handler.
+    useEffect(() => {
+        if (!showFindReplace && !showGlossaryDetect && !showReadFind) return;
+        const onKey = (e: KeyboardEvent) => {
+            // A definition opened from the Detect panel is a dialog on top: Esc closes that first.
+            if (e.key !== 'Escape' || e.defaultPrevented || selectedTerm) return;
+            e.preventDefault();
+            e.stopPropagation();
+            if (showGlossaryDetect) setShowGlossaryDetect(false);
+            else if (showFindReplace) setShowFindReplace(false);
+            else setShowReadFind(false);
+            // Focus goes back to the editor. Left on the button that opened the box, the Esc keypress
+            // would make the browser draw its keyboard-focus highlight around that button.
+            (document.activeElement as HTMLElement | null)?.blur?.();
+            (isEditingTranscript ? transcriptEditRef : summaryEditRef).current?.focus();
+        };
+        window.addEventListener('keydown', onKey, true);
+        return () => window.removeEventListener('keydown', onKey, true);
+    }, [showFindReplace, showGlossaryDetect, showReadFind, setShowFindReplace, isEditingTranscript, selectedTerm]);
+    const activeEditor = () => (isEditingTranscript ? transcriptEditRef : summaryEditRef).current;
+    const applyGlossaryLinks = (newText: string) => {
+        const textarea = activeEditor();
+        if (textarea) {
+            // Through the editor's own undo history, like Replace All. Replacing everything sends the view
+            // to the caret, so the scroll spot (and where the caret was) is put back: the text stays
+            // where it is, for the change to be seen happening in place.
+            const { scrollTop, scrollLeft, selectionStart } = textarea;
+            const backdrop = (isEditingTranscript ? transcriptBackdropRef : summaryBackdropRef).current;
+            const restore = () => {
+                textarea.scrollTop = scrollTop;
+                textarea.scrollLeft = scrollLeft;
+                if (backdrop) { backdrop.scrollTop = scrollTop; backdrop.scrollLeft = scrollLeft; }
+            };
+            textarea.focus({ preventScroll: true });
+            textarea.select();
+            document.execCommand('insertText', false, newText);
+            const caret = Math.min(selectionStart, newText.length);
+            textarea.setSelectionRange(caret, caret);
+            restore();
+            // Again once the editor has re-rendered with the new text.
+            requestAnimationFrame(restore);
+        } else if (isEditingTranscript) {
+            setEditedTranscript(newText);
+        } else {
+            setEditedSummary(newText);
+        }
+    };
+    const showInEditor = (start: number, end: number) => {
+        const textarea = activeEditor();
+        if (!textarea) return;
+        textarea.focus();
+        textarea.setSelectionRange(start, end);
+        const full = isEditingTranscript ? editedTranscript : editedSummary;
+        const line = full.slice(0, start).split('\n').length;
+        textarea.scrollTop = (line / full.split('\n').length) * textarea.scrollHeight - textarea.clientHeight / 2;
+        const backdrop = (isEditingTranscript ? transcriptBackdropRef : summaryBackdropRef).current;
+        if (backdrop) backdrop.scrollTop = textarea.scrollTop;
+    };
+
+    // Preview and editor keep their place: the preview opens at the text the caret was in, and going back
+    // puts the editor where the preview had scrolled to (see lib/preview-sync.ts). Left alone in the
+    // preview, going back restores the caret and scroll exactly as they were.
+    const [isPreviewingTranscript, setIsPreviewingTranscript] = useState(false);
+    const [isPreviewingSummary, setIsPreviewingSummary] = useState(false);
+    const previewScrollRef = useRef<HTMLDivElement>(null);
+    const previewMemo = useRef<{ caret: number; editorScroll: number; previewScroll: number } | null>(null);
+    const previewToShow = useRef<{ line: number; fraction: number } | null>(null);
+    const editorSpot = useRef<{ index: number; scrollTop?: number; offset?: number } | null>(null);
+    const togglePreview = (kind: 'transcript' | 'summary') => {
+        const transcriptKind = kind === 'transcript';
+        const previewing = transcriptKind ? isPreviewingTranscript : isPreviewingSummary;
+        const text = transcriptKind ? editedTranscript : editedSummary;
+        if (!previewing) {
+            const textarea = (transcriptKind ? transcriptEditRef : summaryEditRef).current;
+            const caret = textarea?.selectionStart ?? 0;
+            previewMemo.current = { caret, editorScroll: textarea?.scrollTop ?? 0, previewScroll: -1 };
+            previewToShow.current = { line: lineAt(text, caret), fraction: text.length ? caret / text.length : 0 };
+        } else {
+            const pane = previewScrollRef.current;
+            const memo = previewMemo.current;
+            const top = pane ? topVisibleLine(pane) : null;
+            if (pane && memo && memo.previewScroll >= 0 && Math.abs(pane.scrollTop - memo.previewScroll) < 2) {
+                editorSpot.current = { index: memo.caret, scrollTop: memo.editorScroll };
+            } else if (top) {
+                editorSpot.current = { index: indexOfLine(text, top.line), offset: top.offset };
+            } else if (pane && pane.scrollHeight > 0) {
+                // A plain-text preview has no blocks to read a line from: go by how far through it is.
+                const fraction = (pane.scrollTop + pane.clientHeight * 0.3) / pane.scrollHeight;
+                editorSpot.current = { index: Math.round(text.length * Math.min(1, fraction)), offset: pane.clientHeight * 0.3 };
+            }
+        }
+        (transcriptKind ? setIsPreviewingTranscript : setIsPreviewingSummary)(!previewing);
+    };
+    useLayoutEffect(() => {
+        const pane = previewScrollRef.current;
+        if (previewToShow.current !== null && pane) {
+            scrollPreviewToLine(pane, previewToShow.current.line, 0.3, previewToShow.current.fraction);
+            if (previewMemo.current) previewMemo.current.previewScroll = pane.scrollTop;
+            previewToShow.current = null;
+        } else if (editorSpot.current) {
+            const spot = editorSpot.current;
+            editorSpot.current = null;
+            const textarea = activeEditor();
+            if (!textarea) return;
+            textarea.focus({ preventScroll: true });
+            textarea.setSelectionRange(spot.index, spot.index);
+            textarea.scrollTop = spot.scrollTop ?? Math.max(0, caretY(textarea, spot.index) - (spot.offset ?? 0));
+            const backdrop = (isEditingTranscript ? transcriptBackdropRef : summaryBackdropRef).current;
+            if (backdrop) backdrop.scrollTop = textarea.scrollTop;
+        }
+    }, [isPreviewingTranscript, isPreviewingSummary]);
 
     const handleDeleteSummaryImage = (src: string) => {
         if (!src) return;
@@ -291,12 +490,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         if (!sidebar) return;
 
         const rect = sidebar.getBoundingClientRect();
-        const offsetX = e.clientX - rect.left;
-        const newPercent = (offsetX / rect.width) * 100;
-
-        if (newPercent > 30 && newPercent < 85) {
-            setSplitPercent(newPercent);
-        }
+        // The transcript side's width is what the divider sets; as a share of the base width it's what's kept.
+        const base = Math.min(rect.width, SIDEBAR_BASE_WIDTH);
+        const transcriptPx = rect.right - e.clientX;
+        setSplitPercent(clampSplit(100 - (transcriptPx / base) * 100, base));
     }, []);
 
     useEffect(() => {
@@ -479,8 +676,6 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         }
     }, [isOpen]);
 
-    const [isPreviewingTranscript, setIsPreviewingTranscript] = useState(false);
-    const [isPreviewingSummary, setIsPreviewingSummary] = useState(false);
 
     useEffect(() => {
         if (handle) {
@@ -888,10 +1083,73 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         </div>
     );
 
+    // Ctrl+F. The browser's own find is always blocked (main.tsx), so this is the only search: with the
+    // panel open on the transcript or AI summary being read, it opens the search-only box; while
+    // editing, the full Find & Replace. It looks at nothing but that text.
+    const editingText = isEditingTranscript || isEditingSummary;
+    const readFind = useReadFind(showReadFind, showSummary && summary ? summary : transcript);
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (!(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLowerCase() !== 'f') return;
+            if (!isOpen || selectedTerm || confirmEditTranscript || showPromptEditor) return;
+            if (editingText) {
+                setShowGlossaryDetect(false);
+                setShowFindReplace(true);
+            } else {
+                setShowReadFind(true);
+            }
+            // Already open: jump back into its box with the text selected, like a browser's find.
+            requestAnimationFrame(() => {
+                const input = document.getElementById('sidebar-find-input') as HTMLInputElement | null;
+                input?.focus();
+                input?.select();
+            });
+        };
+        window.addEventListener('keydown', onKey, true);
+        return () => window.removeEventListener('keydown', onKey, true);
+    }, [isOpen, selectedTerm, confirmEditTranscript, showPromptEditor, editingText, setShowFindReplace]);
+    // The two searches are for different views, and neither outlives its text.
+    useEffect(() => {
+        if (editingText || !isOpen || showPromptEditor) setShowReadFind(false);
+        if (!editingText) setShowFindReplace(false);
+    }, [editingText, isOpen, showPromptEditor, videoId, setShowFindReplace]);
+
+    // Where the floating Find & Replace / Detect Glossary panels start: just below whatever heads the video
+    // pane (the video player, or the Photosynthesis header with its Venice/Pixabay/Upload tabs), marked
+    // data-panel-anchor, so they sit over the pane's content and not over that. Measured after each render.
+    const contentRowRef = useRef<HTMLDivElement>(null);
+    const [floatingPanelTop, setFloatingPanelTop] = useState(0);
+    const floatingTopRef = useRef(0);
+    // Only while a panel is open (that's the only time the number is used), and only when something that moves the
+    // anchor changes or the row/anchor is resized. It doesn't run on every render, and only sets state when the
+    // number really moves by a pixel, so a measurement can never feed back into another render forever.
+    const floatingPanelOpen = showFindReplace || (showGlossaryDetect && editingText);
+    useLayoutEffect(() => {
+        const row = contentRowRef.current;
+        if (!floatingPanelOpen || !row) return;
+        const measure = () => {
+            const anchor = row.querySelector('[data-panel-anchor]');
+            const top = anchor ? Math.round(anchor.getBoundingClientRect().bottom - row.getBoundingClientRect().top) : 0;
+            if (Math.abs(top - floatingTopRef.current) >= 1) {
+                floatingTopRef.current = top;
+                setFloatingPanelTop(top);
+            }
+        };
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(row);
+        const anchor = row.querySelector('[data-panel-anchor]');
+        if (anchor) observer.observe(anchor);
+        return () => observer.disconnect();
+        // What decides which element is the anchor, and how big the pane is.
+    }, [floatingPanelOpen, videoId, isOpen, showSummary, isEditingSummary, pluginPhotosynthesisEnabled, flags.showVideoPlayer, imageTab, effectiveSplit, sidebarWidth]);
+
     return (
         <>
             {isOpen && (
                 <div
+                    // The page's own dimming layer while the sidebar is open: it isn't a dialog, so back/forward still work.
+                    data-nav-ok
                     className="fixed inset-0 bg-black/70 z-40 transition-opacity"
                     onClick={onClose}
                 />
@@ -899,7 +1157,8 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
 
             <div
                 id="sidebar-container"
-                className={`fixed inset-y-0 right-0 w-[1400px] max-w-full bg-[#0f0f0f] border-l border-[#303030] transform transition-transform duration-300 ease-in-out z-50 ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}
+                style={{ width: `max(min(${SIDEBAR_BASE_WIDTH}px, 100vw), calc(100vw - ${SIDEBAR_SIDE_GAP}px))` }}
+                className={`fixed inset-y-0 right-0 bg-[#0f0f0f] border-l border-[#303030] transform transition-transform duration-300 ease-in-out z-50 ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}
             >
                 <div className="h-full flex flex-col">
                     <div className="px-4 py-2.5 border-b border-[#303030] flex justify-between items-start bg-white/5">
@@ -931,25 +1190,49 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                         </button>
                     </div>
 
-                    {/* Find & Replace Panel */}
-                    {showFindReplace && (
-                        <FindReplacePanel
-                            findText={findText} setFindText={setFindText}
-                            replaceText={replaceText} setReplaceText={setReplaceText}
-                            matchCase={matchCase} setMatchCase={setMatchCase}
-                            matchWholeWord={matchWholeWord} setMatchWholeWord={setMatchWholeWord}
-                            searchIndices={searchIndices} currentSearchIndex={currentSearchIndex}
-                            onClose={() => setShowFindReplace(false)}
-                            navigateMatch={navigateMatch}
-                            handleReplace={handleReplace}
-                            handleReplaceAll={handleReplaceAll}
-                        />
-                    )}
+                    <div ref={contentRowRef} className="flex-1 flex overflow-hidden relative">
+                        {/* Find & Replace and Detect Glossary float over the video side (top-right, against the divider), not the
+                            transcript/summary being edited, so the text they act on stays in view. The wrapper is
+                            the video pane's size below its header, and holds the scrim and the panels. */}
+                        {(showFindReplace || (showGlossaryDetect && (isEditingTranscript || isEditingSummary))) && (
+                            <div style={{ width: `${effectiveSplit}%`, top: floatingPanelTop }} className="absolute bottom-0 left-0 z-[51] pointer-events-none">
+                                {/* Dims and blocks the tools underneath, so the panel reads as the thing to work in. It's
+                                    inert on purpose (Esc or the panel's X closes it), and not a full-window overlay, so the
+                                    text being edited beside it stays fully usable. */}
+                                <div className="absolute inset-0 bg-black/60 pointer-events-auto animate-in fade-in duration-200" />
+                                {/* Find & Replace Panel */}
+                                {showFindReplace && (
+                                    <FindReplacePanel
+                                        findText={findText} setFindText={setFindText}
+                                        replaceText={replaceText} setReplaceText={setReplaceText}
+                                        matchCase={matchCase} setMatchCase={setMatchCase}
+                                        matchWholeWord={matchWholeWord} setMatchWholeWord={setMatchWholeWord}
+                                        matchCount={searchIndices.length} currentSearchIndex={currentSearchIndex}
+                                        onClose={() => setShowFindReplace(false)}
+                                        navigateMatch={navigateMatch}
+                                        handleReplace={handleReplace}
+                                        handleReplaceAll={handleReplaceAll}
+                                    />
+                                )}
 
-                    <div className="flex-1 flex overflow-hidden relative">
+                                {/* Detect Glossary Panel */}
+                                {showGlossaryDetect && (isEditingTranscript || isEditingSummary) && (
+                                    <GlossaryDetectPanel
+                                        text={isEditingTranscript ? editedTranscript : editedSummary}
+                                        glossaryTerms={glossaryTerms}
+                                        driveRoots={videoDriveRoots}
+                                        onApply={applyGlossaryLinks}
+                                        onJump={showInEditor}
+                                onOpenTerm={onSearchInLibrary ? setSelectedTerm : undefined}
+                                        onClose={() => setShowGlossaryDetect(false)}
+                                    />
+                                )}
+                            </div>
+                        )}
+
                         {/* Left Side: Video Player or Image Tools */}
                         <div
-                            style={{ width: `${splitPercent}%` }}
+                            style={{ width: `${effectiveSplit}%` }}
                             className="border-r border-gray-900 bg-black/20 flex flex-col h-full overflow-hidden"
                         >
                             {(pluginPhotosynthesisEnabled && showSummary && isEditingSummary) ? (
@@ -972,7 +1255,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                     {videoId && isOpen ? (
                                         <>
                                             {flags.showVideoPlayer && (
-                                            <div className={`aspect-video w-full bg-black rounded-lg overflow-hidden border border-gray-800 relative group ${isResizing ? 'pointer-events-none' : ''}`}>
+                                            <div data-panel-anchor className={`aspect-video w-full bg-black rounded-lg overflow-hidden border border-gray-800 relative group ${isResizing ? 'pointer-events-none' : ''}`}>
                                                  <iframe
                                                      width="100%"
                                                      height="100%"
@@ -1132,23 +1415,41 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                         <div
                             onMouseDown={startResizing}
                             className={`absolute inset-y-0 w-1.5 cursor-col-resize z-10 transition-colors group ${isResizing ? 'bg-[#3f3f3f]' : 'hover:bg-[#272727]'}`}
-                            style={{ left: `calc(${splitPercent}% - 3px)` }}
+                            style={{ left: `calc(${effectiveSplit}% - 3px)` }}
                         >
                             <div className="h-full w-px bg-[#303030] mx-auto" />
                         </div>
 
                         {/* Transcript Side */}
                         <div
-                            style={{ width: `${100 - splitPercent}%` }}
+                            style={{ width: `${100 - effectiveSplit}%` }}
                             className="p-4 text-[#aaaaaa] text-sm leading-relaxed font-sans selection:bg-[#3f3f3f] flex flex-col overflow-hidden"
                         >
+                            {/* Read-only Ctrl+F: search only, in a row above the transcript / AI summary it searches. */}
+                            {showReadFind && (
+                                <div className="mb-3 shrink-0">
+                                    <FindReplacePanel
+                                        findOnly
+                                        anchor="inline"
+                                        findText={readFind.findText} setFindText={readFind.setFindText}
+                                        replaceText="" setReplaceText={() => {}}
+                                        matchCase={readFind.matchCase} setMatchCase={readFind.setMatchCase}
+                                        matchWholeWord={readFind.matchWholeWord} setMatchWholeWord={readFind.setMatchWholeWord}
+                                        matchCount={readFind.matchCount} currentSearchIndex={readFind.currentIndex}
+                                        onClose={() => setShowReadFind(false)}
+                                        navigateMatch={readFind.navigateMatch}
+                                        handleReplace={() => {}}
+                                        handleReplaceAll={() => {}}
+                                    />
+                                </div>
+                            )}
                             <div className="flex-1 min-h-0 overflow-y-auto pr-2 custom-scrollbar flex flex-col">
                                 {/* Header with Summarize button */}
                                 <div ref={transcriptHeaderRef} className="flex justify-between items-center mb-4 gap-2">
                                     {/* min-w-0 + truncate rather than shrink-0: this is what frees the room that keeps the
                                         Edit pencil from landing behind the pane's own scrollbar once the row is tight,
                                         instead of the buttons to its right being the only thing that can give. */}
-                                    <span className="min-w-0 truncate text-[10px] font-bold uppercase tracking-[0.2em] text-[#aaaaaa]" title={showSummary ? 'AI Summary' : undefined}>
+                                    <span className="shrink-0 truncate text-[10px] font-bold uppercase tracking-[0.2em] text-[#aaaaaa]" title={showSummary ? 'AI Summary' : undefined}>
                                         {showSummary ? (
                                             <>
                                                 <Sparkles className="w-3 h-3 inline" /> AI Summary
@@ -1157,7 +1458,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             "Transcript"
                                         )}
                                     </span>
-                                    <div className="flex items-center gap-2 min-w-0">
+                                    <div ref={headerButtonsRef} className="flex items-center justify-end gap-2 min-w-0">
                                         {!showPromptEditor && (
                                             <>
                                                 {showSummary ? (
@@ -1206,21 +1507,29 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                 )}
                                                 {(isEditingTranscript || isEditingSummary) && (
                                                     <button
-                                                        onClick={() => setShowFindReplace(!showFindReplace)}
+                                                        onClick={() => { setShowGlossaryDetect(false); setShowFindReplace(!showFindReplace); }}
                                                         title={showFindReplace ? 'Close Find' : 'Find & Replace'}
                                                         className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all text-[10px] font-bold uppercase tracking-wider whitespace-nowrap cursor-pointer ${showFindReplace ? 'bg-blue-600 text-white' : 'bg-[#272727] text-[#aaaaaa] hover:text-white hover:bg-[#3f3f3f]'}`}
                                                     >
                                                         <Search className="w-3 h-3 shrink-0" />
-                                                        {headerActionMode !== 'icon' && (showFindReplace ? 'Close Find' : 'Find & Replace')}
+                                                        {headerActionMode === 'full' ? (showFindReplace ? 'Close Find' : 'Find & Replace') : headerActionMode === 'short' ? 'Find' : null}
+                                                    </button>
+                                                )}
+                                                {(isEditingTranscript || isEditingSummary) && flags.showGlossary && (
+                                                    <button
+                                                        onClick={() => { setShowFindReplace(false); setShowGlossaryDetect(v => !v); }}
+                                                        title={showGlossaryDetect ? 'Close Detect Glossary' : 'Suggest glossary terms to link'}
+                                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all text-[10px] font-bold uppercase tracking-wider whitespace-nowrap cursor-pointer ${showGlossaryDetect ? 'bg-blue-600 text-white' : 'bg-[#272727] text-[#aaaaaa] hover:text-white hover:bg-[#3f3f3f]'}`}
+                                                    >
+                                                        <BookA className="w-3 h-3 shrink-0" />
+                                                        {headerActionMode === 'full' ? 'Detect Glossary' : headerActionMode === 'short' ? 'Detect' : null}
                                                     </button>
                                                 )}
                                                 {!showSummary && !isEditingTranscript && pluginPhotosynthesisEnabled && !hideTranscriptEditButton && flags.allowEditTranscript && (
                                                     <button
-                                                        onClick={() => {
-                                                            setIsEditingTranscript(true);
-                                                            setIsEditingSummary(false);
-                                                            setEditedTranscript(transcript);
-                                                        }}
+                                                        // With "clear the transcript after summarizing" on, time spent editing it is
+                                                        // lost once a summary exists: say so first, so nobody sinks an hour into it.
+                                                        onClick={() => (flags.setTranscriptAfterSummarizeToNA ? setConfirmEditTranscript(true) : startEditingTranscript())}
                                                         className="shrink-0 p-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors cursor-pointer"
                                                         title="Edit Transcript"
                                                     >
@@ -1292,10 +1601,6 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                              onContextMenu={handleMarkdownContextMenu}
                                                              onKeyDown={(e) => {
                                                                  handleMarkdownKeyDown(e, editedSummary, setEditedSummary);
-                                                                 if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-                                                                     e.preventDefault();
-                                                                     setShowFindReplace(!showFindReplace);
-                                                                 }
                                                              }}
                                                               className="absolute inset-0 w-full h-full p-3 m-0 border-none bg-transparent text-white outline-none text-xs leading-relaxed resize-none font-mono selection:bg-purple-500/30"
                                                              spellCheck={false}
@@ -1304,9 +1609,10 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                      ) : (
                                                      <div className="flex-1 flex flex-col">
                                                          <div className="flex-1 relative rounded-lg border border-[#333] bg-black/20 overflow-hidden">
-                                                             <div className="absolute inset-0 p-3 overflow-y-auto custom-scrollbar">
-                                                                 <ReactMarkdown
-                                                                     remarkPlugins={[remarkGfm, remarkHighlight]}
+                                                             <div ref={previewScrollRef} className="absolute inset-0 p-3 overflow-y-auto custom-scrollbar whitespace-normal">
+                                                                 <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none">
+<ReactMarkdown
+                                                                     remarkPlugins={[remarkGfm, remarkHighlight, remarkSourceLines]}
  urlTransform={markdownUrlTransform}
                                                                      components={{
                                                                          a: MarkdownLink,
@@ -1346,13 +1652,14 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                  >
                                                                      {editedSummary}
                                                                  </ReactMarkdown>
+</div>
                                                              </div>
                                                          </div>
                                                      </div>
                                                      )}
                                                        <div className="flex justify-between items-center p-2">
                                                            <div
-                                                               onClick={() => setIsPreviewingSummary(!isPreviewingSummary)}
+                                                               onClick={() => togglePreview('summary')}
                                                                className="cursor-pointer p-2 rounded-lg hover:bg-[#272727] transition-colors text-[#aaaaaa] hover:text-white"
                                                                title={isPreviewingSummary ? "Back to Edit" : "Preview"}
                                                            >
@@ -1380,7 +1687,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                     {/* No separate "Copy Summary" link here any more: the Action Bar's copy
                                                         button below already does this while the Summary is showing, so
                                                         there's one copy control per view, not two disagreeing ones. */}
-                                                    <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none">
+                                                    <div data-find-scope className="leading-relaxed prose dark:prose-invert prose-sm max-w-none">
                                                         <ReactMarkdown
                                                             remarkPlugins={[remarkGfm, remarkHighlight]}
  urlTransform={markdownUrlTransform}
@@ -1458,8 +1765,8 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                         </div>
                                     ) : loading ? (
                                         <div className="flex flex-col justify-start items-center gap-3 h-40 pt-10">
-                                            {/* The app's own pixel-art loader, with the panel's ordinary muted helper text. */}
-                                            <PixelLoader variant="invader" stationary />
+                                            {/* The app's own Game of Life loader, with the panel's ordinary muted helper text. */}
+                                            <LifeLoader cell={6} gap={2} />
                                             <p className="text-[11px] text-[#888888]">Loading transcript</p>
                                         </div>
                                     ) : (!isTranscriptInvalid || isEditingTranscript) ? (
@@ -1500,10 +1807,6 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                                 onContextMenu={handleMarkdownContextMenu}
                                                                 onKeyDown={(e) => {
                                                                     handleMarkdownKeyDown(e, editedTranscript, setEditedTranscript);
-                                                                    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-                                                                        e.preventDefault();
-                                                                        setShowFindReplace(!showFindReplace);
-                                                                    }
                                                                 }}
                                                                 className="absolute inset-0 w-full h-full p-3 m-0 border-none bg-transparent text-white outline-none text-xs leading-relaxed resize-none font-mono selection:bg-green-500/30"
                                                                 spellCheck={false}
@@ -1513,30 +1816,15 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                     ) : (
                                                         <div className="flex-1 flex flex-col">
                                                             <div className="flex-1 relative rounded-lg border border-[#333] bg-black/20 overflow-hidden">
-                                                                <div className="absolute inset-0 p-3 overflow-y-auto custom-scrollbar">
-                                                                    <ReactMarkdown
-                                                                        remarkPlugins={[remarkGfm, remarkHighlight]}
- urlTransform={markdownUrlTransform}
-                                                                        components={{
-                                                                            a: MarkdownLink,
-                                                                             img: ({ node, ...props }) => (
-                                                                                 <img
-                                                                                     {...props}
-                                                                                     className="rounded-xl border border-white/10 cursor-pointer"
-                                                                                     onClick={() => setFullscreenImage(props.src || '')}
-                                                                                 />
-                                                                             )
-                                                                        }}
-                                                                    >
-                                                                        {editedTranscript}
-                                                                    </ReactMarkdown>
+                                                                <div ref={previewScrollRef} className="absolute inset-0 p-3 overflow-y-auto custom-scrollbar whitespace-pre-wrap">
+                                                                    <TranscriptText text={editedTranscript} sourceLines onImageClick={setFullscreenImage} />
                                                                 </div>
                                                             </div>
                                                         </div>
                                                     )}
                                                     <div className="flex justify-between items-center p-2">
                                                         <div
-                                                            onClick={() => setIsPreviewingTranscript(!isPreviewingTranscript)}
+                                                            onClick={() => togglePreview('transcript')}
                                                             className="cursor-pointer p-2 rounded-lg hover:bg-[#272727] transition-colors text-[#aaaaaa] hover:text-white"
                                                             title={isPreviewingTranscript ? "Back to Edit" : "Preview"}
                                                         >
@@ -1561,7 +1849,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                 </div>
 
                                             ) : (
-                                                transcript
+                                                <div data-find-scope><TranscriptText text={transcript} onImageClick={setFullscreenImage} /></div>
                                             )}
                                         </div>
                                     ) : (
@@ -1712,6 +2000,16 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                     </div>
                 </div>
             </div>
+
+            {confirmEditTranscript && (
+                <ConfirmDialog
+                    title="Edit transcript?"
+                    message="Once an AI Summary is generated, this transcript is replaced with N/A and your edits are lost. Only edit it if you don't plan to summarize."
+                    confirmLabel="Proceed"
+                    onConfirm={() => { setConfirmEditTranscript(false); startEditingTranscript(); }}
+                    onCancel={() => setConfirmEditTranscript(false)}
+                />
+            )}
 
             {/* Term Definition Modal */}
             {selectedTerm && onSearchInLibrary && (

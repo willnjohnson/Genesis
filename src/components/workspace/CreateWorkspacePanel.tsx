@@ -26,7 +26,7 @@ export function CreateWorkspacePanel({ defaultLocation, onBack }: Props) {
         setError(null);
         try {
             await createWorkspace(name, location);
-            reloadApp();
+            reloadApp(name);
         } catch (e) {
             setError(errText(e));
             setBusy(false);

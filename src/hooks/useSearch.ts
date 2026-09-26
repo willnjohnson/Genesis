@@ -33,6 +33,8 @@ export function useSearch(hasApiKey: boolean) {
     const [continuationToken, setContinuationToken] = useState<string | null>(null);
     const [loadingMore, setLoadingMore] = useState(false);
     const [currentSearch, setCurrentSearch] = useState<SearchState | null>(null);
+    // False until a search has been started, so the view can invite one instead of saying nothing was found.
+    const [hasSearched, setHasSearched] = useState(false);
 
     // Deduplicate helper
     const dedup = (list: Video[]) => {
@@ -41,6 +43,7 @@ export function useSearch(hasApiKey: boolean) {
     };
 
     const handleSearch = useCallback(async (query: string) => {
+        setHasSearched(true);
         setLoading(true);
         setError(null);
         setVideos([]);
@@ -131,7 +134,10 @@ export function useSearch(hasApiKey: boolean) {
             return videoResult;
         } catch (e: any) {
             console.error(e);
-            setError(e.message || "Failed to fetch. Check your connection or the URL/handle.");
+            // A failed Tauri command rejects with the backend's message as a plain string, not an
+            // Error, so `e.message` alone would drop it (a bad API key, say) for the generic text.
+            const reason = typeof e === 'string' ? e : e?.message;
+            setError(reason || "Failed to fetch. Check your connection or the URL/handle.");
         } finally {
             setLoading(false);
         }
@@ -304,6 +310,7 @@ export function useSearch(hasApiKey: boolean) {
     return useMemo(() => ({
         videos,
         loading,
+        hasSearched,
         error,
         setError,
         searchQuery,

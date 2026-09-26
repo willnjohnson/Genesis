@@ -6,6 +6,8 @@ import { format } from 'date-fns';
 import { saveImageAs } from '../lib/save-image-as';
 import { useFlags } from '../hooks/useFlags';
 import { BottomBar } from './BottomBar';
+import { TrashChip } from './TrashChip';
+import { LifeLoader } from './LifeLoader';
 
 // Mirrors the Tailwind breakpoints used by the grid className below (sm/md/lg/xl/2xl at
 // Tailwind's default 640/768/1024/1280/1536px) so the virtualizer knows how many cards land in
@@ -40,6 +42,9 @@ function useColumnCount(compact: boolean) {
     return columns;
 }
 
+// The backend's bad-YouTube-API-key message (commands/youtube/metadata.rs's BAD_KEY_MESSAGE).
+const BAD_API_KEY_MESSAGE = "Your YouTube API key isn't valid.";
+
 export type SortField = 'popularity' | 'date' | 'added';
 export type SortOrder = 'desc' | 'asc';
 export type FilterType = 'all' | 'transcript' | 'summary';
@@ -66,6 +71,9 @@ interface Props {
     // recoverable, often routine failure (a typo'd handle, a dropped connection) doesn't need to
     // shout, just needs to visibly not be "you just haven't searched yet."
     error?: string | null;
+    // When the error is the bad-YouTube-API-key one ("Your YouTube API key isn't valid."): what its
+    // "YouTube API key" opens.
+    onOpenApiKeySettings?: () => void;
     // Sort/filter are "controlled" when these are passed (Library mode, where sorting/filtering
     // happens server-side and the buttons must survive a new search — see hooks/useLibrary.ts).
     // Left uncontrolled (internal state) for the plain YouTube-search view, whose results are
@@ -108,6 +116,10 @@ interface Props {
     // :CRYPTO-BITCOIN-INFO tooltips ":CRYPTO-BITCOIN") — omitted for "Drive" (All/Unsorted) or a
     // root (L1) node, neither of which has a meaningful ancestor path to show.
     driveLabelPrefixTooltip?: string;
+    // Opens the Trash window (the bar's "N in Trash"). App owns the window, so the command palette can open it too.
+    onOpenTrash?: () => void;
+    // Search only: nothing has been searched yet, so the empty area invites a search instead of reporting no results.
+    idle?: boolean;
     // App.tsx's one scrollable content pane — the grid virtualizes against this instead of the
     // window (there's no window-level scroll anymore; see App.tsx).
     scrollContainerRef: RefObject<HTMLDivElement | null>;
@@ -119,8 +131,8 @@ export function VideoList({
     sortField: sortFieldProp, onSortFieldChange, sortOrder: sortOrderProp, onToggleSortOrder,
     filterKind: filterProp, onFilterKindChange,
     onLoadMore, loadingMore = false, hasMore = false,
-    loading = false, emptyTitle, emptyMessage, error,
-    driveLabel, driveLabelPrefix = 'Drive', driveLabelPrefixTooltip, scrollContainerRef,
+    loading = false, emptyTitle, emptyMessage, error, onOpenApiKeySettings,
+    driveLabel, driveLabelPrefix = 'Drive', driveLabelPrefixTooltip, onOpenTrash, idle = false, scrollContainerRef,
     bulkAssignMode = false, bulkSelectedIds, onToggleBulkSelect, onBulkSelectRange, onBulkContextMenu,
 }: Props) {
     // A DB owner can hide the sort and filter controls (see lib/flags.ts).
@@ -371,7 +383,7 @@ export function VideoList({
     // without a filled pill background. The active/selected button gets a secondary-surface
     // background (the same #303030 tone Settings' own cards/toggles use) — understated rather
     // than a stark white pill, matching AlphabetJumpNav's own plain-text look.
-    const groupWrapClass = "flex items-center border border-[#272727] px-1";
+    const groupWrapClass = "flex items-stretch border-x border-[#272727] px-1";
     const btnClass = (active: boolean) =>
         `px-1.5 py-0.5 text-[11px] transition-colors cursor-pointer flex items-center gap-1 ${active ? 'bg-[#303030] text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`;
     const toggleClass = "px-1.5 py-0.5 text-gray-400 hover:text-white hover:bg-[#272727] transition-all cursor-pointer group flex items-center gap-1";
@@ -419,7 +431,7 @@ export function VideoList({
     // the count itself is normally short, so this is mostly a safety net for very narrow windows,
     // not something that visibly kicks in day to day.
     const sortControls = (
-        <div className="flex items-center gap-2 shrink-0 ml-auto">
+        <div className="flex items-stretch self-stretch gap-2 shrink-0 ml-auto">
             {flags.showSortControls && (
                 <div className={groupWrapClass}>
                     <div className="flex">
@@ -451,7 +463,7 @@ export function VideoList({
                         </button>
                     </div>
 
-                    <div className="w-px h-3 bg-[#272727] mx-0.5" />
+                    <div className="w-px h-3 self-center bg-[#272727] mx-0.5" />
 
                     <button
                         onClick={toggleSortOrder}
@@ -589,18 +601,31 @@ export function VideoList({
         </div>
     );
 
+    // "12 of 340 results" once there are more than are loaded/shown, otherwise just "12 results". Shown in the
+    // bottom bar, and as the tooltip on the "Videos" heading.
+    const resultsPartial = typeof totalCount === 'number' && totalCount > filteredVideos.length;
+    const resultsNumbers = resultsPartial ? `${filteredVideos.length} of ${totalCount}` : `${filteredVideos.length}`;
+    const resultsText = `${resultsNumbers} results`;
+
+    // Videos deleted this session, to put back. The words show when the bar is wide enough for them (an open Drive
+    // panel takes room, so it needs a wider bar then), otherwise just the icon.
+    const trashChip = onOpenTrash ? <TrashChip kind="video" labelFrom={driveLabel ? '6xl' : '4xl'} onOpen={onOpenTrash} /> : null;
+
     const headerContent = (
         <>
             <div className="flex items-baseline gap-1.5 min-w-0">
-                {(() => {
-                    const countText = typeof totalCount === 'number' && totalCount > filteredVideos.length
-                        ? `${filteredVideos.length} of ${totalCount} results`
-                        : `${filteredVideos.length} results`;
-                    return <span className="min-w-0 truncate text-[11px] text-gray-500" title={countText}>{countText}</span>;
-                })()}
+                {/* Styled like the Drive chip beside it: the numbers pop in white, semibold, and the word
+                    "results" stays the muted label color. */}
+                <span className="min-w-0 truncate text-[11px] font-semibold text-gray-400" title={resultsText}>
+                    <span className="text-white font-semibold">{resultsNumbers}</span> results
+                </span>
             </div>
 
-            {sortControls}
+            {/* Search and Library alike: at the right, just before the sort buttons. */}
+            <div className="flex items-center self-stretch gap-2 shrink-0 ml-auto">
+                {trashChip}
+                {sortControls}
+            </div>
         </>
     );
 
@@ -612,7 +637,7 @@ export function VideoList({
                 within App.tsx's shared content pane) keeps it visible instead of scrolling past
                 with the grid beneath it. */}
             <div ref={headerRowRef} className="sticky top-0 z-10 bg-[#0f0f0f] flex items-center gap-4 min-h-9 mb-4 px-2">
-                <h3 ref={headingRef} className="text-xl font-bold text-white shrink-0">Videos</h3>
+                <h3 ref={headingRef} className="text-xl font-bold text-white shrink-0" title={resultsText}>Videos</h3>
 
                 <div ref={headerControlsRef} className="ml-auto flex items-center justify-end gap-3 shrink-0">
                     {flags.showSortControlButtons && headerSortControls}
@@ -625,14 +650,29 @@ export function VideoList({
                 regardless of view, rather than the whole component rendering nothing. */}
             {videos.length === 0 ? (
                 loading ? (
-                    <div className="flex flex-col items-center justify-center py-24 text-gray-400 space-y-4">
-                        <div className="w-8 h-8 border-4 border-[#303030] border-t-red-600 rounded-full animate-spin" />
-                        <p className="font-medium text-sm">Loading...</p>
+                    // The app's own loading animation, the same size as the one shown while switching workspaces (12px
+                    // cells, 3px gaps, 22px above a 20px label; see public/k-life.js), since this fills the whole page.
+                    <div className="flex flex-col items-center justify-center py-24 gap-[22px]">
+                        <LifeLoader cell={12} gap={3} />
+                        <h2 className="text-xl text-white">{isLibrary ? 'Loading' : 'Searching'}</h2>
+                    </div>
+                ) : idle ? (
+                    // Nothing has been searched yet: an invitation, not "no results".
+                    // Laid out like the empty state below: a title, then a smaller line under it.
+                    <div className="text-center text-gray-500 py-24">
+                        <p className="text-xl text-white mb-2">Search for videos</p>
+                        <p className="text-sm">Or paste a YouTube link, handle or playlist.</p>
                     </div>
                 ) : (
                     <div className="text-center text-gray-500 py-24">
                         <p className="text-xl text-white mb-2">
-                            {error || emptyTitle || (isLibrary ? "No results" : "No search results")}
+                            {error && onOpenApiKeySettings && error === BAD_API_KEY_MESSAGE ? (
+                                <>
+                                    Your{" "}
+                                    <button onClick={onOpenApiKeySettings} className="underline decoration-dotted underline-offset-4 hover:text-[var(--k-accent)] transition-colors cursor-pointer">YouTube API key</button>
+                                    {" "}isn't valid.
+                                </>
+                            ) : (error || emptyTitle || (isLibrary ? "No results" : "No search results"))}
                         </p>
                         {!error && emptyMessage && <p className="text-sm">{emptyMessage}</p>}
                     </div>

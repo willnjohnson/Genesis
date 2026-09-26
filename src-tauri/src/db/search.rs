@@ -152,6 +152,8 @@ pub(crate) fn library_order_by(alias: &str, sort_field: Option<&str>, sort_order
 /// those two only ever ran `free_text` through build_fts_query, with no facet parsing at all.
 pub(crate) struct SearchFacets {
     pub handle: String,
+    /// The channel's display name (`channel_name:`, typed as `@@` in the Library), matched against the videos' author.
+    pub channel: String,
     pub video: String,
     pub tag: String,
     pub tag_exact: bool,
@@ -162,9 +164,17 @@ pub(crate) struct SearchFacets {
     pub free_text: String,
 }
 
+/// A `*` in a handle, tag or term facet is a wildcard for any run of characters, as in `handle:*beast` for
+/// every handle with "beast" in it after anything. The facets match with LIKE, whose wildcard is `%`.
+/// (A quoted, exact tag or term is compared as written, so its `*` stays a `*`.)
+fn star_to_like(value: &str) -> String {
+    value.replace('*', "%")
+}
+
 pub(crate) fn parse_search_facets(query: &str) -> SearchFacets {
     let facet_re = Regex::new(r#"([a-z_]+):(?:"([^"]*)"|([^ ]*))"#).unwrap();
     let mut handle = String::new();
+    let mut channel = String::new();
     let mut video = String::new();
     let mut tag = String::new();
     let mut term = String::new();
@@ -181,14 +191,15 @@ pub(crate) fn parse_search_facets(query: &str) -> SearchFacets {
         // tag_search only looks at Quick Tags (glossary entries without a definition);
         // term_search works the same way against Terms (entries with a definition).
         match facet_type {
-            "handle" => handle = value.to_string(),
+            "handle" => handle = star_to_like(value),
+            "channel_name" => channel = star_to_like(value),
             "video" => video = value.to_string(),
             "tag_search" => {
-                tag = value.to_string();
+                tag = if quoted.is_some() { value.to_string() } else { star_to_like(value) };
                 tag_exact = quoted.is_some();
             }
             "term_search" => {
-                term = value.to_string();
+                term = if quoted.is_some() { value.to_string() } else { star_to_like(value) };
                 term_exact = quoted.is_some();
             }
             _ => {}
@@ -196,7 +207,7 @@ pub(crate) fn parse_search_facets(query: &str) -> SearchFacets {
         remaining = remaining.replace(&cap[0], "");
     }
 
-    SearchFacets { handle, video, tag, tag_exact, term, term_exact, free_text: remaining.trim().to_string() }
+    SearchFacets { handle, channel, video, tag, tag_exact, term, term_exact, free_text: remaining.trim().to_string() }
 }
 
 /// WHERE clause for the `tag_search` / `term_search` facets. A video's `tags` column is a comma
@@ -259,19 +270,21 @@ pub fn search_library_videos(
         // an empty/wildcard query, which FTS5 rejects as a syntax error and would otherwise fail
         // the whole search.
         let where_sql = format!(
-            "(:handle = '' OR v.handle LIKE :handle_like)
+            "(:handle = '' OR v.handle LIKE :handle_like) AND (:channel = '' OR v.author LIKE :channel_like)
                AND (:video = '' OR v.video_id LIKE :video_like)
                AND {tag_clause}
                AND {term_clause}
                AND {filter_where}"
         );
         let handle_like = format!("%{}%", handle_val);
+        let channel_val = facets.channel.as_str();
+        let channel_like = format!("%{}%", channel_val);
         let video_like = format!("%{}%", video_val);
         let count_sql = format!("SELECT COUNT(*) FROM Videos AS v WHERE {where_sql}");
         total = conn.query_row(
             &count_sql,
             named_params! {
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
             },
@@ -284,7 +297,7 @@ pub fn search_library_videos(
         let mut stmt = conn.prepare(&sql)?;
         let video_iter = stmt.query_map(
             named_params! {
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
                 ":limit": limit, ":offset": offset,
@@ -297,13 +310,15 @@ pub fn search_library_videos(
     } else {
         let where_sql = format!(
             "ftsVideos MATCH :fts
-               AND (:handle = '' OR v.handle LIKE :handle_like)
+               AND (:handle = '' OR v.handle LIKE :handle_like) AND (:channel = '' OR v.author LIKE :channel_like)
                AND (:video = '' OR v.video_id LIKE :video_like)
                AND {tag_clause}
                AND {term_clause}
                AND {filter_where}"
         );
         let handle_like = format!("%{}%", handle_val);
+        let channel_val = facets.channel.as_str();
+        let channel_like = format!("%{}%", channel_val);
         let video_like = format!("%{}%", video_val);
         let count_sql = format!(
             "SELECT COUNT(*) FROM Videos AS v JOIN ftsVideos ON v.rowid = ftsVideos.rowid WHERE {where_sql}"
@@ -312,7 +327,7 @@ pub fn search_library_videos(
             &count_sql,
             named_params! {
                 ":fts": fts_query,
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
             },
@@ -331,7 +346,7 @@ pub fn search_library_videos(
         let video_iter = stmt.query_map(
             named_params! {
                 ":fts": fts_query,
-                ":handle": handle_val, ":handle_like": handle_like,
+                ":handle": handle_val, ":handle_like": handle_like, ":channel": channel_val, ":channel_like": channel_like,
                 ":video": video_val, ":video_like": video_like,
                 ":tag": tag_val, ":term": term_val,
                 ":limit": limit, ":offset": offset,
@@ -394,6 +409,7 @@ const TAG_MATCH_ROWIDS_SQL: &str =
 // Rebuilds videos.tokens for one video from its transcript: splits into words, strips
 // punctuation, lowercases, dedupes, and drops common stop words, producing a compact
 // space-separated term list for the FTS5 `tokens` column (bm25 weight 1.0).
+#[cfg(test)]
 pub(crate) fn regenerate_tokens_from_transcript(conn: &Connection, video_id: &str) -> Result<()> {
     conn.execute(
         "WITH
@@ -808,5 +824,64 @@ mod similar_videos_tests {
         };
         assert!(order_plan.contains("COVERING INDEX") && !order_plan.contains("TEMP B-TREE"), "date walk should follow the index: {order_plan}");
         std::fs::remove_file(&db_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod wildcard_facet_tests {
+    use super::*;
+    use crate::db::{init_db, save_video};
+
+    #[test]
+    fn a_star_in_a_handle_or_tag_facet_is_a_wildcard_but_not_in_a_quoted_one() {
+        let f = parse_search_facets("handle:*beast tag_search:a*b term_search:\"x*y\"");
+        assert_eq!(f.handle, "%beast");
+        assert_eq!(f.tag, "a%b");
+        assert!(!f.tag_exact);
+        assert_eq!(f.term, "x*y");
+        assert!(f.term_exact);
+    }
+
+    #[test]
+    fn handle_star_finds_channels_by_the_end_of_their_name() {
+        let path = std::env::temp_dir().join(format!("kinesis_wildcard_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = path.to_string_lossy().to_string();
+        init_db(&db).unwrap();
+        for (id, handle) in [("a", "@MrBeast"), ("b", "@BeastReacts"), ("c", "@Other")] {
+            save_video(&db, id, id, "Author", 60, "words", 1, "2026-01-01T00:00:00Z", handle, None).unwrap();
+        }
+        let (videos, total) = search_library_videos(&db, "handle:*beast", None, None, None, 50, 0).unwrap();
+        // "anything, then beast": both channels with "beast" in the name, not the other one.
+        assert_eq!(total, 2);
+        let mut ids: Vec<&str> = videos.iter().map(|v| v.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["a", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod channel_name_facet_tests {
+    use super::*;
+    use crate::db::{init_db, save_video};
+
+    #[test]
+    fn channel_name_narrows_by_the_channels_display_name() {
+        let path = std::env::temp_dir().join(format!("kinesis_channelname_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = path.to_string_lossy().to_string();
+        init_db(&db).unwrap();
+        for (id, author, handle) in [("a", "MrBeast", "@mrbeast6000"), ("b", "Beast Philanthropy", "@beastphil"), ("c", "Someone", "@beastmode")] {
+            save_video(&db, id, id, author, 60, "words", 1, "2026-01-01T00:00:00Z", handle, None).unwrap();
+        }
+        // By name, not handle: "@beastmode" has "beast" in its handle but not in its channel name.
+        let (videos, total) = search_library_videos(&db, "channel_name:*beast", None, None, None, 50, 0).unwrap();
+        assert_eq!(total, 2);
+        let mut ids: Vec<&str> = videos.iter().map(|v| v.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["a", "b"]);
+        // With the quoted form a space in the name works (the search bar quotes such values).
+        let (_, total) = search_library_videos(&db, "channel_name:\"Beast Philanthropy\"", None, None, None, 50, 0).unwrap();
+        assert_eq!(total, 1);
     }
 }
