@@ -31,6 +31,10 @@ arboard = "3"
 # The window's system menu (commands/window_menu.rs); the version tauri already uses.
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
+# Linux: the window manager's window menu (commands/window_menu.rs); the version tauri already uses.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [build-dependencies]
 tauri-build = { version = "2.5.3", features = [] }
 

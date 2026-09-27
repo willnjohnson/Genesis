@@ -26,6 +26,7 @@ import { BrandLogo } from "./components/BrandLogo";
 import { afterDialogs } from "./lib/dialogs";
 import { recordRecent } from "./lib/recents";
 import { TitleBar } from "./components/TitleBar";
+import { ResizeEdges } from "./components/ResizeEdges";
 import { Notification, type NotificationContent } from "./components/Notification";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SettingsModal, type SettingsTarget } from "./components/SettingsModal";
@@ -985,6 +986,7 @@ function App() {
 
     return (
         <div className="h-screen overflow-hidden bg-[#0f0f0f] text-white font-sans selection:bg-red-500/30 selection:text-white select-none flex flex-col">
+            <ResizeEdges />
             <TitleBar
                 history={{ back: nav.back, forward: nav.forward, canBack: nav.canBack, canForward: nav.canForward }}
                 // Title bar layout: the workspace button after the arrows. The other layouts keep the workspace shortcut in the

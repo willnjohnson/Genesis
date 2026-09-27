@@ -53,8 +53,8 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
     const [showWhatsNew, setShowWhatsNew] = useState(false);
     // A dot beside the megaphone while the current notes haven't been opened.
     const [unread, setUnread] = useState(hasUnreadWhatsNew);
-    // The window menu a native title bar shows on a right-click. The frameless window has none: on Windows the real system
-    // menu is asked for (src-tauri/src/commands/window_menu.rs); elsewhere this draws a smaller one where the click was.
+    // The window menu a native title bar shows on a right-click. The frameless window has none: on Windows and Linux the
+    // system's own is asked for (src-tauri/src/commands/window_menu.rs); elsewhere this draws a smaller one where the click was.
     const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
     const menuRef = useRef<HTMLDivElement>(null);
     // The app's version, shown after its name.
@@ -106,15 +106,41 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
 
     // Dimmed while the window isn't the one with focus (clicked off to another app, say), the way a native title bar
     // goes muted: it's still all there and usable, just less insistent about it.
+    // Moving the window by the bar doesn't count: on Linux the window manager takes the pointer and keyboard for the
+    // move, and the window is told it lost focus though it's still the one in front. So a loss of focus that comes while
+    // the bar is held is set aside, and the window is asked again once the pointer is back with the page (the move over).
     const [focused, setFocused] = useState(true);
+    const holdingBar = useRef(false);
     useEffect(() => {
         let stop: (() => void) | undefined;
+        let recheck: (() => void) | undefined;
         try {
             const appWindow = getCurrentWindow();
             appWindow.isFocused().then(setFocused).catch(() => {});
-            appWindow.onFocusChanged(({ payload }) => setFocused(payload)).then(unlisten => { stop = unlisten; }).catch(() => {});
+            const settle = () => {
+                holdingBar.current = false;
+                document.removeEventListener('mousemove', settle);
+                document.removeEventListener('mouseup', settle);
+                appWindow.isFocused().then(setFocused).catch(() => {});
+            };
+            recheck = settle;
+            appWindow.onFocusChanged(({ payload }) => {
+                if (!payload && holdingBar.current) {
+                    document.addEventListener('mousemove', settle);
+                    document.addEventListener('mouseup', settle);
+                    return;
+                }
+                holdingBar.current = false;
+                setFocused(payload);
+            }).then(unlisten => { stop = unlisten; }).catch(() => {});
         } catch { /* not in the app window (a plain browser) */ }
-        return () => stop?.();
+        return () => {
+            stop?.();
+            if (recheck) {
+                document.removeEventListener('mousemove', recheck);
+                document.removeEventListener('mouseup', recheck);
+            }
+        };
     }, []);
     // Applied to most of the bar's content while unfocused (not the window controls: they get their own opacity below, on
     // the same element as their hover styles, since a parent's opacity can't be undone by a hovered child's).
@@ -158,6 +184,12 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
             data-app-titlebar
             data-tauri-drag-region
             onContextMenu={openWindowMenu}
+            onMouseDown={e => {
+                if (e.button !== 0 || (e.target as Element).closest('button')) return;
+                // Let go without a move (a plain click, or the start of a double-click), the page does see the release.
+                holdingBar.current = true;
+                document.addEventListener('mouseup', () => { holdingBar.current = false; }, { once: true });
+            }}
             // Above the dimming layers of dialogs and the sidebar, so the window can still be moved and closed.
             className="relative z-[300] shrink-0 grid grid-cols-[1fr_auto_1fr] items-stretch h-[var(--k-titlebar-height)] bg-[#0f0f0f] border-b border-[#272727] select-none"
         >

@@ -1,19 +1,74 @@
 use tauri::command;
 
-/// Shows the window's own system menu (Restore, Move, Size, Minimize, Maximize, Close) at the mouse pointer, the menu a
-/// right-click on a native title bar gives. The window has no native title bar (the app draws its own), so its
-/// right-click asks for the menu here. True once it has been shown; false where the platform has no such menu (the page
-/// then draws its own).
+/// Shows the window's own system menu at the mouse pointer, the menu a right-click on a native title bar gives: Windows'
+/// (Restore, Move, Size, Minimize, Maximize, Close), or on Linux the window manager's (GNOME's has Take Screenshot, Hide,
+/// Always on Top and so on). The window has no native title bar (the app draws its own), so its right-click asks for the
+/// menu here. True once it has been asked for; false where the platform has no such menu (the page then draws its own).
 #[command]
 pub async fn show_system_menu(window: tauri::WebviewWindow) -> bool {
     #[cfg(windows)]
     {
         windows_menu::show(window).await
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_menu::show(window).await
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = window;
         false
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_menu {
+    use gtk::gdk;
+    use gtk::glib::translate::{ToGlibPtr, ToGlibPtrMut};
+    use gtk::prelude::*;
+
+    pub async fn show(window: tauri::WebviewWindow) -> bool {
+        // GTK only works from the thread that owns the window.
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        let on_main = window.clone();
+        if window
+            .run_on_main_thread(move || {
+                let _ = tx.send(on_main.gtk_window().is_ok_and(|w| popup(&w)));
+            })
+            .is_err()
+        {
+            return false;
+        }
+        tauri::async_runtime::spawn_blocking(move || rx.recv().unwrap_or(false))
+            .await
+            .unwrap_or(false)
+    }
+
+    /// GTK asks the window manager for its window menu (X11 and Wayland both have a request for it), but only with the
+    /// mouse press that asked for it in hand. The right-click itself went to the webview, so an equivalent press is
+    /// made up from where the pointer is now: on Wayland the compositor checks it against the seat's last real press,
+    /// which is that right-click; on X11 it goes by the pointer's place on the screen.
+    fn popup(gtk_window: &gtk::ApplicationWindow) -> bool {
+        let Some(gdk_window) = gtk_window.window() else { return false };
+        let Some(pointer) = gdk_window.display().default_seat().and_then(|seat| seat.pointer()) else { return false };
+        let (_, x, y, _) = gdk_window.device_position_double(&pointer);
+        let (_, x_root, y_root) = pointer.position_double();
+
+        let mut event = gdk::Event::new(gdk::EventType::ButtonPress);
+        event.set_device(Some(&pointer));
+        unsafe {
+            let button = &mut (*ToGlibPtrMut::<*mut gdk::ffi::GdkEvent>::to_glib_none_mut(&mut event).0).button;
+            // The event owns this reference: freeing the event releases it.
+            button.window = ToGlibPtr::<*mut gdk::ffi::GdkWindow>::to_glib_full(&gdk_window);
+            button.send_event = 1;
+            button.time = gtk::current_event_time();
+            button.x = x;
+            button.y = y;
+            button.x_root = x_root;
+            button.y_root = y_root;
+            button.button = 3;
+        }
+        gdk_window.show_window_menu(&mut event)
     }
 }
 

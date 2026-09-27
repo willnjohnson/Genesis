@@ -2678,6 +2678,7 @@ dependencies = [
  "flate2",
  "fs2",
  "futures",
+ "gtk",
  "html-escape",
  "kinesis-sync-proto",
  "kinesis-sync-server",
