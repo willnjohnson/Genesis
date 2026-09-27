@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo, type RefObject } from 'react';
+import { useEffect, useRef, useState, useMemo, type ReactNode, type RefObject } from 'react';
 import { getGlossaryTerms, deleteGlossaryTerm, trashRestore, saveGlossaryTerm, getWdbsRoots, type GlossaryTerm, type WdbsRoot, type Video } from '../api';
 import { Plus, X, Pencil, Check, ChevronDown } from 'lucide-react';
 import { useWorkspace } from '../hooks/useWorkspace';
@@ -7,6 +7,7 @@ import { Modal } from './Modal';
 import { AlphabetJumpNav } from './AlphabetJumpNav';
 import { TrashChip } from './TrashChip';
 import type { NotificationContent } from './Notification';
+import { useEntryPreview } from './GlossaryPreview';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { normalizeText } from '../lib/utils';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
@@ -107,6 +108,24 @@ function DrivePicker({ roots, selected, onChange }: { roots: WdbsRoot[], selecte
                 </>
             )}
         </div>
+    );
+}
+
+/** The name of a term or tag in the list: a button that opens it (the whole row's width is clickable), and previews it
+ *  (its definition, or a tag's use) while the pointer is on the name itself, not on the empty space after it. */
+function GlossaryNameButton({ entry, onOpen, badge }: { entry: GlossaryTerm; onOpen: () => void; badge?: ReactNode }) {
+    const preview = useEntryPreview(entry, onOpen);
+    return (
+        <>
+            <button
+                onClick={onOpen}
+                className="group-hover:text-[var(--k-accent)] transition-colors cursor-pointer text-base font-medium text-left flex-1 hover:underline hover:decoration-dotted hover:underline-offset-4"
+            >
+                <span {...preview.handlers}>{entry.term}</span>
+                {badge}
+            </button>
+            {preview.card}
+        </>
     );
 }
 
@@ -364,15 +383,11 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                                     {groupedTerms[char].map(t => (
                                         <li key={`${t.term}|${t.drives.join(',')}`} className="text-gray-300 flex items-center group">
                                             <div className="w-1.5 h-1.5 rounded-full bg-[#444] mr-3 shrink-0 group-hover:bg-[var(--k-accent)] transition-colors"></div>
-                                            <button
-                                                onClick={() => setSelectedTerm(t)}
-                                                className="group-hover:text-[var(--k-accent)] transition-colors cursor-pointer text-base font-medium text-left flex-1 hover:underline hover:decoration-dotted hover:underline-offset-4"
-                                            >
-                                                {t.term}
-                                                {multiRowTerms.has(t.term) && (
-                                                    <span className="ml-2 text-[11px] font-semibold text-gray-500 no-underline">{driveBadge(roots, t.drives)}</span>
-                                                )}
-                                            </button>
+                                            <GlossaryNameButton
+                                                entry={t}
+                                                onOpen={() => setSelectedTerm(t)}
+                                                badge={multiRowTerms.has(t.term) ? <span className="ml-2 text-[11px] font-semibold text-gray-500 no-underline">{driveBadge(roots, t.drives)}</span> : undefined}
+                                            />
                                             {allowModification && (
                                                 <>
                                                     <button

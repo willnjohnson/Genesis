@@ -38,6 +38,44 @@ const PERMISSIONS: Partial<Record<FlagKey, { label: string; hint: string }>> = {
     allowEditBio: { label: "Biographies", hint: "Edit a creator's biography." },
 };
 
+// Not permissions: switches for "are you sure?" questions. Read-only doesn't turn them off (that would mean "don't
+// ask"); it turns the action itself off, so they are greyed out then and their stored value is left alone. They come
+// after the permissions, and turning one off asks a second question.
+const CONFIRM_ROWS = [
+    {
+        key: "confirmBeforeEditingTranscript",
+        label: "Confirm Before Editing Transcript",
+        hint: "Ask before editing a transcript, since it may be cleared (replaced with N/A) when the video is AI summarized. Keep this on unless you really need it off.",
+        readOnlyTitle: "Editing is off while the workspace is read-only, above",
+        warning: (
+            <>
+                Editing a transcript will <strong className="text-white">no longer ask first</strong>.
+                <br /><br />
+                If the video is AI summarized later, its transcript <strong className="text-white">may be cleared</strong> (replaced with N/A) and your edits lost.
+                <br /><br />
+                It's best to keep this on unless you really need it off.
+            </>
+        ),
+    },
+    {
+        key: "confirmBeforeDeleting",
+        label: "Confirm Before Deleting",
+        hint: 'Ask "are you sure?" before deleting a video, a Glossary term or tag, or an attachment. Keep this on unless you really need it off.',
+        readOnlyTitle: "Deleting is off while the workspace is read-only, above",
+        warning: (
+            <>
+                Deleting will <strong className="text-white">no longer ask first</strong>, which makes mistakes easier to make.
+                <br /><br />
+                Most deletes can be undone from the Trash, <strong className="text-white">except attachments</strong>.
+                <br /><br />
+                It's best to keep this on unless you really need it off.
+            </>
+        ),
+    },
+] as const;
+type ConfirmKey = typeof CONFIRM_ROWS[number]["key"];
+const CONFIRM_KEYS = CONFIRM_ROWS.map(r => r.key);
+
 const ROWS = READ_ONLY_OVERRIDE_KEYS.filter(key => key in PERMISSIONS).map(key => ({ key, ...PERMISSIONS[key]! }));
 
 /** Settings > Workspace > Advanced > Permissions: a master Read-only switch, plus every
@@ -52,15 +90,15 @@ export function PermissionsPanel() {
     const [error, setError] = useState<string | null>(null);
     const [savingKey, setSavingKey] = useState<string | null>(null);
 
-    // Asked before turning "Confirm Before Deleting" off (a second confirmation).
-    const [confirmingOff, setConfirmingOff] = useState(false);
+    // Asked before turning one of the "Confirm Before ..." switches off (a second confirmation): which one, if any.
+    const [confirmingOff, setConfirmingOff] = useState<ConfirmKey | null>(null);
 
-    const allKeys = ['workspaceReadOnly', 'confirmBeforeDeleting', ...ROWS.map(r => r.key)];
+    const allKeys = ['workspaceReadOnly', ...CONFIRM_KEYS, ...ROWS.map(r => r.key)];
 
     const load = () => {
         getSettings(allKeys)
-            // Confirm Before Deleting is on unless it was turned off (a missing value is the default, on).
-            .then(raw => setValues(Object.fromEntries(allKeys.map(k => [k, k === 'confirmBeforeDeleting' ? parseBool(raw[k], true) : raw[k] === 'true']))))
+            // The "Confirm Before ..." switches are on unless turned off (a missing value is the default, on).
+            .then(raw => setValues(Object.fromEntries(allKeys.map(k => [k, (CONFIRM_KEYS as readonly string[]).includes(k) ? parseBool(raw[k], true) : raw[k] === 'true']))))
             .catch(e => setError(typeof e === 'string' ? e : e?.message ?? 'Could not load permissions.'));
     };
     useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -138,31 +176,30 @@ export function PermissionsPanel() {
                             </label>
                         );
                     })}
-                    {/* Last in the list. Not a permission Read-only turns off (that would mean "don't ask"): with
-                        Read-only on, deleting is off anyway, so it's greyed out and its stored value left alone. */}
-                    {(() => {
-                        const locked = isLocked('confirmBeforeDeleting');
-                        const disabled = locked || readOnly || savingKey === 'confirmBeforeDeleting';
+                    {CONFIRM_ROWS.map(({ key, label, hint, readOnlyTitle }) => {
+                        const locked = isLocked(key);
+                        const disabled = locked || readOnly || savingKey === key;
                         return (
                             <label
+                                key={key}
                                 className={`flex items-start gap-3 px-4 py-3 bg-[#121212] transition-colors ${disabled ? 'opacity-50' : 'hover:bg-[#161616] cursor-pointer'}`}
-                                title={locked ? LOCKED_TITLE : readOnly ? 'Deleting is off while the workspace is read-only, above' : undefined}
+                                title={locked ? LOCKED_TITLE : readOnly ? readOnlyTitle : undefined}
                             >
                                 <input
                                     type="checkbox"
-                                    checked={values.confirmBeforeDeleting}
+                                    checked={values[key]}
                                     disabled={disabled}
                                     // Turning it on needs no question. Turning it off does: it's the safety net.
-                                    onChange={e => (e.target.checked ? set('confirmBeforeDeleting', true) : setConfirmingOff(true))}
+                                    onChange={e => (e.target.checked ? set(key, true) : setConfirmingOff(key))}
                                     className="mt-0.5 shrink-0"
                                 />
                                 <span>
-                                    <span className="block text-xs font-bold text-white">Confirm Before Deleting</span>
-                                    <span className="block text-[11px] text-[#888888] mt-0.5">Ask "are you sure?" before deleting a video, a Glossary term or tag, or an attachment. Keep this on unless you really need it off.</span>
+                                    <span className="block text-xs font-bold text-white">{label}</span>
+                                    <span className="block text-[11px] text-[#888888] mt-0.5">{hint}</span>
                                 </span>
                             </label>
                         );
-                    })()}
+                    })}
                 </div>
             </div>
 
@@ -171,18 +208,10 @@ export function PermissionsPanel() {
             {confirmingOff && (
                 <ConfirmDialog
                     title="Confirm Action"
-                    message={(
-                        <>
-                            Deleting will <strong className="text-white">no longer ask first</strong>, which makes mistakes easier to make.
-                            <br /><br />
-                            Most deletes can be undone from the Trash, <strong className="text-white">except attachments</strong>.
-                            <br /><br />
-                            It's best to keep this on unless you really need it off.
-                        </>
-                    )}
+                    message={CONFIRM_ROWS.find(r => r.key === confirmingOff)?.warning}
                     confirmLabel="Proceed"
-                    onConfirm={() => { setConfirmingOff(false); void set('confirmBeforeDeleting', false); }}
-                    onCancel={() => setConfirmingOff(false)}
+                    onConfirm={() => { const key = confirmingOff; setConfirmingOff(null); void set(key, false); }}
+                    onCancel={() => setConfirmingOff(null)}
                 />
             )}
         </div>

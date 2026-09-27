@@ -176,11 +176,60 @@ fn size_only(width: f64, height: f64) -> Plan {
     Plan { width, height, position: None, maximized: false }
 }
 
+// Linux: the size the window reports isn't always the size it was asked for. The size comes back from the toolkit's
+// configure event, which can count more than was requested (invisible shadow or border area around the window on some
+// desktops). Saved as reported, the window would open a little bigger each time, and past the screen's size some
+// desktops maximize it. So once the window has settled after launch, the difference between what was asked for and
+// what it reports is measured, and taken off again whenever the size is saved.
+static REQUESTED: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+static REPORTED_EXTRA: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
+/// The most such extra area is believed: more than this is something else (the desktop limiting or maximizing the window).
+const MAX_EXTRA: f64 = 120.0;
+
+/// The reported size less the extra area, never below the window's minimum.
+fn without_extra(reported: (f64, f64), extra: (f64, f64)) -> (f64, f64) {
+    (
+        (reported.0 - extra.0).max(crate::MIN_WINDOW_WIDTH),
+        (reported.1 - extra.1).max(crate::MIN_WINDOW_HEIGHT),
+    )
+}
+
+/// How much more than `requested` the window reports, if that is a believable amount (0 up to `MAX_EXTRA` each way).
+fn believable_extra(requested: (f64, f64), reported: (f64, f64)) -> Option<(f64, f64)> {
+    let extra = (reported.0 - requested.0, reported.1 - requested.1);
+    let ok = |v: f64| (0.0..=MAX_EXTRA).contains(&v);
+    (ok(extra.0) && ok(extra.1)).then_some(extra)
+}
+
+fn reported_extra() -> (f64, f64) {
+    *REPORTED_EXTRA.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Linux: a while after launch, compares the size asked for with the one reported (see above).
+fn calibrate_linux(window: &WebviewWindow) {
+    let Some(requested) = *REQUESTED.lock().unwrap_or_else(|p| p.into_inner()) else { return };
+    let window = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(SETTLE + Duration::from_millis(500));
+        if window.is_maximized().unwrap_or(false) || window.is_minimized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
+            return;
+        }
+        let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else { return };
+        let reported = (f64::from(size.width) / scale, f64::from(size.height) / scale);
+        let extra = believable_extra(requested, reported);
+        eprintln!("window size: asked for {requested:?}, reports {reported:?}, extra taken off when saving: {extra:?}");
+        if let Some(extra) = extra {
+            *REPORTED_EXTRA.lock().unwrap_or_else(|p| p.into_inner()) = extra;
+        }
+    });
+}
+
 /// The plan for launching now, from what was saved and the screens that are connected.
 pub fn plan_for_launch(app: &AppHandle) -> Plan {
     let prefs = global_settings::load(app);
     let (width, height) = parse_resolution(&prefs.resolution).unwrap_or(DEFAULT_SIZE);
     if cfg!(target_os = "linux") {
+        *REQUESTED.lock().unwrap_or_else(|p| p.into_inner()) = Some((width, height));
         return size_only(width, height);
     }
     let position = prefs.window_x.zip(prefs.window_y);
@@ -207,7 +256,11 @@ fn save_now(app: &AppHandle) {
     if size.width == 0 || size.height == 0 {
         return;
     }
-    let (mut width, mut height) = ((f64::from(size.width) / scale).round() as u32, (f64::from(size.height) / scale).round() as u32);
+    let mut reported = (f64::from(size.width) / scale, f64::from(size.height) / scale);
+    if cfg!(target_os = "linux") {
+        reported = without_extra(reported, reported_extra());
+    }
+    let (mut width, mut height) = (reported.0.round() as u32, reported.1.round() as u32);
     // Rounding at fractional scales can land a pixel off one of Settings > Display's sizes; keep that size.
     if let Some((pw, ph)) = PRESETS.iter().find(|(pw, ph)| pw.abs_diff(width) <= 1 && ph.abs_diff(height) <= 1) {
         (width, height) = (*pw, *ph);
@@ -258,6 +311,9 @@ fn schedule_save(app: &AppHandle) {
 /// Starts remembering the window's geometry.
 pub fn track(window: &WebviewWindow) {
     let _ = TRACKING_SINCE.set(Instant::now());
+    if cfg!(target_os = "linux") {
+        calibrate_linux(window);
+    }
     let app = window.app_handle().clone();
     window.on_window_event(move |event| match event {
         WindowEvent::Resized(_) | WindowEvent::Moved(_) => schedule_save(&app),
@@ -285,6 +341,25 @@ mod tests {
         assert_eq!((p.width, p.height), (3000.0, 2000.0));
         assert_eq!(p.position, None);
         assert!(!p.maximized);
+    }
+
+    #[test]
+    fn a_reported_size_that_counts_extra_area_is_brought_back_to_what_was_asked_for() {
+        // Asked for 1440x900, the window reports 1492x952 (52px of invisible border each way): saving that would grow it.
+        let extra = believable_extra((1440.0, 900.0), (1492.0, 952.0)).unwrap();
+        assert_eq!(extra, (52.0, 52.0));
+        assert_eq!(without_extra((1492.0, 952.0), extra), (1440.0, 900.0));
+        // After the user drags it to another size, the same extra comes off that one too.
+        assert_eq!(without_extra((1333.0 + 52.0, 777.0 + 52.0), extra), (1333.0, 777.0));
+    }
+
+    #[test]
+    fn a_size_that_is_not_believably_extra_area_is_not_corrected() {
+        // Smaller than asked for (the desktop limited it) or far bigger (maximized): not a border, leave it be.
+        assert_eq!(believable_extra((1440.0, 900.0), (1200.0, 900.0)), None);
+        assert_eq!(believable_extra((1440.0, 900.0), (1920.0, 1040.0)), None);
+        // Reporting exactly what was asked for means nothing to take off.
+        assert_eq!(believable_extra((1440.0, 900.0), (1440.0, 900.0)), Some((0.0, 0.0)));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ElementType, RefObject } from 'react';
-import { Pencil, X, Globe, BookOpen, FileText } from 'lucide-react';
+import { Pencil, X, Globe, FileText } from 'lucide-react';
 import { BsTwitterX, BsInstagram, BsFacebook, BsYoutube, BsTiktok, BsThreads, BsTwitch, BsReddit, BsDiscord } from 'react-icons/bs';
 import { SiWikipedia } from 'react-icons/si';
 import ReactMarkdown from 'react-markdown';
@@ -8,8 +8,9 @@ import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../lib/remark-highlight';
 import { markdownUrlTransform } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
+import { useBioPreview } from './GlossaryPreview';
 import { AlphabetJumpNav } from './AlphabetJumpNav';
-import { getBiographies, updateBiography, type BiographyEntry, fetchChannelVideosV3, openExternalUrl, getHandleDrives, type HandleDrive } from '../api';
+import { getBiographies, updateBiography, type BiographyEntry, fetchChannelVideosV3, openExternalUrl, getHandleDrives, type HandleDrive, type Video } from '../api';
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { normalizeText, driveSegmentLabel } from '../lib/utils';
@@ -169,6 +170,26 @@ const detectSocialCandidates = (bio: string, current: BiographyEntry): DetectedS
     return candidates;
 };
 
+/** A person's name in the list. While the pointer is on the name itself (not the empty space after it), their description, if
+ *  they have one, is previewed. The button (not a wrapping element outside it) is what opens the biography — the preview
+ *  card is portaled elsewhere on the page, but React still bubbles a click on it up through this component's own JSX tree;
+ *  keeping that tree flat (the card is this button's sibling, not its child) is what stops a click on the card's Copy or
+ *  Open button from also re-triggering this one. */
+function PersonName({ person, onOpen }: { person: BiographyEntry; onOpen: () => void }) {
+    const preview = useBioPreview(person, onOpen);
+    return (
+        <>
+            <button onClick={onOpen} className="flex-1 min-w-0 text-left cursor-pointer">
+                <span {...preview.handlers} className="group-hover:underline group-hover:decoration-dotted group-hover:underline-offset-4 group-hover:text-[var(--k-accent)] transition-all text-base font-medium">
+                    {person.displayName || person.handle}
+                </span>
+                <span className="ml-1.5 text-xs text-gray-500">({person.handle})</span>
+            </button>
+            {preview.card}
+        </>
+    );
+}
+
 export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore, onDriveSelect, allowEditBio, scrollContainerRef }: { searchQuery: string; onChange?: () => void; onVideoSelect?: (video: Video) => void; onViewMore?: (handle: string) => void; onDriveSelect?: (path: string, label: string) => void; allowEditBio?: boolean; scrollContainerRef: RefObject<HTMLDivElement | null> }) {
     const { labels } = useWorkspace();
     const [entries, setEntries] = useState<BiographyEntry[]>([]);
@@ -176,8 +197,6 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
     const [selected, setSelected] = useState<BiographyEntry | null>(null);
     const [editing, setEditing] = useState<EditableBiography>(null);
     const [activeSocialTab, setActiveSocialTab] = useState<SocialTab>('website');
-    const [selectedVideos, setSelectedVideos] = useState<Video[]>([]);
-    const [videosLoading, setVideosLoading] = useState(false);
     const [pendingSocialPins, setPendingSocialPins] = useState<DetectedSocial[] | null>(null);
 
     const loadEntries = async () => {
@@ -232,14 +251,6 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
         return a.localeCompare(b);
     });
 
-    useEffect(() => {
-        if (selected) {
-            fetchVideosForHandle(selected.handle);
-        } else {
-            setSelectedVideos([]);
-        }
-    }, [selected]);
-
     const commitSave = async (entry: BiographyEntry) => {
         // Normalize social fields: convert handles to full URLs where needed
         const normalized = { ...entry };
@@ -267,19 +278,6 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
             return;
         }
         await commitSave(editing);
-    };
-
-    const fetchVideosForHandle = async (handle: string) => {
-        setVideosLoading(true);
-        try {
-            const response = await fetchChannelVideosV3(handle);
-            setSelectedVideos(response.videos.slice(0, 6)); // Get latest 6 videos
-        } catch (error) {
-            console.error('Failed to fetch videos for handle:', error);
-            setSelectedVideos([]);
-        } finally {
-            setVideosLoading(false);
-        }
     };
 
     // The bottom panel exists even before there's anything to jump to, same as it does for an
@@ -331,15 +329,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                             {grouped[char].map((person) => (
                                 <li key={person.handle} className="text-gray-300 group flex items-center">
                                     <div className="w-1.5 h-1.5 rounded-full bg-[#444] mr-3 shrink-0 group-hover:bg-[var(--k-accent)] transition-colors"></div>
-                                     <button
-                                         onClick={() => setSelected(person)}
-                                         className="flex-1 text-left cursor-pointer"
-                                     >
-                                         <span className="group-hover:underline group-hover:decoration-dotted group-hover:underline-offset-4 group-hover:text-[var(--k-accent)] transition-all text-base font-medium">
-                                             {person.displayName || person.handle}
-                                         </span>
-                                         <span className="ml-1.5 text-xs text-gray-500">({person.handle})</span>
-                                     </button>
+                                     <PersonName person={person} onOpen={() => setSelected(person)} />
                                      {allowEditBio !== false && (
                                          <button
                                              onClick={(e) => {
@@ -402,9 +392,9 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                                 <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Description</label>
                                 <textarea
                                     value={editing?.bio || ''}
-                                    onChange={(e) => setEditing(prev => ({ ...prev, bio: e.target.value }))}
+                                    onChange={(e) => setEditing(prev => prev && { ...prev, bio: e.target.value })}
                                     onContextMenu={handleMarkdownContextMenu}
-                                    onKeyDown={(e) => handleMarkdownKeyDown(e, editing?.bio || '', (val) => setEditing(prev => ({ ...prev, bio: val })))}
+                                    onKeyDown={(e) => handleMarkdownKeyDown(e, editing?.bio || '', (val) => setEditing(prev => prev && { ...prev, bio: val }))}
                                     rows={16}
                                     className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all resize-none placeholder-gray-600"
                                     placeholder="Describe who this person is (Markdown supported)... Tip: paste your existing YouTube channel description here as a starting point."

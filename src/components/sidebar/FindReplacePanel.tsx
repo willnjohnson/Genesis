@@ -32,6 +32,9 @@ export function FindReplacePanel({
     matchCount, currentSearchIndex,
     onClose, navigateMatch, handleReplace, handleReplaceAll, findOnly, anchor = 'right',
 }: Props) {
+    // Tab only moves between the two text fields (Find, then Replace); every button here (Match Case, Match Whole
+    // Word, the prev/next arrows, Close, Replace, Replace All) is tabIndex={-1} — still clickable, just out of the
+    // keyboard tab order, which is what makes Find and Replace tab-adjacent with nothing in between.
     return (
         <div className={`${anchor === 'inline' ? 'relative w-full shrink-0' : 'absolute top-4 right-4 max-w-[calc(100%-2rem)] pointer-events-auto z-51 w-80'} p-2.5 bg-[#1a1a1a] rounded-xl border border-[#303030] flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-200 shadow-xl`}>
             {/* Row 1: Find + Nav */}
@@ -55,6 +58,7 @@ export function FindReplacePanel({
                     <div className="absolute right-1 top-0.5 bottom-0.5 flex items-center gap-0.5">
                         <button
                             onClick={() => setMatchCase(!matchCase)}
+                            tabIndex={-1}
                             className={`p-1 rounded transition-all cursor-pointer ${matchCase ? 'bg-blue-600 text-white' : 'text-[#888888] hover:text-white hover:bg-white/10'}`}
                             title="Match Case"
                         >
@@ -62,6 +66,7 @@ export function FindReplacePanel({
                         </button>
                         <button
                             onClick={() => setMatchWholeWord(!matchWholeWord)}
+                            tabIndex={-1}
                             className={`p-1 rounded transition-all cursor-pointer ${matchWholeWord ? 'bg-blue-600 text-white' : 'text-[#888888] hover:text-white hover:bg-white/10'}`}
                             title="Match Whole Word"
                         >
@@ -72,6 +77,7 @@ export function FindReplacePanel({
                 <div className="flex items-center bg-[#121212] border border-[#303030] rounded-lg h-8 px-0.5">
                     <button
                         onClick={() => navigateMatch('prev')}
+                        tabIndex={-1}
                         className="p-1 text-[#888888] hover:text-white transition-colors disabled:opacity-10 cursor-pointer"
                         disabled={matchCount === 0}
                     >
@@ -79,6 +85,7 @@ export function FindReplacePanel({
                     </button>
                     <button
                         onClick={() => navigateMatch('next')}
+                        tabIndex={-1}
                         className="p-1 text-[#888888] hover:text-white transition-colors disabled:opacity-10 cursor-pointer"
                         disabled={matchCount === 0}
                     >
@@ -87,6 +94,7 @@ export function FindReplacePanel({
                 </div>
                 <button
                     onClick={onClose}
+                    tabIndex={-1}
                     className="w-8 h-8 flex items-center justify-center text-[#888888] hover:text-white transition-colors cursor-pointer"
                     title={findOnly ? "Close Find" : "Close Find & Replace"}
                 >
@@ -123,6 +131,7 @@ export function FindReplacePanel({
                     <button
                         onClick={handleReplace}
                         disabled={!findText || matchCount === 0}
+                        tabIndex={-1}
                         className="h-7 px-3 bg-white/5 hover:bg-white/10 text-white text-[9px] font-bold uppercase tracking-widest rounded-md transition-all cursor-pointer border border-white/5 active:scale-95 disabled:opacity-30"
                     >
                         Replace
@@ -130,6 +139,7 @@ export function FindReplacePanel({
                     <button
                         onClick={handleReplaceAll}
                         disabled={!findText || matchCount === 0}
+                        tabIndex={-1}
                         className="h-7 px-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 text-white text-[9px] font-bold uppercase tracking-widest rounded-md transition-all cursor-pointer active:scale-95"
                     >
                         Replace All

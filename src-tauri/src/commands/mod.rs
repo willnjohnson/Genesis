@@ -16,6 +16,7 @@ pub mod kinpak;
 pub mod sequences;
 pub mod trash;
 pub mod tray;
+pub mod window_menu;
 
 pub use settings::*;
 pub use youtube::*;
@@ -35,3 +36,4 @@ pub use kinpak::*;
 pub use sequences::*;
 pub use trash::*;
 pub use tray::*;
+pub use window_menu::*;

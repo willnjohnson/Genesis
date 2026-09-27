@@ -118,7 +118,8 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives
     );
 
     return (
-            <div className="flex flex-wrap items-center gap-1.5">
+            // A video can have dozens of terms: past this height the chips scroll, as the Similar Videos list does.
+            <div className="flex flex-wrap items-center gap-1.5 max-h-[280px] overflow-y-auto custom-scrollbar pr-1">
                 {filtered.map((tag) => (
                     <button
                         key={tag}

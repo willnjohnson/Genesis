@@ -34,6 +34,9 @@ function LabelField({ labelKey, title, hint, max, defaultValue, value, disabled,
     const commit = async (next: string) => {
         const checked = checkLabel(next, max);
         if (checked.error) { setError(checked.error); return; }
+        // checkLabel's own invariant already guarantees this (error is null only alongside a real value), but the
+        // check itself doesn't narrow the type here, so this backstops it plainly for TypeScript's sake too.
+        if (checked.value == null) return;
         if ((checked.value || defaultValue) === value) { setDraft(value); setError(null); return; }
         setSaving(true);
         try {

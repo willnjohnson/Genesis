@@ -72,9 +72,11 @@ pub const FEATURE_FLAGS: &[(&str, &str)] = &[
     ("allowEditVideosInSequenceList", "true"),
     ("showCustomPrompt", "true"),
     ("setTranscriptAfterSummarizeToNA", "false"),
+    ("confirmBeforeEditingTranscript", "true"),
     // ── AI summarize and image tools
     ("showSummarizeButton", "false"),
-    ("showSummarizeOllama", "true"),
+    // Off by default: meant for a technical person to opt into (Ollama needs a local install), not a Settings checkbox.
+    ("showSummarizeOllama", "false"),
     ("showSummarizeVenice", "true"),
     ("showSynthesizeVenice", "true"),
     ("showSynthesizePixabay", "true"),

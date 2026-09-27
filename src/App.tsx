@@ -1,10 +1,10 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from "react";
 import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
     getApiKey, getKeyStatus, getSetting, openExternalUrl, bulkUpdateVideoWdbs, addToDriveSequence,
     type Video, type BiographyEntry, saveTags, getBiography,
     getVideoById, getGlossaryTerms, getWdbsTree, decodeWdbs, type WdbsNode,
-    UNSORTED_WDBS_FILTER, type TrashKind,
+    UNSORTED_WDBS_FILTER, TRASH_RESTORED_EVENT, type TrashKind,
 } from "./api";
 import { useTrash } from "./hooks/useTrash";
 import { useNavHistory } from "./hooks/useNavHistory";
@@ -21,8 +21,11 @@ import { SearchBar, type Facet } from "./components/SearchBar";
 import { VideoList, type SortField, type SortOrder, type FilterType } from "./components/VideoList";
 import { Sidebar } from "./components/Sidebar";
 import { BRAND } from "./branding";
-import { BrandLogo } from "./components/BrandLogo";
 import { WorkspaceSwitcher } from "./components/workspace/WorkspaceSwitcher";
+import { BrandLogo } from "./components/BrandLogo";
+import { afterDialogs } from "./lib/dialogs";
+import { recordRecent } from "./lib/recents";
+import { TitleBar } from "./components/TitleBar";
 import { Notification, type NotificationContent } from "./components/Notification";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SettingsModal, type SettingsTarget } from "./components/SettingsModal";
@@ -43,8 +46,6 @@ import { useWorkspace } from "./hooks/useWorkspace";
 
 type ViewMode = 'search' | 'library' | 'glossary' | 'biography';
 
-const VALID_FACETS = ['handle', 'channel_name', 'playlist', 'video', 'title_search', 'transcript_search', 'summary_search', 'term_search', 'definition_search', 'tag_search', 'person_search', 'bio_search'];
-const DEFAULT_GLOSSARY_FACET = [{ type: 'term_search', value: '' }] as Facet[];
 
 function getLibraryFacets(q: string, viewMode: ViewMode): Facet[] {
     if (!q) return [];
@@ -131,7 +132,7 @@ function App() {
     const [settingsTarget, setSettingsTarget] = useState<SettingsTarget | undefined>(undefined);
     const [hasApiKey, setHasApiKey] = useState(false);
     const [videoListMode, setVideoListMode] = useState<'grid' | 'compact'>('grid');
-    const [navigationOrientation, setNavigationOrientation] = useState<'horizontal' | 'vertical'>('horizontal');
+    const [navigationOrientation, setNavigationOrientation] = useState<'horizontal' | 'vertical' | 'titlebar'>('horizontal');
     const [searchSortField, setSearchSortField] = useState<SortField>('date');
     const [searchSortOrder, setSearchSortOrder] = useState<SortOrder>('desc');
     const [searchFilterKind, setSearchFilterKind] = useState<FilterType>('all');
@@ -314,7 +315,8 @@ function App() {
         return Promise.all([getDisplaySettings(), loadCustomThemes()]).then(([settings, customThemes]) => {
             applyTheme(resolveTheme(settings.theme, customThemes));
             setVideoListMode((settings.videoListMode as 'grid' | 'compact') || 'grid');
-            setNavigationOrientation((settings.navigationOrientation as 'horizontal' | 'vertical') || 'horizontal');
+            // A value from before the layout was called "title bar" is not one of the three: fall back to horizontal.
+            setNavigationOrientation(['horizontal', 'vertical', 'titlebar'].includes(settings.navigationOrientation) ? settings.navigationOrientation : 'horizontal');
         }).catch(() => applyTheme(resolveTheme(undefined, [])));
     }, []);
 
@@ -324,7 +326,7 @@ function App() {
     // a true `fixed` element anywhere in the tree (like AlphabetJumpNav's bottom bar) can stay clear
     // of the rail with plain CSS, without every such element needing to know navigationOrientation.
     useEffect(() => {
-        document.documentElement.style.setProperty('--k-rail-width', navigationOrientation === 'vertical' ? '4rem' : '0px');
+        document.documentElement.style.setProperty('--k-rail-width', navigationOrientation === 'vertical' ? '3.5rem' : '0px');
     }, [navigationOrientation]);
 
     // Everything a sync (or pack import) can change that App holds in memory: enforced flags, the
@@ -396,6 +398,7 @@ function App() {
 
     // ── Handlers ─────────────────────────────────────────────────────────────
     const handleSelectVideo = useCallback(async (video: Video, tab?: 'transcript' | 'summary') => {
+        void recordRecent({ kind: 'video', key: video.id, label: video.title, sub: video.author, thumb: video.thumbnail || undefined });
         setSidebarInitialTab(tab);
         setSelectedVideo(video);
         setVideoTags(video.tags ? video.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : []);
@@ -464,6 +467,7 @@ function App() {
     // entry selected. Leftover search text is cleared first, since selecting a Drive keeps it
     // (and would narrow the Drive's videos by it).
     const goToLibraryDrive = useCallback((storagePath: string, label: string, alias: string | null = null) => {
+        void recordRecent({ kind: 'drive', key: storagePath, label: alias ?? label, sub: label, alias });
         setBulkAssignMode(false);
         setBulkSelectedIds(new Set());
         setBulkAssignMenu(null);
@@ -548,6 +552,12 @@ function App() {
     }, [flags.showGlossary, flags.showBiography, flags.showDrive, handleSelectVideo, goToLibraryDrive, library.wdbsFilter]);
 
     useEffect(() => setInternalLinkHandler(handleOpenLink), [handleOpenLink]);
+    // A biography opened from anywhere (a link, Ctrl+K) goes on Ctrl+K's recent list.
+    useEffect(() => {
+        if (selectedBiography?.handle) {
+            void recordRecent({ kind: 'bio', key: selectedBiography.handle.replace(/^@/, ''), label: selectedBiography.displayName.trim() || selectedBiography.handle, sub: selectedBiography.displayName.trim() ? selectedBiography.handle : undefined });
+        }
+    }, [selectedBiography?.handle]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Command palette (Ctrl/Cmd+K) ─────────────────────────────────────────
     const [paletteOpen, setPaletteOpen] = useState(false);
@@ -672,6 +682,16 @@ function App() {
     const glossaryTrash = useTrash('glossary');
     // Bumped when a term is put back, so a mounted Glossary reloads.
     const [glossaryReload, setGlossaryReload] = useState(0);
+    // Something put back from the Trash chip's right-click menu (not the Trash window, which reloads through its own
+    // callback below): reload whatever shows that kind of item.
+    useEffect(() => {
+        const onRestored = (e: Event) => {
+            if ((e as CustomEvent<TrashKind>).detail === 'video') library.refreshLibrary();
+            else setGlossaryReload(n => n + 1);
+        };
+        window.addEventListener(TRASH_RESTORED_EVENT, onRestored);
+        return () => window.removeEventListener(TRASH_RESTORED_EVENT, onRestored);
+    }, [library.refreshLibrary]);
 
     const paletteCommands = useMemo<PaletteCommand[]>(() => {
         const cmds: PaletteCommand[] = [];
@@ -909,6 +929,45 @@ function App() {
         };
     }, [viewMode, showDrivePanel, showDrive, navigationOrientation]);
 
+    // The title bar layout puts the navigation icons in the title bar (smaller, but the same choices as the rail's).
+    const barIcon = (active: boolean) =>
+        `flex items-center justify-center w-[22px] h-[22px] rounded transition-colors cursor-pointer ${active ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`;
+    const navIcon = (active: boolean, name: string, icon: ReactNode, onClick: () => void) => (
+        <button
+            onClick={onClick}
+            title={name}
+            className={`flex items-center justify-center w-[22px] h-[22px] rounded transition-colors cursor-pointer ${active ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
+        >
+            {icon}
+        </button>
+    );
+    const titleBarToolbar = navigationOrientation === 'titlebar' ? (
+        <div className="flex items-center gap-0.5">
+            {showSearch && navIcon(viewMode === 'search', labels.aliasSearch, <Search className="w-3.5 h-3.5 shrink-0" />, afterDialogs(() => setViewMode('search')))}
+            {flags.viewVisible.library && navIcon(viewMode === 'library', labels.aliasLibrary, <BookMarked className="w-3.5 h-3.5 shrink-0" />, afterDialogs(() => setViewMode('library')))}
+            {flags.viewVisible.glossary && navIcon(viewMode === 'glossary', labels.aliasGlossary, <BookA className="w-3.5 h-3.5 shrink-0" />, afterDialogs(() => { setGlossarySearchQuery(""); setViewMode('glossary'); }))}
+            {showBiography && navIcon(viewMode === 'biography', labels.aliasBiography, <UserSearch className="w-3.5 h-3.5 shrink-0" />, afterDialogs(() => { setBiographySearchQuery(""); setViewMode('biography'); }))}
+        </div>
+    ) : undefined;
+    // The layout toggle and Settings: on the left of the title bar, after the workspace button. The title bar sits above
+    // the dialogs, so a click here closes any open one first (afterDialogs), then does its thing; Settings toggles.
+    const titleBarLeftTools = navigationOrientation === 'titlebar' ? (
+        <>
+            <div className="flex items-center gap-0.5">
+            {flags.showListModeToggle && (
+                <button onClick={toggleVideoListMode} className={barIcon(false)} title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}>
+                    {videoListMode === 'grid' ? <List className="w-3.5 h-3.5 k-reveal" /> : <LayoutGrid className="w-3.5 h-3.5 k-pop" />}
+                </button>
+            )}
+            {flags.settingsVisible && (
+                <button onClick={showSettings ? () => setShowSettings(false) : afterDialogs(() => setShowSettings(true))} className={barIcon(false)} title="Settings">
+                    <Settings className="w-3.5 h-3.5 k-spin-once" />
+                </button>
+            )}
+            </div>
+        </>
+    ) : undefined;
+
     // Deleting the video the dialog asked about (or, with Confirm Before Deleting off, the one a delete button asked
     // about, with no dialog at all).
     const runConfirmedDelete = async () => {
@@ -926,9 +985,20 @@ function App() {
 
     return (
         <div className="h-screen overflow-hidden bg-[#0f0f0f] text-white font-sans selection:bg-red-500/30 selection:text-white select-none flex flex-col">
+            <TitleBar
+                history={{ back: nav.back, forward: nav.forward, canBack: nav.canBack, canForward: nav.canForward }}
+                // Title bar layout: the workspace button after the arrows. The other layouts keep the workspace shortcut in the
+                // page header (horizontal) or at the bottom of the rail (vertical).
+                workspaceButton={navigationOrientation === 'titlebar' ? (showName => <WorkspaceSwitcher variant="icon" name={labels.workspaceName} showName={showName} />) : undefined}
+                // Not in the horizontal layout, whose page header already shows the workspace's name.
+                workspaceName={navigationOrientation === 'horizontal' ? undefined : labels.workspaceName}
+                leftTools={titleBarLeftTools}
+                toolbar={titleBarToolbar}
+            />
+
             {/* Navigation - conditional rendering */}
             {navigationOrientation === 'vertical' && (
-                <div className="fixed left-0 top-0 h-full w-16 bg-[#0f0f0f] border-r border-[#272727] z-40 flex flex-col items-center pt-6">
+                <div className="fixed left-0 bottom-0 top-[var(--k-titlebar-height)] w-14 bg-[#0f0f0f] border-r border-[#272727] z-40 flex flex-col items-center pt-[13px]">
                     {/* Logo */}
                     <div className="mb-8">
                         <BrandLogo
@@ -945,37 +1015,37 @@ function App() {
                         {showSearch && (
                             <button
                                 onClick={() => setViewMode('search')}
-                                className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'search' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
+                                className={`p-1.5 rounded-lg transition-all cursor-pointer ${viewMode === 'search' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
                                 title={labels.aliasSearch}
                             >
-                                <Search className="w-5 h-5" />
+                                <Search className="w-6 h-6" />
                             </button>
                         )}
                         {flags.viewVisible.library && (
                             <button
                                 onClick={() => setViewMode('library')}
-                                className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'library' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
+                                className={`p-1.5 rounded-lg transition-all cursor-pointer ${viewMode === 'library' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
                                 title={labels.aliasLibrary}
                             >
-                                <BookMarked className="w-5 h-5" />
+                                <BookMarked className="w-6 h-6" />
                             </button>
                         )}
                         {flags.viewVisible.glossary && (
                             <button
                                 onClick={() => { setGlossarySearchQuery(""); setViewMode('glossary'); }}
-                                className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'glossary' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
+                                className={`p-1.5 rounded-lg transition-all cursor-pointer ${viewMode === 'glossary' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
                                 title={labels.aliasGlossary}
                             >
-                                <BookA className="w-5 h-5" />
+                                <BookA className="w-6 h-6" />
                             </button>
                         )}
                         {showBiography && (
                             <button
                                 onClick={() => { setBiographySearchQuery(""); setViewMode('biography'); }}
-                                className={`p-2 rounded-lg transition-all cursor-pointer ${viewMode === 'biography' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
+                                className={`p-1.5 rounded-lg transition-all cursor-pointer ${viewMode === 'biography' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
                                 title={labels.aliasBiography}
                             >
-                                <UserSearch className="w-5 h-5" />
+                                <UserSearch className="w-6 h-6" />
                             </button>
                         )}
                     </div>
@@ -985,19 +1055,19 @@ function App() {
                         {flags.showListModeToggle && (
                             <button
                                 onClick={toggleVideoListMode}
-                                className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
+                                className="p-1.5 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
                                 title={videoListMode === 'grid' ? "Switch to Compact View" : "Switch to Grid View"}
                             >
-                                {videoListMode === 'grid' ? <List className="w-5 h-5 k-reveal" /> : <LayoutGrid className="w-5 h-5 k-pop" />}
+                                {videoListMode === 'grid' ? <List className="w-6 h-6 k-reveal" /> : <LayoutGrid className="w-6 h-6 k-pop" />}
                             </button>
                         )}
                         {flags.settingsVisible && (
                             <button
                                 onClick={() => setShowSettings(true)}
-                                className="p-2 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
+                                className="p-1.5 text-gray-400 hover:text-white transition-all cursor-pointer rounded-lg hover:bg-[#272727]"
                                 title="Settings"
                             >
-                                <Settings className="w-5 h-5 k-spin-once" />
+                                <Settings className="w-6 h-6 k-spin-once" />
                             </button>
                         )}
                     </div>
@@ -1008,12 +1078,14 @@ function App() {
                 </div>
             )}
 
-            <div className={`${navigationOrientation === 'vertical' ? 'ml-16' : ''} px-4 pt-4 shrink-0`}>
+            {/* Horizontal: the header starts 10px higher than the other layouts' content, for more room below it. */}
+            <div className={`${navigationOrientation === 'vertical' ? 'ml-14' : ''} px-4 ${navigationOrientation === 'horizontal' ? 'pt-1.5' : 'pt-4'} shrink-0`}>
                 <header className="relative z-40 transition-all">
                     {/* Top bar - only show in horizontal mode */}
                     {navigationOrientation === 'horizontal' && (
                         <div className="flex items-center justify-between mb-6 relative border-b border-[#272727] pb-2">
-                            <div className="flex items-center gap-3">
+                            {/* -ml-1: the K sits where it does in the vertical layout's rail (centered in its 3.5rem), so it doesn't jump when switching. */}
+                            <div className="flex items-center gap-3 -ml-1">
                                 <BrandLogo
                                     onContextMenu={(e) => {
                                         e.preventDefault();
@@ -1100,7 +1172,8 @@ function App() {
                         </div>
                     )}
 
-                    <div className="flex items-center gap-3">
+                    {/* -mt-2: the search bar (and the Drive button) sit 8px higher, in every layout, for more room below. */}
+                    <div className="flex items-center gap-2 -mt-2">
                         {viewMode === 'library' && showDrive && (
                             <button
                                 onClick={() => setShowDrivePanel(prev => {
@@ -1118,13 +1191,14 @@ function App() {
                                     }
                                     return next;
                                 })}
-                                className={`shrink-0 p-2.5 mb-2 rounded-lg border transition-all cursor-pointer ${showDrivePanel ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
+                                className={`shrink-0 p-2.5 mb-2 rounded-full border transition-all cursor-pointer ${showDrivePanel ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
                                 title={`Toggle ${labels.aliasDriveName}`}
                             >
                                 <HardDrive className="w-5 h-5" />
                             </button>
                         )}
-                        <div className="flex-1 min-w-0">
+                        {/* The search bar's own side padding (px-4) sat on top of the row's gap; beside the Drive button, take most of it back. */}
+                        <div className={`flex-1 min-w-0 ${viewMode === 'library' && showDrive ? '-ml-3' : ''}`}>
                             <SearchBar
                                 key={viewMode}
                                 onSearch={viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : handleSearch))}
@@ -1165,7 +1239,7 @@ function App() {
                 (VideoList.tsx/GlossaryView.tsx/BiographyView.tsx) adds its own mb-4 below itself —
                 stacking a third top margin on top of those left too much whitespace above it. */}
             <div
-                className={`${navigationOrientation === 'vertical' ? 'ml-16' : ''} px-4 flex-1 min-h-0 overflow-hidden`}
+                className={`${navigationOrientation === 'vertical' ? 'ml-14' : ''} px-4 flex-1 min-h-0 overflow-hidden`}
                 style={{ marginBottom: 'var(--k-bottom-bar-height, 0px)' }}
             >
                 {viewMode === 'library' ? (
@@ -1355,9 +1429,12 @@ function App() {
                 onSave={selectedVideo ? (summary) => library.handleSaveVideo(selectedVideo, summary, transcript) : undefined}
                 onDelete={() => library.handleDeleteFromSidebar(selectedVideo)}
                 onRefetch={selectedVideo ? () => handleSelectVideo(selectedVideo) : undefined}
+                onRestored={library.refreshLibrary}
                 onTranscriptChange={setTranscript}
                 pluginSummarizeEnabled={effectivePluginSummarizeEnabled}
                 pluginPhotosynthesisEnabled={effectivePluginPhotosynthesisEnabled}
+                showSummarizeOllama={showSummarizeOllama}
+                showSummarizeVenice={showSummarizeVenice}
                 showSynthesizeVenice={showSynthesizeVenice}
                 showSynthesizePixabay={showSynthesizePixabay}
                 showSynthesizeUpload={showSynthesizeUpload}

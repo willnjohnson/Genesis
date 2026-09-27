@@ -1,4 +1,4 @@
-import { LayoutGrid, List, AlignJustify, AlignLeft } from "lucide-react";
+import { LayoutGrid, List, AlignJustify, AlignLeft, PanelTop } from "lucide-react";
 import { BRAND } from "../../branding";
 import { useEffect, useState } from "react";
 import { Toggle } from "./Toggle";
@@ -13,7 +13,7 @@ interface Props {
     settings: DisplaySettings;
     showSortControlButtons: boolean;
     currentVideoListMode: 'grid' | 'compact';
-    currentNavigationOrientation: 'horizontal' | 'vertical';
+    currentNavigationOrientation: 'horizontal' | 'vertical' | 'titlebar';
     onUpdate: (updates: Partial<DisplaySettings>) => void;
     onToggleSortControlButtons: () => void;
 }
@@ -33,7 +33,7 @@ function KeepInTrayRow() {
         <div className="flex items-center justify-between">
             <div>
                 <span className="text-sm font-semibold text-white block">Keep Running in the Tray</span>
-                <span className="text-xs text-[#aaaaaa]">Closing the window hides it to the tray icon, so its save popup keeps working. Quit from the icon's menu</span>
+                <span className="text-xs text-[#aaaaaa]">Closing the window hides Kinesis in the tray</span>
             </div>
             <Toggle on={on} label="Keep running in the tray" onChange={() => { const next = !on; setOn(next); void setCloseToTray(next); }} />
         </div>
@@ -111,12 +111,14 @@ export function DisplayTab({ settings, showSortControlButtons, currentVideoListM
                     </div>
 
                     {/* Navigation Orientation */}
-                    <div className="flex items-center justify-between">
-                        <div>
+                    {/* Wraps: when the three buttons and the text don't fit side by side, the buttons drop below the text (which keeps a
+                        readable width) instead of squeezing it. */}
+                    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+                        <div className="flex-1 min-w-[15rem]">
                             <span className="text-sm font-semibold text-white block">Navigation Orientation</span>
-                            <span className="text-xs text-[#aaaaaa]">Choose horizontal/vertical layout</span>
+                            <span className="text-xs text-[#aaaaaa]">Choose horizontal, vertical, or title bar</span>
                         </div>
-                        <div className="flex gap-2 bg-[#121212] border border-[#303030] rounded-md p-0.5">
+                        <div className="flex gap-2 shrink-0 bg-[#121212] border border-[#303030] rounded-md p-0.5">
                             <button
                                 onClick={() => onUpdate({ navigationOrientation: 'horizontal' })}
                                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentNavigationOrientation === 'horizontal' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
@@ -130,6 +132,13 @@ export function DisplayTab({ settings, showSortControlButtons, currentVideoListM
                             >
                                 <AlignLeft className="w-3.5 h-3.5" />
                                 Vertical
+                            </button>
+                            <button
+                                onClick={() => onUpdate({ navigationOrientation: 'titlebar' })}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-bold transition-all cursor-pointer ${currentNavigationOrientation === 'titlebar' ? 'bg-white text-black scale-[1.02]' : 'text-[#888888] hover:text-white hover:bg-white/5'}`}
+                            >
+                                <PanelTop className="w-3.5 h-3.5" />
+                                Title Bar
                             </button>
                         </div>
                     </div>

@@ -46,6 +46,11 @@ export function GlossaryDetectPanel({ text, glossaryTerms, driveRoots, onApply, 
     const [mode, setMode] = useState<'link' | 'unlink'>('link');
     // Ticked rows, by "term@start": positions move when the text does, so a stale tick simply stops matching.
     const [ticked, setTicked] = useState<Set<string>>(new Set());
+    // Which row's occurrence is presumed highlighted in the editor right now (its own click, or "show in the editor",
+    // sets it — nothing else in this panel changes the editor's selection). Clicking that same row (already the
+    // highlighted one) toggles its checkbox instead of jumping again, same as clicking the checkbox itself always does;
+    // clicking any other row jumps to it and makes that the highlighted one instead.
+    const [highlighted, setHighlighted] = useState<string | null>(null);
 
     // Which glossary to look through: one of the video's own Drives, or the terms filed under no Drive
     // at all ("General"). Never another Drive's: its terms mean something else where this video is. A
@@ -215,21 +220,57 @@ export function GlossaryDetectPanel({ text, glossaryTerms, driveRoots, onApply, 
                                 <span className="text-[10px] text-[#777777] shrink-0">{rows.filter(x => x.term === r.term).length}×</span>
                             </div>
                         )}
-                    <div className="flex items-start gap-2 px-3 py-1.5 hover:bg-white/5">
+                    <div
+                        // The whole row responds to a click, not just the tiny checkbox — but while its occurrence isn't
+                        // already the one highlighted in the editor, a click jumps to it there instead of toggling (so
+                        // the word can be seen before deciding on it); a click once it's already highlighted toggles. The
+                        // "open definition" button inside stops the click there instead, so it still just does its own
+                        // thing every time.
+                        onClick={() => {
+                            if (highlighted !== r.key) {
+                                setHighlighted(r.key);
+                                onJump(r.start, r.end);
+                                return;
+                            }
+                            const checking = !ticked.has(r.key);
+                            if (mode === 'link') pick(r, checking);
+                            else toggle([r.key], checking);
+                            // Checking it moved the click's focus off the editor, which (being unfocused) shows the
+                            // highlight duller — put it right back, so it reads as still highlighted, not undone.
+                            // Unchecking has no such need: losing the highlight there is fine.
+                            if (checking) onJump(r.start, r.end);
+                        }}
+                        className="flex items-start gap-2 px-3 py-1.5 hover:bg-white/5 cursor-pointer"
+                    >
                         <input
                             type="checkbox"
                             checked={ticked.has(r.key)}
-                            onChange={e => (mode === 'link' ? pick(r, e.target.checked) : toggle([r.key], e.target.checked))}
-                            className="mt-0.5 accent-blue-600 shrink-0"
+                            onChange={e => {
+                                if (mode === 'link') pick(r, e.target.checked);
+                                else toggle([r.key], e.target.checked);
+                                if (e.target.checked) {
+                                    // Also makes this the highlighted row: checking a box (even one that wasn't already the
+                                    // highlighted row) is as much "look, this one" as clicking the row itself is. Unchecking
+                                    // doesn't need to keep it highlighted.
+                                    setHighlighted(r.key);
+                                    onJump(r.start, r.end);
+                                }
+                            }}
+                            // The row above already toggles it; without this, a click on the box itself would toggle twice
+                            // (once here, once bubbling up to the row) and cancel out.
+                            onClick={e => e.stopPropagation()}
+                            className="mt-0.5 accent-blue-600 shrink-0 cursor-pointer"
                             aria-label={`${mode === 'link' ? 'Link' : 'Unlink'} "${r.shown}" ${mode === 'link' ? 'to' : 'from'} ${r.term}`}
                         />
                         <div className="min-w-0">
-                            {mode === 'unlink' && <div className="truncate">{termName(r.term, 'text-xs font-semibold text-white truncate')}</div>}
-                            <button onClick={() => onJump(r.start, r.end)} className="text-left text-[11px] leading-snug text-[#999999] break-words cursor-pointer" title="Show in the editor">
+                            {mode === 'unlink' && <div className="truncate" onClick={e => e.stopPropagation()}>{termName(r.term, 'text-xs font-semibold text-white truncate')}</div>}
+                            {/* No onClick of its own: it's the row's click that jumps/toggles (see above), and this text is
+                                most of the row's area, so it needs to behave the same as the empty space around it. */}
+                            <span className="block text-left text-[11px] leading-snug text-[#999999] break-words" title="Show in the editor">
                                 …{r.before}
                                 <mark className="bg-blue-500/30 text-white rounded px-0.5">{r.shown}</mark>
                                 {r.after}…
-                            </button>
+                            </span>
                             {r.also.length > 0 && (
                                 <div className="text-[10px] text-amber-400/80" title="These words fit more than one term. Pick the one you mean.">
                                     also fits: {r.also.join(', ')}

@@ -1,5 +1,6 @@
 import KinesisLogo from './assets/kinesis.png';
 import GenesisLogo from './assets/genesis.png';
+import { LOGO_MARKS, type LogoMark } from './assets/logo-marks';
 
 export type Brand = 'kinesis' | 'genesis';
 
@@ -10,6 +11,8 @@ interface BrandConfig {
     id: Brand;
     name: string;
     logo: string;
+    /** The same logo as vector paths (see assets/logo-marks.ts). */
+    mark: LogoMark;
     repo: string;
     dbName: string;
     storageKey: string;
@@ -22,6 +25,7 @@ const BRANDS: Record<Brand, BrandConfig> = {
         id: 'genesis',
         name: 'Genesis',
         logo: GenesisLogo,
+        mark: LOGO_MARKS.genesis,
         repo: 'https://github.com/willnjohnson/genesis',
         dbName: 'genesis_data.db',
         storageKey: 'genesis_db_path'
@@ -30,6 +34,7 @@ const BRANDS: Record<Brand, BrandConfig> = {
         id: 'kinesis',
         name: 'Kinesis',
         logo: KinesisLogo,
+        mark: LOGO_MARKS.kinesis,
         repo: 'https://github.com/willnjohnson/kinesis',
         dbName: 'kinesis_data.db',
         storageKey: 'kinesis_db_path'

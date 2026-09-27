@@ -94,6 +94,16 @@ pub async fn add_attachment_link(app: AppHandle, video_id: String, title: String
         .map_err(|e| e.to_string())?
 }
 
+/// Renames a link and/or changes its address after it was added.
+#[command]
+pub async fn update_attachment_link(app: AppHandle, id: i64, title: String, url: String) -> Result<AttachmentInfo, String> {
+    let db_path = get_db_path(&app);
+    require_edit(&db_path)?;
+    tokio::task::spawn_blocking(move || attachments::update_link(&db_path, id, &title, &url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// A link's address, for showing it to the user before it's opened. The link itself is opened by the
 /// frontend once they've confirmed.
 #[command]

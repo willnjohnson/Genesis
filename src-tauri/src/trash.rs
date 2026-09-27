@@ -75,6 +75,9 @@ pub struct TrashItem {
 pub struct TrashEntry {
     pub id: u64,
     pub kind: TrashKind,
+    /// What makes two deletions "the same thing" (see TrashItem::key): a video's id, or a term with its Drives. Lets
+    /// the frontend recognize, say, the specific video it has open as one already sitting in the Trash.
+    pub key: String,
     pub label: String,
     pub detail: String,
     /// Milliseconds since the epoch.
@@ -259,7 +262,7 @@ pub fn list(trash: &Mutex<TrashStore>, db_path: &str, kind: TrashKind) -> Vec<Tr
         .items
         .iter()
         .filter(|i| i.kind == kind && i.db_path == db_path)
-        .map(|i| TrashEntry { id: i.id, kind: i.kind, label: i.label.clone(), detail: i.detail.clone(), deleted_at: i.deleted_at })
+        .map(|i| TrashEntry { id: i.id, kind: i.kind, key: i.key.clone(), label: i.label.clone(), detail: i.detail.clone(), deleted_at: i.deleted_at })
         .collect();
     out.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at).then(b.id.cmp(&a.id)));
     out

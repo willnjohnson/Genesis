@@ -1,7 +1,7 @@
 {
   "name": "kinesis",
   "private": true,
-  "version": "0.4.7",
+  "version": "0.4.8",
   "type": "module",
   "bin": {
     "tauri-branding": "./tauri-branding.cjs"
@@ -24,8 +24,9 @@
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.23",
-    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/api": "2.10.1",
     "@tauri-apps/plugin-dialog": "^2.7.0",
+    "@tauri-apps/plugin-notification": "2.4.0",
     "@tauri-apps/plugin-opener": "^2.5.3",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "clsx": "^2.1.1",

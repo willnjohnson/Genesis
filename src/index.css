@@ -37,6 +37,8 @@
     --k-text-gray-600: #4b5563; --k-text-gray-700: #374151; --k-text-gray-800: #1f2937; --k-text-gray-900: #111827;
 
     --k-border-303030: #303030; --k-border-333: #333333; --k-border-333333: #333333; --k-border-383838: #383838;
+    /* The app's own title bar (components/TitleBar.tsx): what sits below it starts here. */
+    --k-titlebar-height: 1.75rem;
     --k-border-404040: #404040; --k-border-444: #444444; --k-border-505050: #505050;
     --k-border-gray-700: #374151; --k-border-gray-800: #1f2937; --k-border-white-5: rgba(255,255,255,0.05);
 
@@ -73,6 +75,15 @@ body {
        defensive insurance against a stray taller-than-viewport child ever reopening a
        whole-window scrollbar, not something anything relies on to size correctly. */
     overflow: hidden;
+    /* Text in the app isn't selectable. The app's root says so (select-none), but dialogs, menus and dropdowns are drawn
+       into <body>, outside that root, and were left selectable (button labels included): so it is said here, for all of
+       it. Fields opt back in just below. */
+    -webkit-user-select: none;
+    user-select: none;
+}
+input, textarea, [contenteditable=""], [contenteditable="true"] {
+    -webkit-user-select: text;
+    user-select: text;
 }
 
 /* Backgrounds */
@@ -154,6 +165,10 @@ body {
 .hover\:bg-\[\#202020\]:hover { background-color: var(--k-hover-bg-202020) !important; }
 .hover\:bg-gray-700:hover { background-color: var(--k-hover-bg-gray-700) !important; }
 .hover\:text-white:hover { color: var(--k-hover-text-white) !important; }
+/* For text/icons that hover into a solid accent fill (the title bar's close button): always light, the same rule
+   `text-on-accent` already follows elsewhere (see lib/themes.ts), not `hover:text-white`'s theme-flipping color —
+   which is right for hovering into a plain gray surface, but reads muted/wrong against a bold accent background. */
+.hover\:text-\[var\(--k-text-on-accent\)\]:hover { color: var(--k-text-on-accent) !important; }
 .hover\:border-\[\#505050\]:hover { border-color: var(--k-hover-border-505050) !important; }
 .hover\:border-\[\#555555\]:hover { border-color: var(--k-hover-border-555555) !important; }
 
@@ -492,6 +507,13 @@ body.k-leave-forward { animation: k-leave-forward 0.22s ease-in forwards; }
 body.k-enter-forward { animation: k-enter-forward 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .k-enter-back { animation: k-enter-back 0.32s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .k-leave-back { animation: k-leave-back 0.22s ease-in forwards; }
+/* On the Workspaces screen the title bar has no use for the open workspace's name or its switcher. */
+body:has([data-workspaces-screen]) [data-app-titlebar] :is([data-workspace-name], [data-workspace-switch]) { display: none; }
+
+/* The page's own title bar sits still under the switching screen's copy of it, but it is part of the zoomed page: it
+   slides down past the copy's edge (and back up on arrival). Hidden while switching, it can't. */
+html.k-bar-swap [data-app-titlebar] { visibility: hidden; }
+
 @media (prefers-reduced-motion: reduce) {
     body.k-leave-forward, body.k-enter-forward, .k-enter-back, .k-leave-back { animation: none; }
 }

@@ -228,7 +228,7 @@ export function QuickAdd() {
             )}
 
             <div className="px-4 py-2 border-t border-[#303030] flex items-center justify-between text-[10px] text-gray-600">
-                <span>Esc to close</span>
+                <span>ESC to close</span>
                 {openMain}
             </div>
         </div>

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, Download, ExternalLink, File, FileImage, FileSpreadsheet, FileText, Link2, Loader2, Paperclip, Plus, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, Download, ExternalLink, File, FileImage, FileSpreadsheet, FileText, Link2, Loader2, Paperclip, Pencil, Plus, Trash2, X } from 'lucide-react';
 import {
     addAttachmentLink, addAttachments, getAttachmentLink, getVideoAttachments, openAttachment, openExternalUrl,
-    pickAttachmentFiles, removeAttachment, saveAttachmentAs, saveVideoNote, type AttachmentInfo,
+    pickAttachmentFiles, removeAttachment, saveAttachmentAs, saveVideoNote, updateAttachmentLink, type AttachmentInfo,
 } from '../../api';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { useFlags } from '../../hooks/useFlags';
@@ -58,6 +58,9 @@ export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
     const [linkUrl, setLinkUrl] = useState('');
     const [linkError, setLinkError] = useState<string | null>(null);
     const [addingLink, setAddingLink] = useState(false);
+    // Set while editing an existing link's title/address instead of adding a new one; the form above is reused for
+    // both (its title and buttons change to match).
+    const [editingLinkId, setEditingLinkId] = useState<number | null>(null);
     const [linkToOpen, setLinkToOpen] = useState<{ url: string; title: string } | null>(null);
     const [noteSaved, setNoteSaved] = useState(false);
     // Only shown as separate tabs once both kinds actually have something in them — otherwise
@@ -159,6 +162,7 @@ export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
 
     const closeLinkForm = () => {
         setShowLinkForm(false);
+        setEditingLinkId(null);
         setLinkTitle('');
         setLinkUrl('');
         setLinkError(null);
@@ -169,15 +173,34 @@ export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
         setLinkError(null);
         setAddingLink(true);
         try {
-            await addAttachmentLink(videoId, linkTitle, linkUrl);
+            if (editingLinkId != null) await updateAttachmentLink(editingLinkId, linkTitle, linkUrl);
+            else await addAttachmentLink(videoId, linkTitle, linkUrl);
             closeLinkForm();
             setErrors([]);
             await reload();
         } catch (e) {
             // Shown in the form (a bad address is the usual reason), which stays open to be fixed.
-            setLinkError(messageOf(e, 'Failed to add the URL.'));
+            setLinkError(messageOf(e, editingLinkId != null ? 'Failed to save the URL.' : 'Failed to add the URL.'));
         } finally {
             setAddingLink(false);
+        }
+    };
+
+    // The address isn't kept in memory otherwise (only shown, with a warning, right before it's opened) — read
+    // fresh here too, so the field starts at what's actually stored.
+    const handleEditLink = async (a: AttachmentInfo) => {
+        setBusyId(a.id);
+        try {
+            const url = await getAttachmentLink(a.id);
+            setLinkTitle(a.name);
+            setLinkUrl(url);
+            setLinkError(null);
+            setEditingLinkId(a.id);
+            setErrors([]);
+        } catch (e) {
+            setErrors([messageOf(e, 'Failed to read the link.')]);
+        } finally {
+            setBusyId(null);
         }
     };
 
@@ -260,6 +283,12 @@ export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
                     {!isLink(a) && (
                         <button onClick={() => handleSaveAs(a.id)} title="Save As" className="text-gray-500 hover:text-white transition-colors cursor-pointer p-1">
                             <Download className="w-3.5 h-3.5" />
+                        </button>
+                    )}
+                    {/* Renaming (and re-pointing) a link after it was added — a file's name is the file itself, so this is link-only. */}
+                    {canEdit && isLink(a) && (
+                        <button onClick={() => handleEditLink(a)} title="Edit" className="text-gray-500 hover:text-white transition-colors cursor-pointer p-1">
+                            <Pencil className="w-3.5 h-3.5" />
                         </button>
                     )}
                     {canEdit && (
@@ -361,7 +390,7 @@ export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
                 </div>
             )}
 
-            {canEdit && showLinkForm && createPortal(
+            {canEdit && (showLinkForm || editingLinkId != null) && createPortal(
                 // A modal, like the Glossary's Add Term: the pane is narrow, and this keeps the list from jumping.
                 // Rendered on the page itself: the video panel slides in with a CSS transform, so a "fixed"
                 // element inside it would position against the panel, and focusing its first field scrolled
@@ -379,7 +408,7 @@ export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
                         <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">
                             <div className="flex items-center gap-2 text-gray-200">
                                 <Link2 className="w-4 h-4" />
-                                <h2 className="text-lg font-bold">Add URL</h2>
+                                <h2 className="text-lg font-bold">{editingLinkId != null ? 'Edit URL' : 'Add URL'}</h2>
                             </div>
                             <button type="button" onClick={closeLinkForm} disabled={addingLink} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
                                 <X className="w-5 h-5" />
@@ -427,7 +456,7 @@ export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
                                 className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 cursor-pointer text-white text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                                 {addingLink && <Loader2 className="w-4 h-4 animate-spin" />}
-                                {addingLink ? 'Adding' : 'Add URL'}
+                                {editingLinkId != null ? (addingLink ? 'Saving' : 'Save') : (addingLink ? 'Adding' : 'Add URL')}
                             </button>
                         </div>
                     </form>

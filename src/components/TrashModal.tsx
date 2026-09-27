@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RotateCcw, Trash2, X } from 'lucide-react';
+import { Trash2, X } from 'lucide-react';
 import { trashDiscard, trashEmpty, trashRestore, type TrashKind } from '../api';
 import { useTrash } from '../hooks/useTrash';
 import { useWorkspace } from '../hooks/useWorkspace';
@@ -98,10 +98,9 @@ export function TrashModal({ kind, onClose, onRestored }: Props) {
                                 type="button"
                                 onClick={() => { void restore(entry.id); }}
                                 disabled={busy === entry.id}
-                                className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 cursor-pointer text-white text-xs font-semibold transition-colors"
+                                className="shrink-0 px-3 py-1.5 rounded-lg bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] disabled:opacity-50 cursor-pointer text-gray-200 hover:text-white text-xs font-semibold transition-colors"
                             >
-                                <RotateCcw className="w-3.5 h-3.5" />
-                                Restore
+                                Undo
                             </button>
                             <button
                                 type="button"

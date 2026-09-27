@@ -317,6 +317,40 @@ pub fn add_link(db_path: &str, video_id: &str, title: &str, url: &str) -> std::r
     Ok(info)
 }
 
+/// Renames a link and/or changes its address after it was added. Re-validated exactly like a new one
+/// (`normalize_link`, `clean_title`), and re-hashed if the address changed, sweeping the old blob the
+/// same way `remove_attachment` does if nothing else references it.
+pub fn update_link(db_path: &str, id: i64, title: &str, url: &str) -> std::result::Result<AttachmentInfo, String> {
+    let url = normalize_link(url)?;
+    let title = match clean_title(title) {
+        t if t.is_empty() => link_host(&url),
+        t => t,
+    };
+    let bytes = url.into_bytes();
+    let hash = sha256_hex(&bytes);
+    let size = bytes.len() as i64;
+
+    let mut conn = Connection::open(db_path).map_err(db_err)?;
+    conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(db_err)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_err)?;
+    match is_link(&tx, id).map_err(db_err)? {
+        Some(true) => {}
+        Some(false) => return Err("That attachment isn't a link.".to_string()),
+        None => return Err("That link no longer exists.".to_string()),
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO AttachmentBlobs (hash, compression, size, stored_size, data) VALUES (?1, 'none', ?2, ?2, ?3)",
+        params![hash, size, bytes],
+    )
+    .map_err(db_err)?;
+    tx.execute("UPDATE VideoAttachments SET name = ?1, hash = ?2 WHERE id = ?3", params![title, hash, id]).map_err(db_err)?;
+    // The old blob, if this changed the address and nothing else (another link with the same old address) still uses it.
+    tx.execute("DELETE FROM AttachmentBlobs WHERE hash NOT IN (SELECT hash FROM VideoAttachments)", []).map_err(db_err)?;
+    let info = load_info(&tx, id).map_err(db_err)?.ok_or_else(|| "The link could not be read back.".to_string())?;
+    tx.commit().map_err(db_err)?;
+    Ok(info)
+}
+
 fn is_link(conn: &Connection, id: i64) -> Result<Option<bool>> {
     conn.query_row("SELECT ext FROM VideoAttachments WHERE id = ?1", params![id], |r| r.get::<_, String>(0))
         .optional()

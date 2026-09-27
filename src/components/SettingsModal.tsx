@@ -25,8 +25,8 @@ interface Props {
     onThemeChange?: (theme: string) => void;
     onVideoListModeChange: (mode: 'grid' | 'compact') => void;
     currentVideoListMode: 'grid' | 'compact';
-    onNavigationOrientationChange: (orientation: 'horizontal' | 'vertical') => void;
-    currentNavigationOrientation: 'horizontal' | 'vertical';
+    onNavigationOrientationChange: (orientation: 'horizontal' | 'vertical' | 'titlebar') => void;
+    currentNavigationOrientation: 'horizontal' | 'vertical' | 'titlebar';
     onPluginsChange?: () => void;
     /** A sync (or pack import) finished: content, enforced settings or the license may have changed. */
     onSyncComplete?: () => void;

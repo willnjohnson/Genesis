@@ -104,14 +104,48 @@ pub fn set_max_chunks(app: tauri::AppHandle, max: usize) -> Result<(), String> {
 
 // ─── Summarize commands ───────────────────────────────────────────────────────
 
+/// A yes/no feature flag (see src/lib/flags.ts), read the same way the settings table stores it
+/// (accepting the same spellings the frontend does), falling back to `default` when unset or junk.
+fn flag_on(db_path: &str, key: &str, default: bool) -> bool {
+    match db::get_setting(db_path, key) {
+        Ok(Some(v)) => match v.trim().to_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => true,
+            "false" | "0" | "no" | "off" => false,
+            _ => default,
+        },
+        _ => default,
+    }
+}
+
 #[command]
 pub async fn summarize_transcript(app: tauri::AppHandle, transcript: String, handle: Option<String>, video_id: Option<String>) -> Result<String, String> {
     let db_path = get_db_path(&app);
-    let provider = db::get_setting(&db_path, "summarize_provider")
+    // showSummarizeOllama/showSummarizeVenice (src/lib/flags.ts) are what the frontend uses to hide a disabled
+    // provider's UI; without a check here, a workspace that has since turned one off (or a stray/edited
+    // "summarize_provider" value) could still have it silently used, since that setting is otherwise the only
+    // thing this command consults. Ollama defaults off (it needs a local install; Venice defaults on.
+    let ollama_on = flag_on(&db_path, "showSummarizeOllama", false);
+    let venice_on = flag_on(&db_path, "showSummarizeVenice", true);
+    let wants_cloud = db::get_setting(&db_path, "summarize_provider")
         .unwrap_or(None)
-        .unwrap_or_else(|| "local".to_string());
+        .is_some_and(|p| p == "cloud");
 
-    if provider == "cloud" {
+    // The stored choice, if it's still allowed; otherwise whichever provider is allowed (cloud preferred, matching
+    // the frontend's own fallback order), so disabling one never means "silently keep using it" nor "no error, no
+    // summary, no explanation" when the other is available.
+    let use_cloud = if wants_cloud && venice_on {
+        true
+    } else if !wants_cloud && ollama_on {
+        false
+    } else if venice_on {
+        true
+    } else if ollama_on {
+        false
+    } else {
+        return Err("No summarize provider is enabled for this workspace.".to_string());
+    };
+
+    if use_cloud {
         venice::summarize_transcript(app, transcript, handle, video_id).await
     } else {
         ollama::summarize_transcript(app, transcript, handle, video_id).await

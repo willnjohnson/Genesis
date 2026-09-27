@@ -51,7 +51,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
     { label: 'Sort controls', tab: 'display', keywords: 'sort controls accessibility buttons heading' },
     { label: 'Video list layout', tab: 'display', keywords: 'layout grid compact list' },
     { label: 'Keep running in the tray', tab: 'display', keywords: 'tray close minimize background notification area icon quick save popup' },
-    { label: 'Navigation orientation', tab: 'display', keywords: 'orientation navigation horizontal vertical rail' },
+    { label: 'Navigation orientation', tab: 'display', keywords: 'orientation navigation horizontal vertical title bar compact rail' },
 
     // Theme
     { label: 'Theme', tab: 'theme', keywords: 'colors colours dark light accent palette custom theme' },

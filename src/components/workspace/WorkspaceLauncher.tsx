@@ -130,7 +130,12 @@ export function WorkspaceLauncher({ status: initial, onClose }: Props) {
     ];
 
     return (
-        <div className={`fixed inset-0 z-[70] bg-[#0f0f0f] text-white font-sans select-none flex ${leaving ? "k-leave-back" : "k-enter-back"}`}>
+        <div
+            data-workspaces-screen
+            // Below the title bar (App's own, or the gate's when no workspace is open yet).
+            style={{ top: "var(--k-titlebar-height)" }}
+            className={`fixed inset-0 z-[70] bg-[#0f0f0f] text-white font-sans select-none flex ${leaving ? "k-leave-back" : "k-enter-back"}`}
+        >
             <aside className="w-80 shrink-0 border-r border-[#303030] bg-white/5 flex flex-col">
                 {/* The same lockup as the app's own header (logo, name with the accent on its first three
                     letters, and the workspace name underneath), with "Workspaces" in the subtitle's place. It sits at

@@ -2,7 +2,7 @@ import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, ClipboardPaste, Check,
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import { LifeLoader } from './LifeLoader';
-import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, getWdbsAliases, getHandleDrives, getVideoById, getVideoAttachments, type Video, type GlossaryTerm } from '../api';
+import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, getWdbsAliases, getHandleDrives, getVideoById, getVideoAttachments, trashList, trashRestore, type Video, type GlossaryTerm } from '../api';
 import { DriveComboBox } from './DriveComboBox';
 import { saveImageAs } from '../lib/save-image-as';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
@@ -25,7 +25,6 @@ import { markdownUrlTransform } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { useWorkspace } from '../hooks/useWorkspace';
-import { driveSegmentLabel } from '../lib/utils';
 import { useFlags } from '../hooks/useFlags';
 
 type LeftTab = 'terms' | 'tags' | 'similar' | 'attachments';
@@ -69,10 +68,18 @@ interface Props {
     onSave?: (summary?: string | null) => void;
     onDelete?: () => void;
     onRefetch?: () => void;
+    /** A video open here turned out to still be sitting in the Trash (see trashId below), and was just put back:
+     *  whatever shows the library's own list should refresh so it reappears there. */
+    onRestored?: () => void;
     /** The transcript was replaced by hand (pasted in): the app keeps this text as the video's transcript. */
     onTranscriptChange?: (text: string) => void;
     pluginSummarizeEnabled: boolean;
     pluginPhotosynthesisEnabled: boolean;
+    /** Which summarize providers the workspace allows (the Custom Prompt editor's two tabs, and which one an
+     *  in-progress choice of "local" or "cloud" is allowed to mean); default true so a caller that doesn't pass
+     *  these (there's currently only one) sees both, same as before either flag existed. */
+    showSummarizeOllama?: boolean;
+    showSummarizeVenice?: boolean;
     showSynthesizeVenice?: boolean;
     showSynthesizePixabay?: boolean;
     showSynthesizeUpload?: boolean;
@@ -118,11 +125,15 @@ interface Props {
  * directly, since the two panes are asymmetric (only the summary pane supports image hover-to-
  * delete) rather than a clean shared abstraction.
  */
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, onTranscriptChange, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, driveContext, onVideoSelect }: Props) {
+export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, onRestored, onTranscriptChange, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSummarizeOllama = true, showSummarizeVenice = true, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, driveContext, onVideoSelect }: Props) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
     const [checkingDb, setCheckingDb] = useState(false);
+    // Set when the open video isn't in the library but IS sitting in this session's Trash: its id there, so a
+    // "Restore" button can put it straight back instead of "Save" re-fetching it from YouTube as if new.
+    const [trashId, setTrashId] = useState<number | null>(null);
+    const [restoring, setRestoring] = useState(false);
     const [splitPercent, setSplitPercent] = useState(65);
     const splitPercentRef = useRef(splitPercent);
     // The panel's width follows the window, so the pane floors are applied against it as it changes.
@@ -430,12 +441,14 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
 
     // Load the last-saved split ratio once on mount (the sidebar stays mounted while hidden, so
     // this doesn't need to re-run on `isOpen`). Ignore anything that fails to parse into the same
-    // 30-85 range the drag handler itself enforces, so a corrupt/edited setting value can't wedge
-    // the panel into a degenerate layout.
+    // 30-85 range the drag handler itself enforces (inclusive: dragging a pane to its floor saves
+    // exactly 30 or exactly 85, which a strict > / < here used to reject, snapping back to the
+    // default on the next launch), so a corrupt/edited setting value can't wedge the panel into a
+    // degenerate layout.
     useEffect(() => {
         getSetting(SPLIT_PERCENT_SETTING_KEY).then(value => {
             const parsed = value ? parseFloat(value) : NaN;
-            if (!isNaN(parsed) && parsed > 30 && parsed < 85) {
+            if (!isNaN(parsed) && parsed >= 30 && parsed <= 85) {
                 setSplitPercent(parsed);
             }
         }).catch(() => {});
@@ -457,6 +470,18 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             else if (showSynthesizePixabay) setImageTab('pixabay');
         }
     }, [imageTab, showSynthesizeVenice, showSynthesizePixabay, showSynthesizeUpload]);
+
+    // Same idea for the Custom Prompt editor's two tabs, and for which provider a plain "Generate Summary" click
+    // means: a disabled service is never left selected, so its prompt can't be viewed, edited or (further down,
+    // where the actual request is made) silently used.
+    useEffect(() => {
+        if (promptTab === 'local' && !showSummarizeOllama && showSummarizeVenice) setPromptTab('cloud');
+        else if (promptTab === 'cloud' && !showSummarizeVenice && showSummarizeOllama) setPromptTab('local');
+    }, [promptTab, showSummarizeOllama, showSummarizeVenice]);
+    useEffect(() => {
+        if (summarizeProvider === 'local' && !showSummarizeOllama && showSummarizeVenice) setSummarizeProvider('cloud');
+        else if (summarizeProvider === 'cloud' && !showSummarizeVenice && showSummarizeOllama) setSummarizeProvider('local');
+    }, [summarizeProvider, showSummarizeOllama, showSummarizeVenice]);
 
     const startResizing = useCallback((e: React.MouseEvent) => {
         isResizingRef.current = true;
@@ -610,9 +635,18 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
 
         if (videoId) {
             setCheckingDb(true);
+            setTrashId(null);
             checkVideoExists(videoId).then(exists => {
                 setExistsInDb(exists);
                 setCheckingDb(false);
+                // Gone from the library, but maybe only just now (this session): if it's sitting in the Trash under
+                // this same id, offer to put it straight back instead of treating it as a fresh, unsaved video.
+                if (!exists) {
+                    trashList('video').then(entries => {
+                        const found = entries.find(e => e.key === videoId);
+                        if (found) setTrashId(found.id);
+                    }).catch(() => {});
+                }
             });
 
             if (cachedSummaries && cachedSummaries[videoId]) {
@@ -715,6 +749,23 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             console.error('Save failed:', e);
         }
     }, [videoId, onSave, summary, onCacheSummary]);
+
+    const handleRestore = useCallback(async () => {
+        if (trashId == null) return;
+        setRestoring(true);
+        try {
+            await trashRestore(trashId);
+            setTrashId(null);
+            setExistsInDb(true);
+            onRestored?.();
+            // Picks the restored video back up as a normal library one (transcript, "exists" check, everything).
+            onRefetch?.();
+        } catch (e) {
+            console.error('Restore failed:', e);
+        } finally {
+            setRestoring(false);
+        }
+    }, [trashId, onRestored, onRefetch]);
 
     const handleCopy = useCallback(() => {
         if (!transcript) return;
@@ -1150,6 +1201,8 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                 <div
                     // The page's own dimming layer while the sidebar is open: it isn't a dialog, so back/forward still work.
                     data-nav-ok
+                    // Starts below the title bar, which stays usable.
+                    style={{ top: 'var(--k-titlebar-height)' }}
                     className="fixed inset-0 bg-black/70 z-40 transition-opacity"
                     onClick={onClose}
                 />
@@ -1157,7 +1210,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
 
             <div
                 id="sidebar-container"
-                style={{ width: `max(min(${SIDEBAR_BASE_WIDTH}px, 100vw), calc(100vw - ${SIDEBAR_SIDE_GAP}px))` }}
+                style={{ top: 'var(--k-titlebar-height)', width: `max(min(${SIDEBAR_BASE_WIDTH}px, 100vw), calc(100vw - ${SIDEBAR_SIDE_GAP}px))` }}
                 className={`fixed inset-y-0 right-0 bg-[#0f0f0f] border-l border-[#303030] transform transition-transform duration-300 ease-in-out z-50 ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}
             >
                 <div className="h-full flex flex-col">
@@ -1529,7 +1582,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                     <button
                                                         // With "clear the transcript after summarizing" on, time spent editing it is
                                                         // lost once a summary exists: say so first, so nobody sinks an hour into it.
-                                                        onClick={() => (flags.setTranscriptAfterSummarizeToNA ? setConfirmEditTranscript(true) : startEditingTranscript())}
+                                                        onClick={() => (flags.setTranscriptAfterSummarizeToNA && flags.confirmBeforeEditingTranscript ? setConfirmEditTranscript(true) : startEditingTranscript())}
                                                         className="shrink-0 p-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors cursor-pointer"
                                                         title="Edit Transcript"
                                                     >
@@ -1710,8 +1763,9 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                         </div>
                                     ) : showPromptEditor && pluginSummarizeEnabled ? (
                                         <div className="flex-1 flex flex-col gap-4">
-                                            {/* Prompt Tabs */}
+                                            {/* Prompt Tabs: only for a provider this workspace actually allows (showSummarizeOllama/Venice). */}
                                             <div className="flex items-center gap-4">
+                                                {showSummarizeOllama && (
                                                 <button
                                                     onClick={() => setPromptTab('local')}
                                                     className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${promptTab === 'local' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
@@ -1720,6 +1774,8 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                     Local (Ollama)
                                                     {promptTab === 'local' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                 </button>
+                                                )}
+                                                {showSummarizeVenice && (
                                                 <button
                                                     onClick={() => setPromptTab('cloud')}
                                                     className={`flex items-center gap-1.5 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${promptTab === 'cloud' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
@@ -1728,6 +1784,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                     Cloud (Venice)
                                                     {promptTab === 'cloud' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                 </button>
+                                                )}
                                             </div>
 
                                             <div className="flex-1 flex flex-col min-h-0">
@@ -1981,6 +2038,19 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                             >
                                                 <Trash2 className="w-3.5 h-3.5 shrink-0" />
                                                 <span className="truncate">Delete</span>
+                                            </button>
+                                        ) : !existsInDb && trashId != null ? (
+                                            // Not "not found yet" but "deleted this session": put the same video (and its
+                                            // terms/tags, attachments, sequence spot...) back, rather than treating it as
+                                            // new and re-fetching just a title/transcript/summary from YouTube.
+                                            <button
+                                                onClick={handleRestore}
+                                                disabled={checkingDb || restoring}
+                                                title={`Restore to ${labels.aliasLibrary}`}
+                                                className={`flex-1 min-w-0 py-1.5 rounded-lg bg-red-600 text-white transition-all text-xs font-bold disabled:opacity-20 flex items-center justify-center gap-2 ${checkingDb || restoring ? 'cursor-default' : 'hover:bg-red-500 cursor-pointer'}`}
+                                            >
+                                                <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                                                <span className="truncate">{restoring ? 'Restoring' : 'Restore'}</span>
                                             </button>
                                         ) : !existsInDb && flags.allowSaveToLibrary ? (
                                             <button

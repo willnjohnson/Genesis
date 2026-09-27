@@ -6,6 +6,7 @@ import {
 } from "../api";
 import { type NotificationContent } from "../components/Notification";
 import { useWorkspace } from "./useWorkspace";
+import { notifyBackgroundJobDone } from "../lib/notify";
 
 // Bumped from 100 -> 300 per the search revision doc ("empirically verified to work great in
 // the Kinesis app").
@@ -363,9 +364,16 @@ export function useLibrary(
                 message: count > 0 ? `Successfully summarized ${count} video${count > 1 ? 's' : ''}` : "All videos are already summarized",
                 type: count > 0 ? "success" : "info"
             });
-            if (count > 0) refreshLibrary();
+            if (count > 0) {
+                refreshLibrary();
+                // A native OS notification too (Windows' toast, say) — but only if the window isn't focused, since
+                // otherwise the toast above already says the same thing right where it's being looked at. Bulk
+                // Summarize is the one job here long enough that someone would actually walk away from it.
+                void notifyBackgroundJobDone(`Bulk Summarize finished: ${count} video${count > 1 ? 's' : ''} summarized.`);
+            }
         } catch (e: any) {
             setNotification({ message: `Summarize failed: ${e.message}`, type: "error" });
+            void notifyBackgroundJobDone(`Bulk Summarize failed: ${e.message}`);
         } finally {
             setSummarizeProgress(null);
         }

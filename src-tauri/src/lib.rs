@@ -8,7 +8,7 @@ const APP_NAME: &str = "Genesis";
 #[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.4.7";
+const VERSION: &str = "0.4.8";
 
 /// The smallest the window can be dragged to (logical pixels). 800 is also the smallest size
 /// offered under Settings > Display, so every choice there still fits; below this the header
@@ -143,6 +143,7 @@ pub fn run() {
         .plugin(tauri_plugin_openurl::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_localhost::Builder::new(1430).build())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             // Settings
             commands::get_api_key,
@@ -277,6 +278,7 @@ pub fn run() {
             commands::read_clipboard_text,
             commands::hide_quick_add,
             commands::show_main_window,
+            commands::show_system_menu,
             commands::get_wdbs_aliases,
             commands::get_video_by_id,
             commands::get_video_attachments,
@@ -284,6 +286,7 @@ pub fn run() {
             commands::pick_attachment_files,
             commands::add_attachments,
             commands::add_attachment_link,
+            commands::update_attachment_link,
             commands::get_attachment_link,
             commands::remove_attachment,
             commands::open_attachment,
@@ -358,6 +361,10 @@ pub fn run() {
                 .fullscreen(fullscreen)
                 .maximized(plan.maximized)
                 .visible(plan.position.is_none())
+                // The window has no native title bar: the app draws its own (src/components/TitleBar.tsx). Tauri
+                // still provides resizable edges for a frameless window on Windows and Linux, and macOS resizes
+                // natively. The title above is still what the taskbar shows.
+                .decorations(false)
                 .build()?;
             if let Some((x, y)) = plan.position {
                 let _ = window.set_position(tauri::PhysicalPosition::new(x, y));

@@ -9,6 +9,7 @@ import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { getTagVideosPreview, type Video, type GlossaryTerm } from '../api';
 import { TagVideosPreview } from './TagVideosPreview';
+import { recordRecent } from '../lib/recents';
 
 interface Props {
     term: GlossaryTerm;
@@ -28,6 +29,8 @@ export function TermDefinitionModal({ term, onClose, onSearch, onOpenVideo }: Pr
     const { labels } = useWorkspace();
     // A term has a definition; a Quick Tag doesn't. They're searched separately in the library.
     const isTerm = term.definition.trim() !== '';
+    // Ctrl+K lists what was opened lately; a Quick Tag has no page to come back to.
+    useEffect(() => { if (isTerm) void recordRecent({ kind: 'term', key: term.term, label: term.term }); }, [isTerm, term.term]);
     // The two search buttons were merged into one; it stays if the DB owner left either on.
     const showSearch = flags.showGlossarySearchByTag || flags.showGlossarySearchInLibrary;
 
@@ -55,7 +58,7 @@ export function TermDefinitionModal({ term, onClose, onSearch, onOpenVideo }: Pr
         >
             <div
                 onClick={e => e.stopPropagation()}
-                className={`bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 ${isTerm ? 'max-w-7xl h-[90vh]' : 'max-w-3xl max-h-[80vh]'}`}
+                className={`bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 ${isTerm ? 'max-w-4xl max-h-[85vh]' : 'max-w-3xl max-h-[80vh]'}`}
             >
                 {/* Header */}
                 <div className="px-6 py-4 border-b border-[#303030] flex items-center justify-between bg-[#141414]">

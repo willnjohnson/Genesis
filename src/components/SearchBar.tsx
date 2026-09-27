@@ -1,4 +1,4 @@
-import { Search, AtSign, Youtube, ListVideo, Filter, X, Lightbulb, History, Clock, Type, FileText } from 'lucide-react';
+import { Search, AtSign, ListVideo, Filter, X, Lightbulb, History, Clock, Type, FileText } from 'lucide-react';
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { addSearchHistory, getSearchHistory, getGlossaryTerms, getSearchSuggestions, type HistoryEntry } from '../api';
 import { decodeHtmlEntities } from '../lib/utils';
@@ -36,7 +36,7 @@ export type SearchFacet = 'handle' | 'channel_name' | 'playlist' | 'video' | 'ti
  * Search input with facet detection and mode-specific keyboard shortcuts. Typing (or pasting) a
  * recognizable YouTube URL/handle/video-ID/playlist-ID auto-converts the input into a facet chip
  * (see `handleInput`/`extractHandle`/`extractVideoId`/`extractPlaylistId`); `!`-prefixed shortcuts
- * switch search mode per view (`!n`/`!p` in search mode for title/playlist search, `!g`/`!d` in
+ * switch search mode per view (`!n`/`!p` in search mode for title/playlist search, `!d` in
  * glossary mode for term/definition search), and in the library `#` starts a Quick Tag search and
  * `^` a glossary term search.
  */
@@ -97,8 +97,8 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             case 'term_search': return suggestionData.terms.filter(fits).map(text => ({ text }));
             case 'handle': return suggestionData.handles.filter(h => fits(h.handle)).map(h => ({ text: h.handle, title: h.name }));
             case 'channel_name': return suggestionData.channels.filter(c => fits(c.name)).map(c => ({ text: c.name, title: c.handle ? `@${c.handle}` : undefined }));
-            // IDs are random, so a single character would only be noise.
-            case 'video': return query.length < 2 ? [] : suggestionData.videos.filter(v => fits(v.id)).map(v => ({ text: v.id, title: v.title }));
+            // IDs are case-sensitive (see caseSensitive above); a hint shows from the first character, like the other facets.
+            case 'video': return suggestionData.videos.filter(v => fits(v.id)).map(v => ({ text: v.id, title: v.title }));
             default: return [];
         }
     }, [suggestKind, query, wildcard, suggestionData]);
@@ -163,13 +163,11 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
 
     // Sync with external updates
     useEffect(() => {
-        let changed = false;
         const isFocused = document.activeElement === inputRef.current;
 
         if (!isFocused && initialQuery !== query && initialQuery.trim() !== query.trim()) {
             userActionRef.current = false;
             setQuery(initialQuery);
-            changed = true;
         }
 
         const facetsDiffer = initialFacets.length !== facets.length ||
@@ -178,7 +176,6 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         if (facetsDiffer && !isFocused) {
             userActionRef.current = false;
             setFacets(initialFacets);
-            changed = true;
         }
     }, [initialQuery, initialFacets]);
 
@@ -243,7 +240,6 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     const facetPatterns = useMemo(() => {
         const patterns: Record<string, SearchFacet> = {};
         if (isGlossary) {
-            patterns['term_search:'] = 'term_search';
             patterns['definition_search:'] = 'definition_search';
         } else if (isBiography) {
             patterns['person_search:'] = 'person_search';
@@ -355,13 +351,9 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                 }
             }
         }
-        // Glossary mode shortcuts: !g → term_search, !d → definition_search
+        // Glossary mode shortcut: !d → definition_search (there's no !g: a plain search already filters by term name,
+        // so a facet that did the same thing again would be redundant).
         if (isGlossary) {
-            if (val === '!g' || val.startsWith('!g ')) {
-                setFacets([{ type: 'term_search', value: '' }]);
-                setQuery(val.slice(2).trimStart());
-                return;
-            }
             if (val === '!d' || val.startsWith('!d ')) {
                 setFacets([{ type: 'definition_search', value: '' }]);
                 setQuery(val.slice(2).trimStart());
@@ -525,8 +517,9 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     // The order here is the order of the tips list (the lightbulb) above, so the two always read the same.
     const availableFacets = useMemo(() => {
         if (viewMode === 'glossary') {
+            // No "Term" entry: a plain search already filters by term name (see GlossaryView's filteredTerms), so a
+            // facet that did the same thing again would be redundant. Definition search is the one real addition.
             return [
-                { type: 'term_search' as const, label: 'Term (!g)' },
                 { type: 'definition_search' as const, label: 'Definition (!d)' },
             ];
         }
@@ -678,10 +671,6 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                         <div className="grid grid-cols-1 gap-1.5 pt-1 text-[11px]">
                                             {isGlossary ? (
                                                 <>
-                                                    <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
-                                                        <span>term_search:</span>
-                                                        <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!g</span>/ Term Filter</span>
-                                                    </code>
                                                     <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                         <span>definition_search:</span>
                                                         <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!d</span>/ Definition Filter</span>

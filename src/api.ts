@@ -66,7 +66,7 @@ export interface DisplaySettings {
     fullscreen: boolean;
     theme: string;
     videoListMode: 'grid' | 'compact';
-    navigationOrientation: 'horizontal' | 'vertical';
+    navigationOrientation: 'horizontal' | 'vertical' | 'titlebar';
 }
 
 export interface HistoryEntry {
@@ -473,6 +473,8 @@ export type TrashKind = 'video' | 'glossary';
 export interface TrashEntry {
     id: number;
     kind: TrashKind;
+    /** What makes two deletions "the same thing": a video's id, or a term with its Drives. */
+    key: string;
     label: string;
     detail: string;
     /** Milliseconds since the epoch. */
@@ -481,6 +483,9 @@ export interface TrashEntry {
 
 /** Fired on `window` whenever the Trash changes, so every place that shows it can refresh. */
 export const TRASH_CHANGED_EVENT = 'kinesis-trash-changed';
+/** Fired (with the kind as its `detail`) when something is put back from a place other than the Trash window, so the
+ *  section that shows that kind of item can reload. */
+export const TRASH_RESTORED_EVENT = 'kinesis-trash-restored';
 function notifyTrashChanged() {
     window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
 }
@@ -686,6 +691,11 @@ export async function addAttachments(videoId: string, paths: string[]): Promise<
  *  attachment whose `ext` is "url". Only http and https addresses are accepted; the reason is thrown otherwise. */
 export async function addAttachmentLink(videoId: string, title: string, url: string): Promise<AttachmentInfo> {
     return await invoke("add_attachment_link", { videoId, title, url });
+}
+
+/** Renames a link and/or changes its address after it was added. Validated exactly like a new one. */
+export async function updateAttachmentLink(id: number, title: string, url: string): Promise<AttachmentInfo> {
+    return await invoke("update_attachment_link", { id, title, url });
 }
 
 /** A link attachment's address, checked again on the way out. Shown to the user before it's opened. */
@@ -1344,4 +1354,10 @@ export async function hideQuickAdd(): Promise<void> {
 /** Brings the main window to the front (from the popup): out of the tray, restored, or just focused. */
 export async function showMainWindow(): Promise<void> {
     await invoke("show_main_window");
+}
+
+/** Shows the window's system menu (Restore, Move, Size, Minimize, Maximize, Close) at the pointer, where the platform
+ *  has one (Windows). False if it didn't, so the caller draws its own. */
+export async function showSystemMenu(): Promise<boolean> {
+    return invoke<boolean>("show_system_menu");
 }

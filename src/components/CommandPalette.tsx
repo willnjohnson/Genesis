@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ElementType } from 'react';
-import { BookA, FileText, HardDrive, Search, UserSearch, Video as VideoIcon } from 'lucide-react';
-import { decodeWdbs, getBiographies, getGlossaryTerms, getWdbsTree, searchLibrary, type BiographyEntry, type Video, type WdbsNode } from '../api';
+import { BookA, FileText, HardDrive, Search, Trash2, UserSearch, Video as VideoIcon } from 'lucide-react';
+import { decodeWdbs, getBiographies, getGlossaryTerms, getVideoById, getWdbsTree, searchLibrary, type BiographyEntry, type Video, type WdbsNode } from '../api';
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { driveSegmentLabel, normalizeText } from '../lib/utils';
+import { clearRecents, forgetRecent, loadRecents, type Recent } from '../lib/recents';
 
 /** One action the palette can run: going to a section, opening Settings, switching the layout... */
 export interface PaletteCommand {
@@ -44,7 +45,7 @@ interface Item {
 const MAX_WIDTH = 640;
 
 // How many of each kind to list, so no one kind crowds the rest out.
-const LIMITS = { commands: 10, drives: 5, terms: 5, people: 5, videos: 8 };
+const LIMITS = { commands: 10, drives: 5, terms: 5, people: 5, videos: 8, recents: 6 };
 
 function flattenDrives(nodes: WdbsNode[], out: WdbsNode[] = []): WdbsNode[] {
     for (const n of nodes) {
@@ -90,6 +91,8 @@ export function CommandPalette({ open, onClose, commands, onOpenVideo, onOpenDri
     const [terms, setTerms] = useState<string[]>([]);
     const [people, setPeople] = useState<BiographyEntry[]>([]);
     const [videos, setVideos] = useState<Video[]>([]);
+    // What was opened lately, listed first while nothing is typed.
+    const [recents, setRecents] = useState<Recent[]>([]);
     const inputRef = useRef<HTMLInputElement>(null);
     // Where the search bar on the page sits, so the palette can open right over it: the same top edge,
     // centered on it, and as wide as it up to MAX_WIDTH (null when there isn't one: it's then centered
@@ -104,6 +107,7 @@ export function CommandPalette({ open, onClose, commands, onOpenVideo, onOpenDri
         setSelected(0);
         setVideos([]);
         let cancelled = false;
+        loadRecents().then(list => { if (!cancelled) setRecents(list); });
         if (flags.showDrive) getWdbsTree().then(t => { if (!cancelled) setDrives(flattenDrives(t)); }).catch(() => {});
         if (flags.showGlossary) {
             getGlossaryTerms().then(rows => {
@@ -147,6 +151,28 @@ export function CommandPalette({ open, onClose, commands, onOpenVideo, onOpenDri
 
     const items = useMemo<Item[]>(() => {
         const out: Item[] = [];
+        if (tokens.length === 0) {
+            // Only what this workspace still shows: a hidden section's items can't be opened.
+            const shown = recents.filter(r => r.kind === 'video' ? flags.viewVisible.library : r.kind === 'term' ? flags.showGlossary : r.kind === 'bio' ? flags.showBiography : flags.showDrive);
+            for (const r of shown.slice(0, LIMITS.recents)) {
+                const open = () => {
+                    if (r.kind === 'video') {
+                        // Fetched again, so it opens as it is now (and a video since deleted drops off the list).
+                        getVideoById(r.key).then(v => { if (v) onOpenVideo(v); else void forgetRecent('video', r.key); }).catch(() => {});
+                    } else if (r.kind === 'term') onOpenTerm(r.key);
+                    else if (r.kind === 'bio') onOpenBio(r.key);
+                    else onOpenDrive(r.key, r.label, r.alias ?? null);
+                };
+                out.push({
+                    key: `recent:${r.kind}:${r.key}`, group: 'Recent', label: r.label, sub: r.sub, run: open,
+                    icon: r.kind === 'video' ? (r.thumb ? VideoIcon : FileText) : r.kind === 'term' ? BookA : r.kind === 'bio' ? UserSearch : HardDrive,
+                    thumb: r.kind === 'video' ? r.thumb : undefined,
+                });
+            }
+            if (shown.length > 0) {
+                out.push({ key: 'recent:clear', group: 'Recent', label: 'Clear recent items', icon: Trash2, run: () => { void clearRecents(); setRecents([]); } });
+            }
+        }
         let cmds: PaletteCommand[];
         if (tokens.length) {
             const found = best(commands, tokens, c => [c.label, `${c.hint ?? ''} ${c.keywords ?? ''}`], LIMITS.commands);
@@ -185,7 +211,7 @@ export function CommandPalette({ open, onClose, commands, onOpenVideo, onOpenDri
             });
         }
         return out;
-    }, [tokens, commands, drives, terms, people, videos, labels, onOpenDrive, onOpenTerm, onOpenBio, onOpenVideo]);
+    }, [tokens, commands, drives, terms, people, videos, recents, flags, labels, onOpenDrive, onOpenTerm, onOpenBio, onOpenVideo]);
 
     // Keep the highlighted row on screen (and inside the list) as the list changes.
     useEffect(() => {

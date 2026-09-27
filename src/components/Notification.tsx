@@ -69,7 +69,16 @@ export function Notification({ message, type = "info", action, onClose, duration
                     {action.label}
                 </button>
             )}
-            <button onClick={() => setIsVisible(false)} className="opacity-50 hover:opacity-100 transition-opacity ml-2 text-[#aaaaaa] cursor-pointer hover:text-white">
+            <button
+                onClick={() => {
+                    // Same as the auto-dismiss timer: fade out, then actually close (which clears the notification
+                    // state in App). Without the second half, the toast only ever looked dismissed — the same message
+                    // was still sitting in state, ready to reappear the next time anything remounted this component.
+                    setIsVisible(false);
+                    setTimeout(onClose, 300);
+                }}
+                className="opacity-50 hover:opacity-100 transition-opacity ml-2 text-[#aaaaaa] cursor-pointer hover:text-white"
+            >
                 <X className="w-4 h-4" />
             </button>
         </div>

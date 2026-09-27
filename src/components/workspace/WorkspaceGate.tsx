@@ -3,6 +3,7 @@ import { getWorkspaceStatus, type WorkspaceStatus } from "../../api";
 import { WorkspaceLauncher } from "./WorkspaceLauncher";
 import { errText, secondaryBtn } from "./helpers";
 import { revealAfterSwitch } from "../../lib/transitions";
+import { TitleBar } from "../TitleBar";
 
 /**
  * Holds the app back until a workspace is open. The backend opens the most recent one by itself at
@@ -23,15 +24,22 @@ export function WorkspaceGate({ children }: { children: ReactNode }) {
         if (status || error) revealAfterSwitch();
     }, [status, error]);
 
+    // The window has no native title bar, so the screens shown before the app (which has its own) get a plain one:
+    // drag, What's New and the window controls.
+    const bar = <div className="fixed inset-x-0 top-0 z-[300]"><TitleBar /></div>;
+
     if (error) {
         return (
-            <div className="fixed inset-0 bg-[#0f0f0f] text-white flex flex-col items-center justify-center gap-4 p-8">
+            <>
+            {bar}
+            <div style={{ top: "var(--k-titlebar-height)" }} className="fixed inset-0 bg-[#0f0f0f] text-white flex flex-col items-center justify-center gap-4 p-8">
                 <p className="text-sm text-red-400 max-w-md text-center break-words">Couldn't start: {error}</p>
                 <button onClick={() => { setError(null); setAttempt(a => a + 1); }} className={secondaryBtn}>Try again</button>
             </div>
+            </>
         );
     }
-    if (!status) return <div className="fixed inset-0 bg-[#0f0f0f]" />;
-    if (!status.current) return <WorkspaceLauncher status={status} />;
+    if (!status) return <>{bar}<div style={{ top: "var(--k-titlebar-height)" }} className="fixed inset-0 bg-[#0f0f0f]" /></>;
+    if (!status.current) return <>{bar}<WorkspaceLauncher status={status} /></>;
     return <>{children}</>;
 }

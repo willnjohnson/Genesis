@@ -2,7 +2,7 @@ import { Cpu, ArrowRight } from "lucide-react";
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-    setSetting, getSetting,
+    setSetting,
     checkOllama, checkModelPulled, pullModel, deleteModel, installOllama,
     getOllamaPrompt, setOllamaPrompt as saveOllamaPrompt,
     getKeyStatus,

@@ -40,13 +40,20 @@ export function TagVideosPreview({ videos, error, skeletonCount, onOpenVideo }: 
             {videos.map(video => {
                 const tile = (
                     <>
-                        <div className="aspect-video w-full rounded-lg overflow-hidden bg-[#272727]">
-                            <img
-                                src={video.thumbnail}
-                                alt=""
-                                loading="lazy"
-                                className={`w-full h-full object-cover ${onOpenVideo ? 'group-hover:scale-105 transition-transform duration-500' : ''}`}
-                            />
+                        {/* Like the video cards in the Library: while hovered the bottom corners square off and a line in the accent
+                            color grows along the bottom edge (the thumbnail's full width), instead of zooming the picture. */}
+                        <div className="relative">
+                            <div className={`aspect-video w-full rounded-lg ${onOpenVideo ? 'group-hover:rounded-b-none transition-[border-radius] duration-200' : ''} overflow-hidden bg-[#272727]`}>
+                                <img
+                                    src={video.thumbnail}
+                                    alt=""
+                                    loading="lazy"
+                                    className="w-full h-full object-cover"
+                                />
+                            </div>
+                            {onOpenVideo && (
+                                <div className="pointer-events-none absolute -bottom-[3px] left-0 right-0 h-0.5 bg-[var(--k-accent)] origin-center scale-x-0 group-hover:scale-x-100 transition-transform duration-200 ease-out" />
+                            )}
                         </div>
                         <div className="flex flex-col overflow-hidden text-left">
                             <span className="text-xs font-bold text-white line-clamp-2 leading-tight">{video.title}</span>

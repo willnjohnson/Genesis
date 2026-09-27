@@ -1,6 +1,6 @@
 [package]
 name = "kinesis"
-version = "0.4.7"
+version = "0.4.8"
 description = "A desktop application for saving and organizing YouTube video transcripts."
 authors = ["William N. Johnson"]
 license = "MIT"
@@ -28,6 +28,8 @@ genesis = []
 [target.'cfg(windows)'.dependencies]
 tauri = { version = "2.10.2", features = ["tray-icon"] }
 arboard = "3"
+# The window's system menu (commands/window_menu.rs); the version tauri already uses.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 tauri-build = { version = "2.5.3", features = [] }
@@ -49,6 +51,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-dialog = "2"
 tauri-plugin-localhost = "2"
+tauri-plugin-notification = "2"
 tiny_http = "0.12"
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 chrono = "0.4"

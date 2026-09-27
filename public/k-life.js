@@ -5,19 +5,27 @@
    loading after a switch reloads the window (see src/lib/transitions.ts, which shows it as the old page
    zooms away and hides it once the new one is ready).
 
+   The window has no native title bar (the app draws its own, src/components/TitleBar.tsx), and the page it lives
+   in is gone during the reload. So this screen also puts up a plain title bar of its own, above it: a place
+   to drag the window and the window buttons, in the theme's colors, the same height as the app's. It comes down
+   once the new page's own title bar is underneath it.
+
    The board wraps at its edges, like the Workspaces one. When it dies out or starts repeating it is
    seeded again with fresh cells. */
 (function () {
     var KEY = 'k-transition';
     var LOOK = 'k-transition-look';
     var LABEL = 'k-transition-label';
+    var BAR = 'k-transition-bar';
     var SIZE = 5;
     var CELL = 12; // css pixels, like the Workspaces board's
     var GAP = 3;
     var STEP_MS = 150;
     var MIN_MS = 500;
     var ALIVE = 0.3; // how strong a fully alive cell is (the Workspaces board is fainter: it's only texture there)
+    var BAR_HEIGHT = '1.75rem'; // --k-titlebar-height in index.css
     var overlay = null;
+    var bar = null;
     var timer = null;
     var shownAt = 0;
     var fallback = null;
@@ -31,7 +39,7 @@
         var el = document.createElement('div');
         el.id = 'k-life';
         el.setAttribute('aria-hidden', 'true');
-        el.style.cssText = 'position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:' + look.bg +
+        el.style.cssText = 'position:fixed;top:' + BAR_HEIGHT + ';left:0;right:0;bottom:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:' + look.bg +
             ';opacity:' + (fade ? '0' : '1') + ';transition:opacity .22s ease-out;pointer-events:all;overflow:hidden;';
         var grid = document.createElement('div');
         grid.style.cssText = 'display:grid;grid-template-columns:repeat(' + SIZE + ',' + CELL + 'px);grid-template-rows:repeat(' + SIZE + ',' + CELL + 'px);gap:' + GAP + 'px;';
@@ -52,6 +60,81 @@
             ';max-width:70vw;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
         el.appendChild(text);
         return { el: el, cells: cells };
+    }
+
+    // The window buttons go straight to the window API, the way its JavaScript package does (this runs before the app).
+    function windowCommand(name) {
+        return function () {
+            try {
+                var t = window.__TAURI_INTERNALS__;
+                t.invoke('plugin:window|' + name, { label: t.metadata.currentWindow.label });
+            } catch (e) { /* not in the app window */ }
+        };
+    }
+
+    // The app's own title bar as it was when the switch began (src/lib/transitions.ts saved it, styles written in), so
+    // the bar looks untouched through the switch. Its window buttons still work; the rest is only a picture until the
+    // new page's bar takes over. The workspace's name and switch button are hidden in it.
+    function buildSnapshotBar(snapshot, label, arriving) {
+        var el = document.createElement('div');
+        el.id = 'k-life-bar';
+        el.style.cssText = 'position:fixed;top:0;left:0;right:0;height:' + BAR_HEIGHT + ';z-index:2147483001;';
+        el.innerHTML = snapshot;
+        var buttons = el.querySelectorAll('[data-k-cmd]');
+        for (var i = 0; i < buttons.length; i++) {
+            buttons[i].addEventListener('click', windowCommand(buttons[i].getAttribute('data-k-cmd')));
+        }
+        // The workspace's name and its switch button are hidden during the switch (they stay in place, so nothing shifts);
+        // the new page's bar shows them again.
+        var hidden = el.querySelectorAll('[data-workspace-name], [data-workspace-switch]');
+        // Every copied element states its own visibility, so hiding the wrapper alone leaves what is inside showing.
+        for (var j = 0; j < hidden.length; j++) {
+            hidden[j].style.visibility = 'hidden';
+            var inner = hidden[j].querySelectorAll('*');
+            for (var m = 0; m < inner.length; m++) inner[m].style.visibility = 'hidden';
+        }
+        return el;
+    }
+
+    function buildBar(look, label, arriving) {
+        var snapshot = null;
+        try { snapshot = sessionStorage.getItem(BAR); } catch (e) { /* storage blocked */ }
+        if (snapshot) return buildSnapshotBar(snapshot, label, arriving);
+        var el = document.createElement('div');
+        el.id = 'k-life-bar';
+        el.setAttribute('data-tauri-drag-region', '');
+        el.style.cssText = 'position:fixed;top:0;left:0;right:0;height:' + BAR_HEIGHT + ';z-index:2147483001;display:flex;justify-content:flex-end;' +
+            'align-items:stretch;background:' + look.bg + ';border-bottom:1px solid rgba(128,128,128,.25);user-select:none;';
+        var NS = 'http://www.w3.org/2000/svg';
+        var icons = {
+            minimize: 'M5 12h14',
+            toggle_maximize: 'M6 6h12v12H6z',
+            close: 'M6 6l12 12M18 6L6 18'
+        };
+        ['minimize', 'toggle_maximize', 'close'].forEach(function (name) {
+            var b = document.createElement('button');
+            b.type = 'button';
+            b.style.cssText = 'width:40px;border:0;padding:0;background:transparent;cursor:pointer;color:' + look.fg + ';opacity:.6;display:flex;align-items:center;justify-content:center;';
+            var svg = document.createElementNS(NS, 'svg');
+            svg.setAttribute('viewBox', '0 0 24 24');
+            svg.setAttribute('width', '14');
+            svg.setAttribute('height', '14');
+            svg.setAttribute('fill', 'none');
+            svg.setAttribute('stroke', 'currentColor');
+            svg.setAttribute('stroke-width', '2');
+            var path = document.createElementNS(NS, 'path');
+            path.setAttribute('d', icons[name]);
+            svg.appendChild(path);
+            b.appendChild(svg);
+            b.addEventListener('click', windowCommand(name));
+            b.addEventListener('mouseenter', function () {
+                b.style.opacity = '1';
+                b.style.background = name === 'close' ? look.accent : 'rgba(128,128,128,.2)';
+            });
+            b.addEventListener('mouseleave', function () { b.style.opacity = '.6'; b.style.background = 'transparent'; });
+            el.appendChild(b);
+        });
+        return el;
     }
 
     function seed() {
@@ -126,6 +209,8 @@
         if (overlay) return;
         // No scrollbars while the page zooms about and reloads (see .k-switching in index.css).
         html.classList.add('k-switching');
+        // The page's own title bar stays hidden while the screen's copy of it is up (see index.css).
+        html.classList.add('k-bar-swap');
         var style = getComputedStyle(html);
         var look = {
             bg: (style.getPropertyValue('--k-bg') || '').trim(),
@@ -145,6 +230,8 @@
         var built = build(look, fade, label || 'Loading workspace');
         overlay = built.el;
         html.appendChild(overlay);
+        bar = buildBar(look, label || 'Loading workspace', !remember);
+        html.appendChild(bar);
         shownAt = Date.now();
         run(built.cells, look);
         if (fade) {
@@ -167,7 +254,13 @@
                 if (el.parentNode) el.parentNode.removeChild(el);
                 if (overlay === el) overlay = null;
                 // The new page's zoom-in (about 0.4s) is under way; keep scrollbars away until it's done.
-                setTimeout(function () { html.classList.remove('k-switching'); }, 450);
+                setTimeout(function () {
+                    html.classList.remove('k-switching');
+                    html.classList.remove('k-bar-swap');
+                    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+                    bar = null;
+                    try { sessionStorage.removeItem(BAR); } catch (e) { /* storage blocked */ }
+                }, 450);
             }, 260);
         }, wait);
     }

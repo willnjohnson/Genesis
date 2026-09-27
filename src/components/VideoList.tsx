@@ -1,5 +1,5 @@
-import { Save, Trash2, Bookmark, ArrowDown, ArrowUp, Calendar, Users, Sparkles, FileText, ListVideo } from 'lucide-react';
-import { type Video } from '../api';
+import { Save, Trash2, Bookmark, ArrowDown, ArrowUp, Calendar, Users, Sparkles, FileText, ListVideo, PanelRightOpen, ExternalLink, Link2, Quote, Download } from 'lucide-react';
+import { getSummary, getTranscript, openExternalUrl, type Video } from '../api';
 import { useState, useMemo, useRef, useEffect, useLayoutEffect, useCallback, type RefObject } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { format } from 'date-fns';
@@ -8,6 +8,7 @@ import { useFlags } from '../hooks/useFlags';
 import { BottomBar } from './BottomBar';
 import { TrashChip } from './TrashChip';
 import { LifeLoader } from './LifeLoader';
+import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 
 // Mirrors the Tailwind breakpoints used by the grid className below (sm/md/lg/xl/2xl at
 // Tailwind's default 640/768/1024/1280/1536px) so the virtualizer knows how many cards land in
@@ -751,30 +752,70 @@ interface VideoCardProps {
 }
 
 function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowDeletion, onSaveImageAs, bulkAssignMode = false, selected = false, onToggleSelect, onBulkContextMenu }: VideoCardProps) {
+    const { flags } = useFlags();
+    // Right-clicking a card opens a menu of what can be done with the video (in Bulk Assign Mode it opens that mode's
+    // menu instead). Saving the thumbnail, which a right-click on the picture used to do by itself, is one of its entries.
+    const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+    // A video with no thumbnail, or one that didn't load (a removed video's address answers with a tiny 120x90 gray
+    // placeholder, which counts as broken), has no picture to save, so the menu leaves out "Save thumbnail as…".
+    const [noThumbnail, setNoThumbnail] = useState(!video.thumbnail);
+    const checkThumbnail = (img: HTMLImageElement) => {
+        if (!img.complete) return;
+        if (img.naturalWidth === 0 || (img.naturalWidth === 120 && img.naturalHeight === 90)) setNoThumbnail(true);
+    };
+    const url = `https://www.youtube.com/watch?v=${video.id}`;
+    const copy = (text: string) => { navigator.clipboard?.writeText(text).catch(() => {}); };
+    const citation = apaCitation(video, url);
+    const menuItems: ContextMenuItem[] = [
+        { label: 'Open', icon: PanelRightOpen, onClick: () => onSelect(video) },
+        // Resting the pointer on these shows the start of the text beside the menu.
+        ...(onSelectWithTab && video.hasTranscript ? [{
+            label: 'Open Transcript', icon: FileText, onClick: () => onSelectWithTab(video, 'transcript'),
+            peek: { title: 'Transcript', load: async () => usableText(await getTranscript(video.id)) },
+        }] : []),
+        ...(onSelectWithTab && video.hasSummary ? [{
+            label: 'Open Summary', icon: Sparkles, onClick: () => onSelectWithTab(video, 'summary'),
+            peek: { title: 'Summary', load: async () => usableText(await getSummary(video.id)) },
+        }] : []),
+        ...(flags.showOpenInYouTube ? [{ label: 'Open in YouTube', icon: ExternalLink, onClick: () => { void openExternalUrl(url); } }] : []),
+        { label: 'Copy link', icon: Link2, onClick: () => copy(url), divider: true },
+        { label: 'Copy citation', icon: Quote, onClick: () => copy(citation) },
+        { label: 'Copy as Markdown link', icon: Link2, onClick: () => copy(`[${video.title.replace(/[[\]]/g, '')}](${url})`) },
+        ...(noThumbnail ? [] : [{ label: 'Save thumbnail as…', icon: Download, onClick: () => onSaveImageAs(video.thumbnail) }]),
+        ...(onDelete && allowDeletion ? [{ label: 'Delete', icon: Trash2, onClick: () => onDelete(video), danger: true, divider: true }] : []),
+    ];
     return (
         <div
             className={`group flex flex-col gap-2 cursor-pointer rounded-lg transition-all ${selected ? 'ring-2 ring-[var(--k-accent)] ring-offset-2 ring-offset-[var(--k-bg)]' : ''}`}
             onClick={(e) => bulkAssignMode ? onToggleSelect?.(e) : onSelect(video)}
-            onContextMenu={bulkAssignMode ? (e) => { e.preventDefault(); onBulkContextMenu?.(e.clientX, e.clientY); } : undefined}
+            onContextMenu={(e) => {
+                e.preventDefault();
+                // Stopped here so the app-wide "right-click a picture to save it" doesn't also run.
+                e.stopPropagation();
+                if (bulkAssignMode) onBulkContextMenu?.(e.clientX, e.clientY);
+                else setMenu({ x: e.clientX, y: e.clientY });
+            }}
         >
-            <div className={`${compact ? 'aspect-[16/9]' : 'aspect-video'} w-full rounded-lg overflow-hidden bg-[#272727] relative`}>
+            {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />}
+            <div className="relative">
+            <div className={`${compact ? 'aspect-[16/9]' : 'aspect-video'} w-full rounded-lg group-hover:rounded-b-none transition-[border-radius] duration-200 overflow-hidden bg-[#272727] relative`}>
                 {bulkAssignMode && (
                     <div className={`absolute inset-0 z-10 transition-colors ${selected ? 'bg-[color-mix(in_srgb,var(--k-accent)_25%,transparent)]' : 'bg-black/0 group-hover:bg-black/10'}`} />
                 )}
                 <img
                     src={video.thumbnail}
                     alt={video.title}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                    className="w-full h-full object-cover"
                     loading="lazy"
-                    // Left unattached (rather than attached-but-no-op) in bulk mode so the event
-                    // bubbles untouched to the card's own onContextMenu above, instead of this
-                    // handler's e.stopPropagation() intercepting it.
-                    onContextMenu={bulkAssignMode ? undefined : (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        onSaveImageAs(video.thumbnail);
-                    }}
+                    ref={(el) => { if (el) checkThumbnail(el); }}
+                    onLoad={(e) => checkThumbnail(e.currentTarget)}
+                    onError={() => setNoThumbnail(true)}
                 />
+            </div>
+            {/* Instead of zooming the thumbnail, hovering the card draws a line in the theme's accent color along its bottom edge,
+                touching it and the thumbnail's full width: the thumbnail's bottom corners square off while hovered so the line
+                meets them cleanly. It grows out from the middle. */}
+            <div className="pointer-events-none absolute -bottom-[3px] left-0 right-0 h-0.5 bg-[var(--k-accent)] origin-center scale-x-0 group-hover:scale-x-100 transition-transform duration-200 ease-out" />
             </div>
 
             <div className="flex gap-2 relative">
@@ -867,6 +908,31 @@ function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowD
             </div>
         </div>
     );
+}
+
+/** A stored date as a Date: an ISO date, or a Unix timestamp in seconds or milliseconds. Null if it isn't a date at all. */
+function parseStoredDate(value?: string): Date | null {
+    if (!value) return null;
+    const v = value.trim();
+    const d = /^\d{9,13}$/.test(v) ? new Date(v.length <= 10 ? Number(v) * 1000 : Number(v)) : new Date(v);
+    return isNaN(d.getTime()) ? null : d;
+}
+
+/** The video as an APA-style reference: `Author. (2024, March 5). Title [Video]. YouTube. URL`. With no known date it says
+ *  (n.d.), and with no author it starts with the title. */
+function apaCitation(video: Video, url: string): string {
+    const d = parseStoredDate(video.publishedAt);
+    const date = `(${d ? format(d, 'yyyy, MMMM d') : 'n.d.'})`;
+    const title = `${video.title} [Video]`;
+    return video.author
+        ? `${video.author}. ${date}. ${title}. YouTube. ${url}`
+        : `${title}. ${date}. YouTube. ${url}`;
+}
+
+/** A transcript or summary as preview text: null when there is nothing real in it (empty, or the "NA" or "." a cleared transcript holds). */
+function usableText(text: string | null | undefined): string | null {
+    const t = text?.trim() ?? '';
+    return t === '' || t === '.' || t.toUpperCase() === 'NA' || t.toUpperCase() === 'N/A' ? null : t;
 }
 
 function formatDate(dateStr: string) {

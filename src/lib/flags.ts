@@ -62,9 +62,16 @@ export const FLAG_DEFAULTS = {
     allowEditVideosInSequenceList: true,
     showCustomPrompt: true,
     setTranscriptAfterSummarizeToNA: false,
+    // Ask before editing a transcript, since summarizing later may clear it to N/A (only asked where the workspace clears
+    // transcripts after summarizing: setTranscriptAfterSummarizeToNA). On by default; turning it off (Settings > Workspace >
+    // Permissions) asks for a second confirmation. Read-only turns editing off, so it is greyed out then.
+    confirmBeforeEditingTranscript: true,
     // AI summarize and image tools
     showSummarizeButton: false,
-    showSummarizeOllama: true,
+    // Off by default: Ollama needs a local install the average user won't have, so it's meant for a technical
+    // person to opt into (edit the database or a sync server's policy), not a checkbox in Settings — there isn't
+    // one, and none should be added.
+    showSummarizeOllama: false,
     showSummarizeVenice: true,
     showSynthesizeVenice: true,
     showSynthesizePixabay: true,
@@ -118,9 +125,10 @@ const VIEW_ORDER: ViewName[] = ['search', 'library', 'glossary', 'biography'];
 // sync, DB location, Ollama setup, custom prompts, custom themes).
 export const READ_ONLY_OVERRIDE_KEYS: readonly FlagKey[] = [
     'allowClearHistory', 'allowSaveToLibrary', 'allowSaveAll', 'allowDeletionLibrary', 'allowSummarizeAll',
-    'editAttachments', 'allowEditTermsAndTags', 'allowEditSummary', 'allowEditTranscript', 'allowEditTranscriptOnNA',
+    'editAttachments', 'allowEditTermsAndTags', 'allowEditSummary', 'allowEditTranscript',
     'allowEditWDBS', 'allowEditDriveLinking', 'allowEditSequences', 'allowEditVideosInSequenceList',
-    'allowModificationGlossary', 'allowEditBio',
+    // Last: it sits just above the "Confirm Before ..." rows in Settings, next to the transcript question they end with.
+    'allowModificationGlossary', 'allowEditBio', 'allowEditTranscriptOnNA',
 ];
 
 export function parseBool(value: string | null | undefined, fallback: boolean): boolean {
