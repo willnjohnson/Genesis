@@ -21,8 +21,15 @@ export function VeniceApiPanel() {
     const [modelInput, setModelInput] = useState("");
     const [modelSaved, setModelSaved] = useState(false);
     const [modelBusy, setModelBusy] = useState(false);
+    // Seeded true/false respectively at DB init (see schema.rs), so a missing row shouldn't
+    // normally happen — the ?? fallback just keeps a stale/pre-migration database from reading as
+    // unset instead of its documented default.
+    const [stripQuotes, setStripQuotes] = useState<boolean | null>(null);
+    const [stripEmojis, setStripEmojis] = useState<boolean | null>(null);
     const isLocked = useLockedSettings();
     const modelLocked = isLocked("venice_model");
+    const stripQuotesLocked = isLocked("stripQuoteblockQuotes");
+    const stripEmojisLocked = isLocked("stripHeaderEmojis");
 
     useEffect(() => {
         getKeyStatus().then(setKeyStatus).catch(() => {});
@@ -33,7 +40,19 @@ export function VeniceApiPanel() {
             setModel(resolved);
             setModelInput(resolved);
         });
+        getSetting("stripQuoteblockQuotes").then(v => setStripQuotes(v == null ? true : v === "true"));
+        getSetting("stripHeaderEmojis").then(v => setStripEmojis(v === "true"));
     }, []);
+
+    const toggle = async (key: "stripQuoteblockQuotes" | "stripHeaderEmojis", next: boolean, apply: (v: boolean) => void) => {
+        apply(next); // Shown at once; reverted below if the write fails.
+        try {
+            await setSetting(key, next.toString());
+        } catch {
+            apply(!next);
+            alert(`Failed to save "${key}".`);
+        }
+    };
 
     const saveModel = async () => {
         const next = modelInput.trim() || DEFAULT_VENICE_MODEL;
@@ -120,6 +139,53 @@ export function VeniceApiPanel() {
                 dirty={promptDirty}
                 hint={<TooltipLightbulb />}
             />
+
+            <div className="bg-black/20 p-4 rounded-lg border border-[#303030]">
+                <div className="flex items-center gap-2 mb-3">
+                    <span className="text-xs font-bold text-white">Post-Processing Options</span>
+                </div>
+                <p className="text-[10px] text-[#aaaaaa] mb-3">
+                    Applied once, right when Venice generates a summary.
+                </p>
+                <div className="space-y-3">
+                    <label
+                        className={`flex items-start gap-3 ${stripQuotesLocked ? 'opacity-50' : 'cursor-pointer'}`}
+                        title={stripQuotesLocked ? LOCKED_TITLE : undefined}
+                    >
+                        <input
+                            type="checkbox"
+                            checked={stripQuotes ?? true}
+                            disabled={stripQuotesLocked || stripQuotes === null}
+                            onChange={(e) => void toggle("stripQuoteblockQuotes", e.target.checked, setStripQuotes)}
+                            className="mt-0.5 shrink-0 cursor-pointer"
+                        />
+                        <span>
+                            <span className="block text-xs font-bold text-white">Strip extra quotes in quoteblocks</span>
+                            <span className="block text-[11px] text-[#888888] mt-0.5 leading-relaxed">
+                                A markdown quoteblock already shows by default its content as quoted, so strip any quotes that Venice tries to insert.
+                            </span>
+                        </span>
+                    </label>
+                    <label
+                        className={`flex items-start gap-3 ${stripEmojisLocked ? 'opacity-50' : 'cursor-pointer'}`}
+                        title={stripEmojisLocked ? LOCKED_TITLE : undefined}
+                    >
+                        <input
+                            type="checkbox"
+                            checked={stripEmojis ?? false}
+                            disabled={stripEmojisLocked || stripEmojis === null}
+                            onChange={(e) => void toggle("stripHeaderEmojis", e.target.checked, setStripEmojis)}
+                            className="mt-0.5 shrink-0 cursor-pointer"
+                        />
+                        <span>
+                            <span className="block text-xs font-bold text-white">Strip leading emojis</span>
+                            <span className="block text-[11px] text-[#888888] mt-0.5 leading-relaxed">
+                                Removes a leading emoji from headers, paragraphs, list items, and quoteblocks. Leaves emojis in the middle/end of a line alone.
+                            </span>
+                        </span>
+                    </label>
+                </div>
+            </div>
         </div>
     );
 }

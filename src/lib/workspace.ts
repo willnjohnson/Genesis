@@ -6,7 +6,7 @@
 // One `{ key, default, max, ... },` per line. Keep this block simple: the Rust test parses it.
 export const LABEL_DEFS = [
     { key: 'workspaceName', default: 'New Workspace', max: 64, title: 'Workspace name', hint: 'Shown in exports and file names.' },
-    { key: 'aliasDriveName', default: 'Drive', max: 18, title: 'Drive', hint: 'The category tree, e.g. Directory.' },
+    { key: 'aliasDriveName', default: 'Drive', max: 18, title: 'Drive', hint: 'The workspace drive-based structure, e.g. Directory.' },
     { key: 'aliasSearch', default: 'Search', max: 18, title: 'Search', hint: 'e.g. Lookup.' },
     { key: 'aliasLibrary', default: 'Library', max: 18, title: 'Library', hint: 'Saved videos, e.g. Lab.' },
     { key: 'aliasGlossary', default: 'Glossary', max: 18, title: 'Glossary', hint: 'e.g. Thesaurus.' },

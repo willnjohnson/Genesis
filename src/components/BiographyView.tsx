@@ -14,7 +14,7 @@ import { getBiographies, updateBiography, type BiographyEntry, fetchChannelVideo
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { normalizeText, driveSegmentLabel } from '../lib/utils';
-import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
+import { handleMarkdownKeyDown, handleMarkdownContextMenu, handlePlainContextMenu } from '../lib/markdown-editor';
 
 type EditableBiography = BiographyEntry | null;
 type SocialTab = 'wikipedia' | 'website' | 'twitter' | 'instagram' | 'facebook' | 'threads' | 'youtube' | 'tiktok' | 'twitch' | 'reddit' | 'discord';
@@ -437,6 +437,7 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
                                     type="text"
                                     value={editing ? (editing[activeSocialTab] || '') : ''}
                                     onChange={(e) => setEditing({ ...editing, [activeSocialTab]: e.target.value })}
+                                    onContextMenu={handlePlainContextMenu}
                                     className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all placeholder-gray-600"
                                     placeholder={socialTabConfig[activeSocialTab].placeholder}
                                 />

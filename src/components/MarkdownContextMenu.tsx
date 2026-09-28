@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { ElementType } from 'react';
+import type { ElementType, ReactNode } from 'react';
 import {
     Bold, ClipboardPaste, Code, Copy, Highlighter, Image as ImageIcon, Italic, Link, Link2, List, ListChecks,
     ListOrdered, Minus, Quote, RemoveFormatting, Scissors, Strikethrough, Table,
@@ -9,6 +9,7 @@ import {
     type MarkdownAction, type MarkdownMenuRequest,
 } from '../lib/markdown-editor';
 import { stripMarkdownFormatting } from '../lib/markdown-format';
+import { readClipboardText } from '../api';
 
 const mod = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform) ? '⌘' : 'Ctrl+';
 const shift = mod === '⌘' ? '⇧' : 'Shift+';
@@ -24,7 +25,8 @@ const INLINE: { action: MarkdownAction; label: string; hint: string; Icon: Eleme
 ];
 const HEADINGS = [1, 2, 3, 4, 5, 6];
 
-type Row = { label: string; hint: string; Icon: ElementType; run: (t: HTMLTextAreaElement) => void };
+type Field = HTMLTextAreaElement | HTMLInputElement;
+type Row<T extends Field = HTMLTextAreaElement> = { label: string; hint: string; Icon: ElementType; run: (t: T) => void };
 const act = (label: string, hint: string, Icon: ElementType, action: MarkdownAction): Row => ({
     label, hint, Icon, run: (t) => applyMarkdownAction(t, action),
 });
@@ -39,15 +41,16 @@ const TASKS = act('Task list', `${mod}T`, ListChecks, 'taskList');
 const TABLE = act('Table', `${mod}${shift}T`, Table, 'table');
 const RULE = act('Horizontal rule', `${mod}${shift}H`, Minus, 'horizontalRule');
 const CLEAR = act('Clear formatting', '', RemoveFormatting, 'clearFormatting');
-const CUT: Row = { label: 'Cut', hint: `${mod}X`, Icon: Scissors, run: () => { document.execCommand('cut'); } };
-const COPY: Row = { label: 'Copy', hint: `${mod}C`, Icon: Copy, run: () => { document.execCommand('copy'); } };
-// Reads the clipboard the way the page is allowed to; if the webview refuses, nothing is pasted (Ctrl+V still works).
-const PASTE: Row = {
+const CUT: Row<Field> = { label: 'Cut', hint: `${mod}X`, Icon: Scissors, run: () => { document.execCommand('cut'); } };
+const COPY: Row<Field> = { label: 'Copy', hint: `${mod}C`, Icon: Copy, run: () => { document.execCommand('copy'); } };
+// Reads the clipboard through the app, not navigator.clipboard (which makes the webview ask the user for permission).
+// If it can't be read, nothing is pasted (Ctrl+V still works).
+const PASTE: Row<Field> = {
     label: 'Paste', hint: `${mod}V`, Icon: ClipboardPaste,
     run: (t) => {
-        navigator.clipboard?.readText()
+        readClipboardText()
             .then(text => { if (text) { t.focus(); document.execCommand('insertText', false, text); } })
-            .catch(() => { /* not allowed here */ });
+            .catch(() => { /* couldn't read it */ });
     },
 };
 
@@ -55,8 +58,9 @@ const PASTE: Row = {
  *   - Over selected text: formatting for that text. Blocks that stand on their own line (table, rule) aren't
  *     offered, "Clear formatting" only when the text has formatting to clear, and Cut/Copy/Paste at the end.
  *   - On an empty line: what can start a line (headings, lists, quote, table, rule, image, links) and Paste.
- *     There is no text to bold, so no inline formats. */
-function layoutFor(request: MarkdownMenuRequest): { inline: boolean; groups: Row[][] } {
+ *     There is no text to bold, so no inline formats.
+ *   - Plain (see plainRows): no formatting at all. */
+function layoutFor(request: MarkdownMenuRequest & { textarea: HTMLTextAreaElement }): { inline: boolean; groups: Row[][] } {
     if (request.kind === 'blank') {
         return {
             inline: false,
@@ -80,13 +84,26 @@ function layoutFor(request: MarkdownMenuRequest): { inline: boolean; groups: Row
     };
 }
 
+/** The plain menu, for a field without markdown (or a spot in a markdown one where no formatting applies): Cut and
+ *  Copy with text selected, and Paste unless the field is read-only. */
+function plainRows(request: MarkdownMenuRequest): Row<Field>[] {
+    const hasSelection = request.start !== request.end;
+    const writable = !request.textarea.readOnly;
+    return [
+        ...(hasSelection && writable ? [CUT] : []),
+        ...(hasSelection ? [COPY] : []),
+        ...(writable ? [PASTE] : []),
+    ];
+}
+
 const MENU_WIDTH = 232;
+const PLAIN_MENU_WIDTH = 180;
 const EDGE = 8;
 
 /**
  * The right-click menu in a markdown editor, over selected text or an empty line (see layoutFor for
- * what each offers). Mounted once in App; editors only ask for it (handleMarkdownContextMenu in
- * lib/markdown-editor.ts).
+ * what each offers), and the plain Cut / Copy / Paste one in other text fields. Mounted once in App; fields
+ * only ask for it (handleMarkdownContextMenu / handlePlainContextMenu in lib/markdown-editor.ts).
  */
 export function MarkdownContextMenu() {
     const [request, setRequest] = useState<MarkdownMenuRequest | null>(null);
@@ -138,32 +155,58 @@ export function MarkdownContextMenu() {
 
     if (!request) return null;
 
-    const { inline, groups } = layoutFor(request);
-    const selected = request.textarea.value.substring(request.start, request.end);
-    // Which heading (if any) the line is already, so choosing it again can remove it.
-    const currentHeading = headingLevelAt(request.textarea);
-
-    const run = (fn: (t: HTMLTextAreaElement) => void) => {
-        const { textarea, start, end } = request;
+    const run = <T extends Field>(field: T, fn: (t: T) => void) => {
+        const { start, end } = request;
         setRequest(null);
         // The click took focus off the editor; put the selection back so the action applies to it.
-        textarea.focus();
-        textarea.setSelectionRange(start, end);
-        fn(textarea);
+        field.focus();
+        field.setSelectionRange(start, end);
+        fn(field);
     };
+
+    const rowButton = <T extends Field>(field: T, row: Row<T>) => (
+        <button
+            key={row.label}
+            onClick={() => run(field, row.run)}
+            className="w-full flex items-center gap-2.5 px-3 h-8 rounded-lg text-xs text-gray-200 hover:bg-[#272727] transition-colors cursor-pointer"
+        >
+            <row.Icon className="w-3.5 h-3.5 text-[#aaaaaa] shrink-0" />
+            <span className="flex-1 text-left">{row.label}</span>
+            <span className="text-[10px] text-[#666666]">{row.hint}</span>
+        </button>
+    );
+
+    const shell = (width: number, children: ReactNode) => (
+        <div
+            ref={ref}
+            style={{ left: request.x, top: request.y, width, maxHeight: `calc(100vh - ${EDGE * 2}px)` }}
+            // Keep the editor focused while the menu is used. And keep the click to ourselves: a popover the field sits
+            // in (say, the Drive icon picker's filter) closes on a mousedown outside it, which would take the field away
+            // before Paste could reach it.
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            onContextMenu={(e) => e.preventDefault()}
+            className="fixed z-[300] overflow-y-auto bg-[#1a1a1a] border border-[#333] rounded-xl shadow-2xl p-1 animate-in fade-in duration-100"
+        >
+            {children}
+        </div>
+    );
+
+    if (request.kind === 'plain') {
+        const field = request.textarea;
+        return shell(PLAIN_MENU_WIDTH, plainRows(request).map(row => rowButton(field, row)));
+    }
+
+    const textarea = request.textarea;
+    const { inline, groups } = layoutFor(request);
+    const selected = textarea.value.substring(request.start, request.end);
+    // Which heading (if any) the line is already, so choosing it again can remove it.
+    const currentHeading = headingLevelAt(textarea);
 
     const toggleClass = (on: boolean) =>
         on ? 'bg-red-600 text-white' : 'text-[#cccccc] hover:bg-[#272727] hover:text-white';
 
-    return (
-        <div
-            ref={ref}
-            style={{ left: request.x, top: request.y, width: MENU_WIDTH, maxHeight: `calc(100vh - ${EDGE * 2}px)` }}
-            // Keep the editor focused while the menu is used.
-            onMouseDown={(e) => e.preventDefault()}
-            onContextMenu={(e) => e.preventDefault()}
-            className="fixed z-[300] overflow-y-auto bg-[#1a1a1a] border border-[#333] rounded-xl shadow-2xl p-1 animate-in fade-in duration-100"
-        >
+    return shell(MENU_WIDTH, (
+        <>
             {inline && (
                 <div className="flex gap-0.5">
                     {INLINE.map(({ action, label, hint, Icon }) => {
@@ -171,7 +214,7 @@ export function MarkdownContextMenu() {
                         return (
                             <button
                                 key={action}
-                                onClick={() => run((t) => applyMarkdownAction(t, action))}
+                                onClick={() => run(textarea, (t) => applyMarkdownAction(t, action))}
                                 title={`${label} (${hint})`}
                                 aria-label={label}
                                 aria-pressed={on}
@@ -187,7 +230,7 @@ export function MarkdownContextMenu() {
                 {HEADINGS.map(level => (
                     <button
                         key={level}
-                        onClick={() => run((t) => applyHeading(t, level))}
+                        onClick={() => run(textarea, (t) => applyHeading(t, level))}
                         title={`Heading ${level} (${alt}${level})`}
                         aria-label={`Heading ${level}`}
                         aria-pressed={currentHeading === level}
@@ -200,19 +243,9 @@ export function MarkdownContextMenu() {
             {groups.map((group, g) => (
                 <div key={g}>
                     <div className="my-1 h-px bg-[#2a2a2a]" />
-                    {group.map(row => (
-                        <button
-                            key={row.label}
-                            onClick={() => run(row.run)}
-                            className="w-full flex items-center gap-2.5 px-3 h-8 rounded-lg text-xs text-gray-200 hover:bg-[#272727] transition-colors cursor-pointer"
-                        >
-                            <row.Icon className="w-3.5 h-3.5 text-[#aaaaaa] shrink-0" />
-                            <span className="flex-1 text-left">{row.label}</span>
-                            <span className="text-[10px] text-[#666666]">{row.hint}</span>
-                        </button>
-                    ))}
+                    {group.map(row => rowButton(textarea, row))}
                 </div>
             ))}
-        </div>
-    );
+        </>
+    ));
 }

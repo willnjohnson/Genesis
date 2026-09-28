@@ -570,8 +570,10 @@ pub fn init_db(db_path: &str) -> Result<()> {
     // because a hand-maintained production database provided it) — see db/wdbs.rs's
     // ensure_wdbs_path_exists/get_wdbs_tree/set_wdbs_alias/set_wdbs_icon for what actually reads
     // and writes it. `WDBS` is the display-format path (":UAP-GERB-VVV") of one taxonomy node;
-    // `lev` its depth (1 = top-level); `WDID` its own raw segment name; `WDInfo`/`WDIcon` the
-    // curated alias/icon a user can set on it (see WdbsTreePanel.tsx's right-click menu);
+    // `lev` its depth (1 = top-level); `WDID` its own raw segment name; `WDInfo`/`WDIcon`/`WDColor`/
+    // `WDShape` the curated alias/icon/color-decoration/shape a user can set on it (see
+    // WdbsTreePanel.tsx's right-click menu — `WDShape` is the decoration's container shape, e.g.
+    // "square"/"circle"/"star"/"diamond"/"heart", empty meaning "square", the original/default look);
     // `WDDefault` mirrors the production schema's own column of the same name (unused by Kinesis
     // itself, kept only so a row shaped like this is also acceptable there).
     conn.execute(
@@ -581,6 +583,8 @@ pub fn init_db(db_path: &str) -> Result<()> {
             WDID      TEXT NOT NULL DEFAULT '',
             WDInfo    TEXT NOT NULL DEFAULT '',
             WDIcon    TEXT NOT NULL DEFAULT '',
+            WDColor   TEXT NOT NULL DEFAULT '',
+            WDShape   TEXT NOT NULL DEFAULT '',
             WDDefault INTEGER NOT NULL DEFAULT 0
         ) STRICT",
         [],
@@ -605,6 +609,23 @@ pub fn init_db(db_path: &str) -> Result<()> {
     if !column_exists(&conn, "tblWDBS", "WDIcon")? {
         conn.execute("ALTER TABLE tblWDBS ADD COLUMN WDIcon TEXT NOT NULL DEFAULT ''", [])?;
     }
+    if !column_exists(&conn, "tblWDBS", "WDColor")? {
+        conn.execute("ALTER TABLE tblWDBS ADD COLUMN WDColor TEXT NOT NULL DEFAULT ''", [])?;
+    }
+    if !column_exists(&conn, "tblWDBS", "WDShape")? {
+        conn.execute("ALTER TABLE tblWDBS ADD COLUMN WDShape TEXT NOT NULL DEFAULT ''", [])?;
+    }
+    // "star" was retired from the icon picker (db::WDBS_ICONS) once the color decoration gained
+    // its own star shape (db::WDBS_SHAPES) — having the same glyph mean two different things
+    // (an icon vs. a colored container) was confusing, and set_wdbs_icon now rejects "star"
+    // outright. Any row that already had it as its icon is converted here rather than just
+    // silently losing it: it becomes a red star color decoration instead, so the row keeps
+    // *something* recognizable rather than reverting to no decoration at all. Naturally
+    // idempotent — once converted, WDIcon is no longer 'star', so a later init_db is a no-op here.
+    conn.execute(
+        "UPDATE tblWDBS SET WDIcon = '', WDColor = 'red', WDShape = 'star' WHERE WDIcon = 'star'",
+        [],
+    )?;
 
     // Create StopWords table: common words culled out of generated FTS tokens
     conn.execute(
@@ -707,6 +728,29 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     );
 
+    // Which glossary-linked terms db::summaries::sync_terms_from_video_text itself added to a
+    // video's Videos.tags the last time it ran — real provenance, not a heuristic, so an unlinked
+    // term with no formal Glossary definition can still be told apart from a genuine hand-added
+    // Quick Tag of the same shape (Videos.tags has no such distinction of its own). Replaced
+    // wholesale on every sync to exactly what's linked now; a name a video never had linked simply
+    // never appears here.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS VideoLinkedTerms (
+            video_id TEXT NOT NULL,
+            term TEXT NOT NULL,
+            PRIMARY KEY (video_id, term)
+        ) STRICT",
+        [],
+    )?;
+    let _ = conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trgVideosAfterDEL_VideoLinkedTerms_CascadeDelete
+        AFTER DELETE ON Videos
+        BEGIN
+            DELETE FROM VideoLinkedTerms WHERE video_id = OLD.video_id;
+        END",
+        [],
+    );
+
     // Per-video notes and attachments, kept inside the database (see db/attachments.rs). Blobs are
     // content-addressed by the sha256 of the original bytes so identical files are stored once.
     conn.execute(
@@ -731,6 +775,22 @@ pub fn init_db(db_path: &str) -> Result<()> {
         [],
     )?;
     conn.execute("CREATE INDEX IF NOT EXISTS idxVideoAttachmentsVideoID ON VideoAttachments(video_id)", [])?;
+    // Manual ordering (drag-and-drop in the Attachments panel), added after the table already
+    // shipped without one — every row was shown in `id` (insertion) order until now. Backfilled by
+    // that same order, per video, so nothing visibly reshuffles the first time this runs; a file and
+    // a link can share a position value with no ambiguity, since a query always filters to one kind
+    // (files or links) before ever comparing positions (see db/attachments.rs).
+    if !column_exists(&conn, "VideoAttachments", "position")? {
+        conn.execute("ALTER TABLE VideoAttachments ADD COLUMN position INTEGER", [])?;
+        conn.execute(
+            "UPDATE VideoAttachments SET position = (
+                SELECT COUNT(*) FROM VideoAttachments b
+                WHERE b.video_id = VideoAttachments.video_id AND b.id <= VideoAttachments.id
+            )",
+            [],
+        )?;
+    }
+    conn.execute("CREATE INDEX IF NOT EXISTS idxVideoAttachmentsOrder ON VideoAttachments(video_id, position)", [])?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS VideoNotes (
             video_id TEXT PRIMARY KEY,
@@ -920,6 +980,38 @@ pub fn init_db(db_path: &str) -> Result<()> {
         super::wdbs::backfill_missing_wdbs_paths(&conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO Settings (key, value) VALUES ('migratedWdbsTaxonomyBackfill', 'true')",
+            [],
+        )?;
+    }
+
+    // One-time reconciliation for the switch to auto-detected Terms (see
+    // db::summaries::sync_terms_from_video_text): a video's Term tags now come entirely from
+    // `[Text](kinesis://glossary/Key)` links in its AI Summary, not a manually-added chip. Ongoing
+    // saves keep this in sync on their own (sync_terms_from_video_text runs inside save_summary), but
+    // a Term added by hand before this shipped, with no matching summary link, would otherwise
+    // linger forever on any video nobody happens to re-summarize — so every video gets reconciled
+    // once, right away, rather than only the next time its summary changes. Same gated-once pattern
+    // as migratedWdbsTaxonomyBackfill above.
+    let migrated_terms_from_summary: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM Settings WHERE key = 'migratedTermsFromSummaryLinks' AND value = 'true'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if migrated_terms_from_summary == 0 {
+        // Guarded the same way every other legacy-shape migration in this function is:
+        // `transcript`/`summary` are base Videos columns on any database Kinesis itself ever
+        // created, but a hand-built or deliberately minimal fixture (see this file's own WDBS
+        // migration tests, which create a bare `Videos` with only the columns their own migration
+        // under test cares about) can omit them — backfill_terms_from_summaries's unconditional
+        // `SELECT ... transcript ... summary ... FROM Videos` has no reason to expect otherwise,
+        // so it's skipped rather than failing init_db outright when they're missing.
+        if column_exists(&conn, "Videos", "transcript")? && column_exists(&conn, "Videos", "summary")? {
+            super::summaries::backfill_terms_from_summaries(&conn)?;
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO Settings (key, value) VALUES ('migratedTermsFromSummaryLinks', 'true')",
             [],
         )?;
     }
@@ -1671,6 +1763,43 @@ mod tests {
         assert_eq!(paths, vec![":UAP".to_string(), ":UAP-GERB".to_string()]);
         let changed = conn.execute("UPDATE tblWDBS SET WDInfo = 'Curated' WHERE WDBS = ':UAP-GERB'", []).unwrap();
         assert_eq!(changed, 1, "set_wdbs_alias's UPDATE must actually match the backfilled row");
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn a_row_with_the_retired_star_icon_becomes_a_red_star_color_decoration() {
+        // Simulates a tblWDBS row curated back when "star" was still a valid WDIcon choice (see
+        // db::WDBS_ICONS's own comment on why it was retired). init_db's migration should convert
+        // it in place rather than just losing the icon once WDBS_ICONS/set_wdbs_icon stop
+        // recognizing "star" at all.
+        let db_path = temp_db_path("wdbs_star_migration");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE tblWDBS (
+                    WDBS TEXT PRIMARY KEY, lev INTEGER NOT NULL DEFAULT 0, WDID TEXT NOT NULL DEFAULT '',
+                    WDInfo TEXT NOT NULL DEFAULT '', WDIcon TEXT NOT NULL DEFAULT '', WDDefault INTEGER NOT NULL DEFAULT 0
+                )",
+                [],
+            ).unwrap();
+            conn.execute("INSERT INTO tblWDBS (WDBS, lev, WDID, WDIcon) VALUES (':UAP', 1, 'UAP', 'star')", []).unwrap();
+            // A second row with an icon that was never "star" — the migration must leave it alone.
+            conn.execute("INSERT INTO tblWDBS (WDBS, lev, WDID, WDIcon) VALUES (':FIN', 1, 'FIN', 'finance')", []).unwrap();
+        }
+        init_db(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        let (icon, color, shape): (String, String, String) = conn.query_row(
+            "SELECT WDIcon, WDColor, WDShape FROM tblWDBS WHERE WDBS = ':UAP'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(icon, "");
+        assert_eq!(color, "red");
+        assert_eq!(shape, "star");
+        let untouched: String = conn.query_row(
+            "SELECT WDIcon FROM tblWDBS WHERE WDBS = ':FIN'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(untouched, "finance");
         drop(conn);
         let _ = fs::remove_file(&db_path);
     }

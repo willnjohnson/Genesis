@@ -152,10 +152,23 @@ pub async fn summarize_transcript(app: tauri::AppHandle, transcript: String, han
     }
 }
 
+/// Saves a summary and returns the video's tags afterward (comma-joined, same shape as
+/// `Video.tags` elsewhere) — `db::save_summary` syncs the Term subset of `Videos.tags` to whatever
+/// glossary links are now in the summary (see `db::summaries::sync_terms_from_video_text`), so the
+/// caller needs the result of that, not just an acknowledgement that the summary itself saved.
 #[command]
-pub async fn save_summary(app: tauri::AppHandle, video_id: String, summary: String) -> Result<(), String> {
+pub async fn save_summary(app: tauri::AppHandle, video_id: String, summary: String) -> Result<String, String> {
+    use rusqlite::OptionalExtension;
     let db_path = get_db_path(&app);
-    db::save_summary(&db_path, &video_id, &summary).map_err(|e| e.to_string())
+    db::save_summary(&db_path, &video_id, &summary).map_err(|e| e.to_string())?;
+    // A summary can be generated/saved for a video that isn't in the library yet (see Sidebar.tsx's
+    // caller): save_summary's UPDATE is then a harmless no-op with no row to read tags back from —
+    // "" rather than an error, so that stays harmless here too.
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    conn.query_row("SELECT COALESCE(tags, '') FROM Videos WHERE video_id = ?1", rusqlite::params![video_id], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())
+        .map(|tags| tags.unwrap_or_default())
 }
 
 #[command]

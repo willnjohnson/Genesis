@@ -19,7 +19,8 @@ pub fn set_close_to_tray(app: tauri::AppHandle, enabled: bool) {
     global_settings::update(&app, |s| s.close_to_tray = enabled);
 }
 
-/// The text on the clipboard, if it has any (the quick-save popup fills its box from it).
+/// The text on the clipboard, if it has any (the quick-save popup fills its box from it, and the right-click menu's
+/// Paste uses it: the webview's own clipboard API asks the user for permission first).
 #[command]
 pub fn read_clipboard_text() -> Option<String> {
     #[cfg(windows)]

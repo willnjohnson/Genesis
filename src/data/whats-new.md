@@ -1,3 +1,32 @@
+# Changelog (v0.4.9)
+
+## Added
+
+### Glossary & Terms
+
+* **Auto-Detected Terms**: Terms are now detected automatically from glossary links in the Transcript and AI Summary, not added by hand.
+* **Jump to a Term**: Clicking a term jumps to and highlights it in the text.
+* **Split Library Search**: Search a term's mentions everywhere, or only where it's glossary-linked, each with a live result count.
+* **New Search Facet, Untagged (`!#`)**: Find videos with no tags. `!#keyword` narrows further.
+
+### Drives
+
+* **Color Decoration**: Right-click a Drive in the tree and choose "Edit Color Decoration" to mark it with a colored chip, in a choice of 7 colors.
+
+### Reordering
+
+* **Drag-and-Drop**: Reorder Drive Sequences and Attachments by dragging a row to a new spot.
+
+## Improved
+
+### Sidebar
+
+* **Unsaved Changes Warning**: Leaving the sidebar with an unsaved edit now asks first, instead of silently losing it.
+
+### Venice AI
+
+* **Post-Processing Options** (Settings » API Key » Venice): toggle stripping quote marks from quoteblocks and leading emojis from headers, paragraphs, list items and quoteblocks.
+
 # Changelog (v0.4.8)
 
 ## Added

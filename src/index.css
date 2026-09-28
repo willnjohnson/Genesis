@@ -53,6 +53,20 @@
 
     --k-warning: #fb923c; --k-scrollbar-thumb: #717171; --k-scrollbar-thumb-hover: #aaaaaa;
 
+    /* Warp Drive color decoration (WdbsTreePanel.tsx's "Edit Color Decoration") — a fixed, named
+       palette independent of the active theme's own palette above, so it stays recognizable no
+       matter which theme is picked. NOT re-derived per custom theme the way the tokenized block
+       above is: these are dark-scheme (bright, for contrast on a dark surface) defaults, overridden
+       for any light-scheme theme below (search "not tokenized"), exactly like the handful of other
+       rules this file already keeps gated on plain `.dark` presence rather than a specific palette. */
+    --k-drive-red: #f87171; --k-drive-yellow: #facc15; --k-drive-green: #4ade80;
+    --k-drive-aqua: #22d3ee; --k-drive-magenta: #e879f9;
+    /* Slate Gray keeps a cool blue-gray tint at a medium-light lightness (Tailwind slate-400);
+       Charcoal is pushed a full step darker AND stripped of any hue at all (Tailwind zinc-500,
+       not zinc-400) specifically so the two don't read as the same gray at a glance — matching
+       lightness was the actual bug, not the names. */
+    --k-drive-slate-gray: #94a3b8; --k-drive-charcoal: #71717a;
+
     font-family: "Roboto", "Inter", system-ui, -apple-system, sans-serif;
     line-height: 1.5;
     font-weight: 400;
@@ -296,6 +310,17 @@ input, textarea, [contenteditable=""], [contenteditable="true"] {
     color: #333333 !important;
 }
 
+/* Warp Drive color decoration, light-scheme shades — darker/more muted than the dark-scheme
+   defaults above so each stays legible (and doesn't just look washed-out) against a light
+   surface instead of a dark one. Same fixed name, different shade; see the `:root` block above. */
+:root:not(.dark) {
+    --k-drive-red: #b91c1c; --k-drive-yellow: #a16207; --k-drive-green: #15803d;
+    --k-drive-aqua: #0e7490; --k-drive-magenta: #a21caf;
+    /* Slate Gray stays a medium blue-gray (Tailwind slate-600); Charcoal drops to a near-black,
+       fully neutral zinc-900 — unmistakably darker and warmer/plain than Slate Gray's cool tint. */
+    --k-drive-slate-gray: #475569; --k-drive-charcoal: #18181b;
+}
+
 /* ==Highlighted text== (see lib/remark-highlight.ts): a translucent yellow that reads on both the
    dark and light themes, with the text keeping its own colour. */
 mark {
@@ -531,3 +556,6 @@ html.k-switching *::-webkit-scrollbar-button { background: transparent !importan
 /* Ctrl+F in the Sidebar (sidebar/useReadFind.ts): every match, and the one being stepped to. */
 ::highlight(find-all) { background-color: rgba(250, 204, 21, 0.35); color: inherit; }
 ::highlight(find-current) { background-color: rgba(59, 130, 246, 0.75); color: #ffffff; }
+/* A Terms chip's click, jumping to that term's link in the AI Summary (Sidebar.tsx). Purple so it
+   reads as distinct from Ctrl+F's own yellow/blue, since both can in principle be visible at once. */
+::highlight(term-jump) { background-color: rgba(168, 85, 247, 0.55); color: #ffffff; }

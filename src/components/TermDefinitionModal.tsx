@@ -7,7 +7,7 @@ import { markdownUrlTransform } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
-import { getTagVideosPreview, type Video, type GlossaryTerm } from '../api';
+import { getTagVideosPreview, searchLibrary, type Video, type GlossaryTerm } from '../api';
 import { TagVideosPreview } from './TagVideosPreview';
 import { recordRecent } from '../lib/recents';
 
@@ -31,7 +31,11 @@ export function TermDefinitionModal({ term, onClose, onSearch, onOpenVideo }: Pr
     const isTerm = term.definition.trim() !== '';
     // Ctrl+K lists what was opened lately; a Quick Tag has no page to come back to.
     useEffect(() => { if (isTerm) void recordRecent({ kind: 'term', key: term.term, label: term.term }); }, [isTerm, term.term]);
-    // The two search buttons were merged into one; it stays if the DB owner left either on.
+    // For a Quick Tag, one button (showGlossarySearchByTag): there's no "general mention" search
+    // that means anything different from the exact-tag one, since a Quick Tag is never auto-detected
+    // from text the way a Term now is. For a Term, both independently toggleable: showGlossarySearchByTag
+    // is the exact `^`-facet match (only videos actually linked to this Term), showGlossarySearchInLibrary
+    // is a plain, unfaceted search for the word(s) — every video that so much as mentions it, linked or not.
     const showSearch = flags.showGlossarySearchByTag || flags.showGlossarySearchInLibrary;
 
     // A Quick Tag has nothing to read, so the modal shows the videos that carry it instead.
@@ -50,6 +54,36 @@ export function TermDefinitionModal({ term, onClose, onSearch, onOpenVideo }: Pr
             .catch(err => { if (!cancelled) setTagError(String(err)); });
         return () => { cancelled = true; };
     }, [isTerm, term.term]);
+
+    // How many videos each footer button would actually find, shown next to it (muted, so it reads
+    // as a hint rather than competing with the button itself) — a plain count query (limit 1, only
+    // `totalCount` is read) through the exact same search the button itself runs, so the number is
+    // never out of step with what clicking it shows. `null` while loading or if it fails; the button
+    // still works either way, it just shows no count yet.
+    const [linkedCount, setLinkedCount] = useState<number | null>(null);
+    useEffect(() => {
+        if (!isTerm || !flags.showGlossarySearchByTag) { setLinkedCount(null); return; }
+        let cancelled = false;
+        searchLibrary(`term_search:"${term.term}"`, { limit: 1 })
+            .then(res => { if (!cancelled) setLinkedCount(res.totalCount ?? null); })
+            .catch(() => { if (!cancelled) setLinkedCount(null); });
+        return () => { cancelled = true; };
+    }, [isTerm, term.term, flags.showGlossarySearchByTag]);
+
+    const [generalCount, setGeneralCount] = useState<number | null>(null);
+    useEffect(() => {
+        if (!isTerm || !flags.showGlossarySearchInLibrary) { setGeneralCount(null); return; }
+        let cancelled = false;
+        searchLibrary(term.term, { limit: 1 })
+            .then(res => { if (!cancelled) setGeneralCount(res.totalCount ?? null); })
+            .catch(() => { if (!cancelled) setGeneralCount(null); });
+        return () => { cancelled = true; };
+    }, [isTerm, term.term, flags.showGlossarySearchInLibrary]);
+
+    const resultsLabel = (n: number | null) => (n == null ? null : `${n.toLocaleString()} ${n === 1 ? 'result' : 'results'}`);
+    // null while the count is still loading (or failed) — a button is only ever disabled once a real
+    // 0 comes back, never just because the count hasn't arrived yet.
+    const linkedResolvedCount = isTerm ? linkedCount : (tagVideos ? tagTotal : null);
 
     return (
         <div
@@ -115,23 +149,49 @@ export function TermDefinitionModal({ term, onClose, onSearch, onOpenVideo }: Pr
                     row, so the definition/videos above stay the focus, not the controls below. */}
                 <div className="px-6 py-2 border-t border-[#303030] flex justify-between items-center gap-4 bg-[#141414]">
                     {showSearch ? (
-                        // One button for both kinds. It runs the exact Term (^) or Tag (#) search, not a free-text one.
-                        <button
-                            onClick={() => {
-                                onSearch(`"${term.term}"`, isTerm ? 'term' : 'tag');
-                                onClose();
-                            }}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-[11px] font-bold cursor-pointer border border-[#333] hover:border-[#444]"
-                        >
-                            <Search className="w-3 h-3" />
-                            Search in {labels.aliasLibrary}
-                        </button>
+                        <div className="flex items-center gap-2 flex-wrap">
+                            {flags.showGlossarySearchByTag && (
+                                // The exact facet match (Term: `^`, Quick Tag: `#`) — quoted, since that's
+                                // how the facet parser (parse_search_facets) delimits a multi-word value.
+                                <button
+                                    onClick={() => {
+                                        onSearch(`"${term.term}"`, isTerm ? 'term' : 'tag');
+                                        onClose();
+                                    }}
+                                    disabled={linkedResolvedCount === 0}
+                                    title={linkedResolvedCount === 0 ? 'No videos are linked to this yet.' : undefined}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-[11px] font-bold cursor-pointer border border-[#333] hover:border-[#444] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#222] disabled:hover:border-[#333]"
+                                >
+                                    <Search className="w-3 h-3" />
+                                    {isTerm ? 'Search Term Where Glossary-Linked' : `Search in ${labels.aliasLibrary}`}
+                                    {resultsLabel(linkedResolvedCount) && (
+                                        <span className="font-normal text-[#888888] whitespace-nowrap">{resultsLabel(linkedResolvedCount)}</span>
+                                    )}
+                                </button>
+                            )}
+                            {/* Terms only (see the showSearch comment above) — and never quoted: unlike the
+                                facet value above, this goes through the library's own free-text search
+                                (build_fts_query), which splits on whitespace and treats a literal `"` as
+                                a character to match, not a phrase delimiter. */}
+                            {isTerm && flags.showGlossarySearchInLibrary && (
+                                <button
+                                    onClick={() => {
+                                        onSearch(term.term, 'library');
+                                        onClose();
+                                    }}
+                                    disabled={generalCount === 0}
+                                    title={generalCount === 0 ? 'No videos mention this.' : undefined}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#222] hover:bg-[#333] text-gray-200 transition-all text-[11px] font-bold cursor-pointer border border-[#333] hover:border-[#444] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#222] disabled:hover:border-[#333]"
+                                >
+                                    <Search className="w-3 h-3" />
+                                    Search Term in General
+                                    {resultsLabel(generalCount) && (
+                                        <span className="font-normal text-[#888888] whitespace-nowrap">{resultsLabel(generalCount)}</span>
+                                    )}
+                                </button>
+                            )}
+                        </div>
                     ) : <span />}
-                    {!isTerm && tagVideos && (
-                        <span className="shrink-0 px-2 py-0.5 rounded-md bg-[#222] border border-[#333] text-[10px] font-bold text-gray-300">
-                            {tagTotal.toLocaleString()} {tagTotal === 1 ? 'video' : 'videos'}
-                        </span>
-                    )}
                 </div>
             </div>
         </div>

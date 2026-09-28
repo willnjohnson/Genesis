@@ -2,7 +2,7 @@ use crate::Video;
 use rusqlite::{named_params, params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use super::search::{video_columns_sql, video_row, library_order_by, filter_kind_where, build_fts_query, parse_search_facets, glossary_tag_clause};
+use super::search::{video_columns_sql, video_row, library_order_by, filter_kind_where, build_fts_query, parse_search_facets, glossary_tag_clause, untagged_clause};
 use super::schema::table_exists;
 
 /// Ensures `display_path` (":UAP-GERB-VVV", display format — colon + hyphens) and every
@@ -137,6 +137,47 @@ pub fn set_wdbs_icon(db_path: &str, storage_path: &str, icon: &str) -> Result<()
     Ok(())
 }
 
+/// Sets (or clears, given '') the curated color decoration — tblWDBS.WDColor — for one Warp Drive
+/// taxonomy node, shown as an underline beneath its segment name in the tree (see
+/// components/WdbsTreePanel.tsx's "Edit Color Decoration" context menu). `storage_path` is a
+/// WdbsNode.path value. Validating `color` against WDBS_COLORS is commands::wdbs::set_wdbs_color's
+/// job, same trust boundary as set_wdbs_icon above. The actual shade rendered for a given color
+/// name is chosen client-side (index.css's `--k-drive-*` tokens), not stored here — this only
+/// persists which fixed name was picked, so a lighter/darker variant can keep being derived per
+/// theme without ever touching the database. A no-op when tblWDBS isn't present.
+pub fn set_wdbs_color(db_path: &str, storage_path: &str, color: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    if !table_exists(&conn, "tblWDBS")? {
+        return Ok(());
+    }
+    let display_path = storage_to_display_path(storage_path);
+    conn.execute(
+        "UPDATE tblWDBS SET WDColor = ?1 WHERE WDBS = ?2",
+        params![color.trim(), display_path],
+    )?;
+    Ok(())
+}
+
+/// Sets (or clears, given '') the curated color decoration's container shape — tblWDBS.WDShape —
+/// for one Warp Drive taxonomy node (see components/WdbsColorMenu.tsx's "Shape" row, part of the
+/// same "Edit Color Decoration" context menu as set_wdbs_color). Independent of the color itself:
+/// changing the shape never touches WDColor and vice versa, so either can be picked in any order.
+/// An empty value means "square" — the original/default look — same convention set_wdbs_icon's
+/// unset state uses. commands::wdbs::set_wdbs_shape owns validating `shape` against the fixed
+/// picker choices. A no-op when tblWDBS isn't present, for the same reason set_wdbs_alias is.
+pub fn set_wdbs_shape(db_path: &str, storage_path: &str, shape: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    if !table_exists(&conn, "tblWDBS")? {
+        return Ok(());
+    }
+    let display_path = storage_to_display_path(storage_path);
+    conn.execute(
+        "UPDATE tblWDBS SET WDShape = ?1 WHERE WDBS = ?2",
+        params![shape.trim(), display_path],
+    )?;
+    Ok(())
+}
+
 /// One node of the Warp Drive (WDBS) taxonomy tree — see components/DriveView.tsx. `path` is the
 /// storage-encoded prefix (e.g. "θψUAP_GERB") that `list_videos_by_wdbs` matches against; `count`
 /// is the number of *distinct* videos at this node and everywhere beneath it (a video reachable
@@ -158,18 +199,47 @@ pub struct WdbsNode {
     // when unset, when the running database doesn't have tblWDBS, or when the stored value
     // doesn't match any current icon (e.g. hand-edited, or a value from a since-removed choice).
     pub icon: Option<String>,
+    // The node's curated color decoration (tblWDBS.WDColor — see set_wdbs_color), one of
+    // WDBS_COLORS. `None` under the same conditions as `icon` above. The frontend picks the
+    // actual (theme-appropriate) shade for this name itself; nothing about a specific hex value
+    // is decided here.
+    pub color: Option<String>,
+    // The color decoration's container shape (tblWDBS.WDShape — see set_wdbs_shape), one of
+    // WDBS_SHAPES. `None` under the same conditions as `icon`/`color` above — the frontend treats
+    // that the same as "square" (the original/default look), so there's no separate tri-state to
+    // handle there either.
+    pub shape: Option<String>,
 }
 
 /// The fixed set of icons a Warp Drive taxonomy node's WDIcon can hold — see
 /// components/WdbsIconMenu.tsx for the matching picker UI and lucide icon per key.
 /// commands::wdbs::set_wdbs_icon rejects anything outside this list; get_wdbs_tree (below) treats
 /// a stored value outside it the same as unset, rather than surfacing a value the tree can't
-/// actually render an icon for.
+/// actually render an icon for. No "star" here on purpose — that shape lives in WDBS_SHAPES now
+/// (see schema.rs's migration converting any pre-existing star icon into a red star decoration).
 pub const WDBS_ICONS: &[&str] = &[
-    "star", "company", "person", "music", "sports", "gaming", "podcast", "fitness", "food",
+    "company", "person", "music", "sports", "gaming", "podcast", "fitness", "food",
     "news", "education", "comedy", "tech", "finance", "guides",
     "health", "privacy", "repair", "coding", "art", "reading", "project", "ai",
 ];
+
+/// The fixed set of color decorations a Warp Drive taxonomy node's WDColor can hold — see
+/// components/WdbsColorMenu.tsx for the matching picker UI. Each name maps to a light-theme and a
+/// dark-theme shade via index.css's `--k-drive-*` custom properties (see that file), not to one
+/// fixed hex value here — the whole point of going through a name rather than a color picker is
+/// that the actual shade can stay legible against whatever theme (and its `.dark`/light scheme)
+/// is currently active. commands::wdbs::set_wdbs_color rejects anything outside this list;
+/// get_wdbs_tree (below) treats a stored value outside it the same as unset.
+pub const WDBS_COLORS: &[&str] = &["red", "yellow", "green", "aqua", "magenta", "slate_gray", "charcoal"];
+
+/// The fixed set of container shapes ("markers" in the UI) a Warp Drive taxonomy node's color decoration can use — see
+/// components/WdbsColorMenu.tsx's "Markers" list and lib/wdbs-shapes.tsx for the matching picker UI
+/// and renderer per key. "square" is the original/default look — an unset/empty WDShape value is
+/// treated the same as it (see WdbsNode.shape and get_wdbs_tree below), it's listed here so it's
+/// still an explicit, selectable choice rather than only ever the fallback.
+/// commands::wdbs::set_wdbs_shape rejects anything outside this list; get_wdbs_tree treats a
+/// stored value outside it the same as unset.
+pub const WDBS_SHAPES: &[&str] = &["square", "circle", "star", "diamond", "heart"];
 
 struct TrieNode {
     video_ids: HashSet<String>,
@@ -187,6 +257,8 @@ fn build_nodes(
     prefix: &str,
     aliases: &HashMap<String, String>,
     icons: &HashMap<String, String>,
+    colors: &HashMap<String, String>,
+    shapes: &HashMap<String, String>,
 ) -> Vec<WdbsNode> {
     trie.children
         .iter()
@@ -210,13 +282,23 @@ fn build_nodes(
                 .get(&display_path)
                 .filter(|i| WDBS_ICONS.contains(&i.as_str()))
                 .cloned();
+            let color = colors
+                .get(&display_path)
+                .filter(|c| WDBS_COLORS.contains(&c.as_str()))
+                .cloned();
+            let shape = shapes
+                .get(&display_path)
+                .filter(|s| WDBS_SHAPES.contains(&s.as_str()))
+                .cloned();
             WdbsNode {
                 segment: segment.clone(),
                 count: child.video_ids.len() as i64,
-                children: build_nodes(child, &path, aliases, icons),
+                children: build_nodes(child, &path, aliases, icons, colors, shapes),
                 path,
                 alias,
                 icon,
+                color,
+                shape,
             }
         })
         // BTreeMap already yields keys in sorted order, so children come out alphabetized.
@@ -239,20 +321,24 @@ pub(crate) fn is_unassigned_sentinel(wdbs: &str) -> bool {
 pub fn get_wdbs_tree(db_path: &str) -> Result<Vec<WdbsNode>> {
     let conn = Connection::open(db_path)?;
 
-    // Curated aliases/icons (tblWDBS.WDInfo/WDIcon), each keyed by display path — both absent
-    // entirely on a database without tblWDBS, in which case every node's `alias`/`icon` just come
-    // back `None` (see build_nodes).
+    // Curated aliases/icons/colors/shapes (tblWDBS.WDInfo/WDIcon/WDColor/WDShape), each keyed by
+    // display path — all absent entirely on a database without tblWDBS, in which case every
+    // node's `alias`/`icon`/`color`/`shape` just come back `None` (see build_nodes).
     let mut aliases: HashMap<String, String> = HashMap::new();
     let mut icons: HashMap<String, String> = HashMap::new();
+    let mut colors: HashMap<String, String> = HashMap::new();
+    let mut shapes: HashMap<String, String> = HashMap::new();
     if table_exists(&conn, "tblWDBS")? {
-        let mut stmt = conn.prepare("SELECT WDBS, WDInfo, WDIcon FROM tblWDBS")?;
+        let mut stmt = conn.prepare("SELECT WDBS, WDInfo, WDIcon, WDColor, WDShape FROM tblWDBS")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?))
         })?;
         for row in rows.filter_map(|r| r.ok()) {
-            let (path, info, icon) = row;
+            let (path, info, icon, color, shape) = row;
             aliases.insert(path.clone(), info);
-            icons.insert(path, icon);
+            icons.insert(path.clone(), icon);
+            colors.insert(path.clone(), color);
+            shapes.insert(path, shape);
         }
     }
 
@@ -287,7 +373,7 @@ pub fn get_wdbs_tree(db_path: &str) -> Result<Vec<WdbsNode>> {
         node.video_ids.insert(video_id);
     }
 
-    Ok(build_nodes(&root, "", &aliases, &icons))
+    Ok(build_nodes(&root, "", &aliases, &icons, &colors, &shapes))
 }
 
 /// Pages videos belonging to one Warp Drive category: everything whose canonical WDBS, or any
@@ -324,6 +410,7 @@ pub fn list_videos_by_wdbs(
     let fts_query = build_fts_query(&facets.free_text);
     let tag_clause = glossary_tag_clause(false, facets.tag_exact, ":tag");
     let term_clause = glossary_tag_clause(true, facets.term_exact, ":term");
+    let untagged_clause = untagged_clause(facets.untagged);
     let handle_like = format!("%{handle_val}%");
     let channel_val = facets.channel.as_str();
     let channel_like = format!("%{channel_val}%");
@@ -344,7 +431,8 @@ pub fn list_videos_by_wdbs(
         "(:handle = '' OR v.handle LIKE :handle_like) AND (:channel = '' OR v.author LIKE :channel_like)
            AND (:video = '' OR v.video_id LIKE :video_like)
            AND {tag_clause}
-           AND {term_clause}"
+           AND {term_clause}
+           AND {untagged_clause}"
     );
 
     let mut videos = Vec::new();
@@ -497,6 +585,7 @@ pub fn list_unsorted_videos(
     let fts_query = build_fts_query(&facets.free_text);
     let tag_clause = glossary_tag_clause(false, facets.tag_exact, ":tag");
     let term_clause = glossary_tag_clause(true, facets.term_exact, ":term");
+    let untagged_clause = untagged_clause(facets.untagged);
     let handle_like = format!("%{handle_val}%");
     let channel_val = facets.channel.as_str();
     let channel_like = format!("%{channel_val}%");
@@ -505,7 +594,8 @@ pub fn list_unsorted_videos(
         "(:handle = '' OR v.handle LIKE :handle_like) AND (:channel = '' OR v.author LIKE :channel_like)
            AND (:video = '' OR v.video_id LIKE :video_like)
            AND {tag_clause}
-           AND {term_clause}"
+           AND {term_clause}
+           AND {untagged_clause}"
     );
 
     let mut videos = Vec::new();

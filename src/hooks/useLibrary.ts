@@ -99,6 +99,7 @@ export function useLibrary(
     const cacheGenRef = useRef(0);
     const lastNonceRef = useRef(0);
     const lastSearchRef = useRef("");
+    const lastWdbsRef = useRef<string | null>(null);
     const summaryCountLoadedRef = useRef(false);
 
     const refreshSummarizedCount = useCallback(async () => {
@@ -186,6 +187,8 @@ export function useLibrary(
         }
         const searchChanged = librarySearch !== lastSearchRef.current;
         lastSearchRef.current = librarySearch;
+        const driveChanged = wdbsFilter !== lastWdbsRef.current;
+        lastWdbsRef.current = wdbsFilter;
 
         const key = cacheKey(librarySearch, wdbsFilter, filterKind, sortField, sortOrder);
         const cached = pageCacheRef.current.get(key);
@@ -203,6 +206,13 @@ export function useLibrary(
             setLoading(false);
         } else {
             setLoading(true);
+            // Another Drive's videos left up while this one loads look like the click did nothing (or the app hung):
+            // empty the grid so VideoList shows its loading animation instead.
+            if (driveChanged) {
+                setLibraryVideos([]);
+                setTotalCount(0);
+                scrollContainerRef.current?.scrollTo({ top: 0 });
+            }
         }
 
         const load = async () => {

@@ -1,12 +1,14 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowDown, ArrowLeft, ArrowUp, ChevronDown, ChevronRight, ChevronUp, Eraser, ListOrdered, Plus, Search, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowUp, ChevronDown, ChevronRight, ChevronUp, Eraser, GripVertical, ListOrdered, Plus, Search, X } from 'lucide-react';
 import {
     addMatchingToDriveSequence, addToDriveSequence, clearDriveSequence, encodeWdbs, getChildDrives, getDriveSequence,
     getWdbsAliases, listDriveVideosForSequence, removeFromDriveSequence, setDriveSequenceOrder, type ChildDrive,
     type DriveVideo, type SequenceEntry, type SequenceSort,
 } from '../../api';
 import { ConfirmDialog } from '../ConfirmDialog';
+import { handlePlainContextMenu } from '../../lib/markdown-editor';
+import { useDragReorder, DropIndicator } from '../../hooks/useDragReorder';
 
 interface Props {
     /** The Drive's display path (":CS-DSA") the modal opens on. The header's breadcrumb (and its "More" menu) can move it to another Drive's sequence. */
@@ -134,6 +136,15 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
         [ids[index], ids[target]] = [ids[target], ids[index]];
         // Shown at once; the reload after the save settles it either way.
         setEntries(ids.map((id, i) => ({ ...entries.find(e => e.videoId === id)!, position: i + 1 })));
+        edit(() => setDriveSequenceOrder(drive, ids));
+    };
+
+    // Dragging a row directly onto another moves it straight there — the fifth video before the
+    // first in one step, not four "move up" clicks.
+    const dragReorder = useDragReorder(entries ?? [], e => e.videoId);
+    const moveTo = (newOrder: SequenceEntry[]) => {
+        const ids = newOrder.map(e => e.videoId);
+        setEntries(newOrder.map((e, i) => ({ ...e, position: i + 1 })));
         edit(() => setDriveSequenceOrder(drive, ids));
     };
 
@@ -392,8 +403,22 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                                     <ol>
                                         {entries.map((entry, i) => {
                                             const current = entry.videoId === currentVideoId;
+                                            const draggableRow = canEdit && removable && !busy;
                                             return (
-                                                <li key={entry.videoId} className={`group flex items-center gap-2 rounded-lg px-3 py-2 ${current ? 'bg-white/10' : 'hover:bg-white/5'}`}>
+                                                <li
+                                                    key={entry.videoId}
+                                                    {...(draggableRow ? dragReorder.rowProps(entry, moveTo) : {})}
+                                                    // relative: anchors DropIndicator, a floating line in the gap above/below this
+                                                    // row (not the row's own border), so it reads as "between these two rows".
+                                                    className={`group relative flex items-center gap-2 rounded-lg px-3 py-2 ${current ? 'bg-white/10' : 'hover:bg-white/5'} ${dragReorder.isDragging(entry) ? 'opacity-40' : ''}`}
+                                                >
+                                                    {draggableRow && <DropIndicator side={dragReorder.dropSide(entry)} />}
+                                                    {/* Purely a visual affordance — the whole row is the drag source/drop target, not just this icon. */}
+                                                    {/* -mr-2 cancels the row's own gap-2 right after the grip, so whatever follows sits
+                                                        snug against it instead of matching every other pair's spacing in the row. */}
+                                                    {draggableRow && (
+                                                        <GripVertical className="w-3.5 h-3.5 shrink-0 -mr-2 text-[#555555] cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-100 transition-opacity" />
+                                                    )}
                                                     <span className="w-7 shrink-0 text-right text-[11px] font-mono text-[#666666]">{i + 1}</span>
                                                     <button
                                                         onClick={() => { onOpenVideo(entry.videoId, drive); onClose(); }}
@@ -458,6 +483,7 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                                     autoFocus
                                     value={query}
                                     onChange={e => changeQuery(e.target.value)}
+                                    onContextMenu={handlePlainContextMenu}
                                     placeholder="Search by title or channel"
                                     className="w-full bg-[#121212] border border-[#333] focus:border-red-600/50 outline-none rounded-md pl-8 pr-2 py-1.5 text-xs text-white placeholder-[#555]"
                                 />

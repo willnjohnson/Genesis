@@ -194,6 +194,40 @@ pub async fn set_wdbs_icon(app: tauri::AppHandle, path: String, icon: String) ->
     db::set_wdbs_icon(&db_path, &path, icon).map_err(|e| e.to_string())
 }
 
+/// Sets (or clears, given a blank `color`) the curated color decoration for one Warp Drive
+/// taxonomy node — tblWDBS.WDColor — shown as an underline beneath its segment name in the tree
+/// (see components/WdbsTreePanel.tsx's "Edit Color Decoration" context menu). `path` is a
+/// WdbsNode.path value. Rejects anything outside db::WDBS_COLORS with a plain-language message,
+/// same boundary set_wdbs_icon enforces for icons. A no-op against a database without the
+/// production tblWDBS schema.
+#[command]
+pub async fn set_wdbs_color(app: tauri::AppHandle, path: String, color: String) -> Result<(), String> {
+    let db_path = get_db_path(&app);
+    let drive_label = db::drive_label(&db_path);
+    let color = color.trim();
+    if !color.is_empty() && !db::WDBS_COLORS.contains(&color) {
+        return Err(format!("\"{}\" isn't a recognized {} color.", color, drive_label));
+    }
+    db::set_wdbs_color(&db_path, &path, color).map_err(|e| e.to_string())
+}
+
+/// Sets (or clears, given a blank `shape`) the curated color decoration's container shape for one
+/// Warp Drive taxonomy node — tblWDBS.WDShape — chosen from the "Shape" row of the same "Edit
+/// Color Decoration" context menu set_wdbs_color's picker lives in (see
+/// components/WdbsColorMenu.tsx). `path` is a WdbsNode.path value. Rejects anything outside
+/// db::WDBS_SHAPES with a plain-language message, same boundary set_wdbs_color/set_wdbs_icon
+/// enforce for their own choices. A no-op against a database without the production tblWDBS schema.
+#[command]
+pub async fn set_wdbs_shape(app: tauri::AppHandle, path: String, shape: String) -> Result<(), String> {
+    let db_path = get_db_path(&app);
+    let drive_label = db::drive_label(&db_path);
+    let shape = shape.trim();
+    if !shape.is_empty() && !db::WDBS_SHAPES.contains(&shape) {
+        return Err(format!("\"{}\" isn't a recognized {} color decoration shape.", shape, drive_label));
+    }
+    db::set_wdbs_shape(&db_path, &path, shape).map_err(|e| e.to_string())
+}
+
 /// Every Warp Drive path currently assigned to at least one video (storage-encoded), for
 /// autocomplete when assigning an existing category rather than typing one from scratch.
 #[command]

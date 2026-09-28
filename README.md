@@ -1,6 +1,6 @@
-# Genesis
+# Kinesis
 
-<img src="src-tauri/icons-genesis/icon.png" alt="icon" width="128"/>
+<img src="src-tauri/icons-kinesis/icon.png" alt="icon" width="128"/>
 
 A lightweight desktop application for bookmarking and viewing YouTube transcripts.
 
@@ -20,7 +20,7 @@ A lightweight desktop application for bookmarking and viewing YouTube transcript
 - **Bulk summarize:** Summarize all videos in your library at once
 - **Custom prompts:** Customize the AI prompt for different summary styles
 
-**Note:** Database is stored in AppData\Roaming\genesisapp\genesis_data.db for Windows and ~/.local/share/genesisapp/genesis_data.db for Linux.
+**Note:** Database is stored in AppData\Roaming\kinesisapp\kinesis_data.db for Windows and ~/.local/share/kinesisapp/kinesis_data.db for Linux.
 
 ## Setup and Installation
 
@@ -50,24 +50,13 @@ A lightweight desktop application for bookmarking and viewing YouTube transcript
    ```
 3. Launch the application in development mode:
    ```bash
-   npx tauri dev
-   ```
-   Or for specific branding:
-   ```bash
-   npm run tauri:dev:genesis  # Genesis branding
-   npm run tauri:dev:kinesis  # Kinesis branding
+   npm run tauri:dev
    ```
 
 ### Building for Production
 To generate a production executable for your platform:
 ```bash
-npx tauri build
-```
-
-Or for specific branding:
-```bash
-npm run tauri:build:genesis
-npm run tauri:build:kinesis
+npm run tauri:build
 ```
 
 ## Tech Stack

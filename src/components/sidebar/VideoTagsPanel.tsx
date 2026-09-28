@@ -8,13 +8,24 @@ interface Props {
     /** 'terms' = glossary entries with a definition; 'tags' = Quick Tags (no definition). */
     kind: 'terms' | 'tags';
     videoTags: string[];
+    /** `kind="terms"` only: the terms linked in whichever of the transcript/AI Summary is currently
+     *  being read (see Sidebar.tsx and lib/internal-links.ts's `findGlossaryTerms`) — this, not
+     *  `videoTags`, is what the Terms chip list actually shows; `videoTags` still carries the
+     *  persisted union of both (see sync_terms_from_video_text) for Library search/export/sync, but
+     *  the panel only ever shows what's linked in the text on screen right now. */
+    detectedTerms?: string[];
     /** Every Glossary row (one per term per Drive). A term is listed once here, whichever Drives define it. */
     glossaryTerms: GlossaryTerm[];
     /** The video's own Drives: which Drive's definition a term with several opens (see lib/glossary.ts). */
     preferredDrives?: string[];
     onAddTag?: (term: string) => void;
     onRemoveTag?: (term: string) => void;
+    /** `kind="tags"` only: opens the resolved entry's definition. */
     onSelectTerm: (term: GlossaryTerm) => void;
+    /** `kind="terms"` only: jumps to and highlights that term's link in the AI Summary. Takes the
+     *  raw name, not a resolved GlossaryTerm — a linked term doesn't need a formal Glossary entry
+     *  (a definition) to exist yet in order to jump to it. */
+    onJumpToTerm?: (term: string) => void;
     /** Terms to list first in the add dropdown (the ones filed under the video's Drive), with
      *  `priorityLabel` naming that Drive. Everything else follows under "All". Omit for no grouping. */
     priorityTerms?: Set<string>;
@@ -25,12 +36,17 @@ interface Props {
     canEdit?: boolean;
 }
 
-/** Displays a video's terms or tags (as chips, per `kind`) plus an "add" dropdown filtered to
- *  the ones not already applied. Clicking a chip opens its term definition (via
- *  `onSelectTerm`); the dropdown closes on an outside click. Renders just the tag row — the
+/** Displays a video's terms or tags as chips. Tags keep the "add" dropdown/remove-X pair filtered
+ *  to the ones not already applied, and a chip click opens its definition (via `onSelectTerm`).
+ *  Terms are read-only: they're auto-detected from `[Text](kinesis://glossary/Text)` links in
+ *  whichever of the transcript/AI Summary is on screen (`detectedTerms`, computed by Sidebar.tsx),
+ *  not something added or removed here — a chip click instead jumps to and highlights that link
+ *  (`onJumpToTerm`). The dropdown closes on an outside click. Renders just the tag row — the
  *  surrounding card/header is owned by Sidebar.tsx's Tags/Similar Videos tab switcher. */
-export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives, onAddTag, onRemoveTag, onSelectTerm, priorityTerms, priorityLabel, canEdit = true }: Props) {
+export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, preferredDrives, onAddTag, onRemoveTag, onSelectTerm, onJumpToTerm, priorityTerms, priorityLabel, canEdit = true }: Props) {
     const noun = kind === 'terms' ? 'term' : 'tag';
+    // Terms are never user-editable any more — see the doc comment above.
+    const editable = canEdit && kind === 'tags';
     // A Quick Tag is a name with no definition in any Drive; a term has one in at least one.
     const ofKind = useMemo(
         () => [...termKinds(glossaryTerms)].filter(([, isTerm]) => isTerm === (kind === 'terms')).map(([name]) => name),
@@ -88,7 +104,9 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives
         }
     }, [showTagDropdown, handleClickOutside]);
 
-    const filtered = [...videoTags].filter(tag => ofKind.includes(tag)).sort((a, b) => a.localeCompare(b));
+    // Terms: exactly what's linked in the text on screen, in reading order (not alphabetized — that
+    // order matches jumping to them top-to-bottom). Tags: everything applied, alphabetized as before.
+    const filtered = kind === 'terms' ? (detectedTerms ?? []) : [...videoTags].filter(tag => ofKind.includes(tag)).sort((a, b) => a.localeCompare(b));
     const availableTerms = ofKind.filter(name =>
         !videoTags.includes(name) &&
         name.toLowerCase().includes(tagFilter.toLowerCase())
@@ -125,9 +143,13 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives
                         key={tag}
                         onClick={(e) => {
                             e.stopPropagation();
-                            // A term with a definition per Drive opens the one for this video's Drive.
-                            const rows = kind === 'terms' ? glossaryTerms.filter(t => t.definition.trim() !== '') : glossaryTerms;
-                            const term = resolveEntry(rows, tag, preferredDrives);
+                            if (kind === 'terms') {
+                                // Jumps to the link in the Summary — works even for a name that's
+                                // linked there but has no formal Glossary definition yet.
+                                onJumpToTerm?.(tag);
+                                return;
+                            }
+                            const term = resolveEntry(glossaryTerms, tag, preferredDrives);
                             if (term) {
                                 onSelectTerm(term);
                             }
@@ -135,7 +157,7 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives
                         className="group flex items-center gap-1 px-2.5 py-1 bg-[#222222] border border-[#383838] rounded-md text-[11px] text-white hover:bg-[#333333] transition-all cursor-pointer"
                     >
                         {tag}
-                        {canEdit && (
+                        {editable && (
                         <button
                             onClick={(e) => {
                                 e.stopPropagation();
@@ -149,13 +171,18 @@ export function VideoTagsPanel({ kind, videoTags, glossaryTerms, preferredDrives
                     </button>
                 ))}
 
-                {canEdit && filtered.length === 0 && (
+                {editable && filtered.length === 0 && (
                     <span className="text-[11px] text-[#666666] font-medium italic select-none">
                         Add a {noun}
                     </span>
                 )}
+                {kind === 'terms' && filtered.length === 0 && (
+                    <span className="text-[11px] text-[#666666] font-medium italic select-none">
+                        No terms linked yet
+                    </span>
+                )}
 
-                {canEdit && (
+                {editable && (
                 <div className="relative tag-dropdown-container">
                     <button
                         ref={plusRef}

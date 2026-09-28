@@ -1,11 +1,11 @@
-import { Star, Building2, User, Music, Trophy, Gamepad2, Mic, Dumbbell, Utensils, Newspaper, GraduationCap, Drama, Cpu, TrendingUp, BookOpen, Heart, KeyRound, Hammer, Code2, Paintbrush, Library, Folder, Bot, type LucideIcon } from 'lucide-react';
+import { Building2, User, Music, Trophy, Gamepad2, Mic, Dumbbell, Utensils, Newspaper, GraduationCap, Drama, Cpu, TrendingUp, BookOpen, Stethoscope, KeyRound, Hammer, Code2, Paintbrush, Library, Folder, Bot, type LucideIcon } from 'lucide-react';
 import type { WdbsIconKey } from '../api';
 
 // One entry per WDBS_ICON_KEYS value (api.ts) — keep both in sync with db::WDBS_ICONS on the Rust
 // side. `label` is what WdbsIconMenu's picker shows; `Icon` is what WdbsTreePanel renders to the
-// left of a node's segment name.
+// left of a node's segment name. No "star" — that shape now lives in the color decoration's own
+// picker (lib/wdbs-shapes.tsx) instead, so the same glyph doesn't mean two different things.
 export const WDBS_ICON_OPTIONS: { key: WdbsIconKey; label: string; Icon: LucideIcon }[] = [
-    { key: 'star', label: 'Star', Icon: Star },
     { key: 'company', label: 'Company', Icon: Building2 },
     { key: 'person', label: 'Person', Icon: User },
     { key: 'music', label: 'Music', Icon: Music },
@@ -20,7 +20,8 @@ export const WDBS_ICON_OPTIONS: { key: WdbsIconKey; label: string; Icon: LucideI
     { key: 'tech', label: 'Tech', Icon: Cpu },
     { key: 'finance', label: 'Finance', Icon: TrendingUp },
     { key: 'guides', label: 'Guides', Icon: BookOpen },
-    { key: 'health', label: 'Health', Icon: Heart },
+    // Not Heart: that's a marker (lib/wdbs-shapes.tsx), and one glyph shouldn't mean two things.
+    { key: 'health', label: 'Health', Icon: Stethoscope },
     { key: 'privacy', label: 'Privacy', Icon: KeyRound },
     { key: 'repair', label: 'Repair', Icon: Hammer },
     { key: 'coding', label: 'Coding', Icon: Code2 },

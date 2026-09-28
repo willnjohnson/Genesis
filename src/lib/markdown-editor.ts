@@ -420,9 +420,7 @@ export const MARKDOWN_MENU_EVENT = 'kinesis:markdown-menu';
 /** What the menu is opened over: selected text, or an empty line (where blocks like tables and rules can go). */
 export type MarkdownMenuKind = 'selection' | 'blank';
 
-export interface MarkdownMenuRequest {
-    textarea: HTMLTextAreaElement;
-    kind: MarkdownMenuKind;
+interface MenuRequestBase {
     /** The selection when the menu was opened (empty for a blank line: the caret). */
     start: number;
     end: number;
@@ -430,6 +428,12 @@ export interface MarkdownMenuRequest {
     x: number;
     y: number;
 }
+
+/** The formatting menu in a markdown textarea, or `plain` (only Cut, Copy and Paste) in any text field: see
+ *  handlePlainContextMenu. */
+export type MarkdownMenuRequest =
+    | (MenuRequestBase & { kind: MarkdownMenuKind; textarea: HTMLTextAreaElement })
+    | (MenuRequestBase & { kind: 'plain'; textarea: HTMLTextAreaElement | HTMLInputElement });
 
 /** Whether `text` is already wrapped in the markers of a wrapping action, so its menu button can show
  *  as on. Italic is checked so that **bold** doesn't also count as italic. */
@@ -442,21 +446,35 @@ export function selectionIsWrapped(text: string, action: MarkdownAction): boolea
 
 /** onContextMenu for a markdown textarea. The formatting menu (the single MarkdownContextMenu in
  *  App answers) opens over selected text and on an empty line. Anywhere else, and in read-only text,
- *  the browser's own menu (paste, spell check) is left alone so it isn't taken over for nothing. */
+ *  it's the plain Cut / Copy / Paste menu instead (the browser's own menu is off everywhere, see main.tsx). */
 export const handleMarkdownContextMenu = (e: MouseEvent<HTMLTextAreaElement>) => {
     const textarea = e.currentTarget;
-    if (textarea.readOnly || textarea.disabled) return;
+    if (textarea.readOnly || textarea.disabled) return handlePlainContextMenu(e);
     const { selectionStart: start, selectionEnd: end } = textarea;
     let kind: MarkdownMenuKind;
     if (start !== end) {
         kind = 'selection';
     } else {
         const { start: lineStart, end: lineEnd } = lineBounds(textarea.value, start);
-        if (textarea.value.substring(lineStart, lineEnd).trim() !== '') return;
+        if (textarea.value.substring(lineStart, lineEnd).trim() !== '') return handlePlainContextMenu(e);
         kind = 'blank';
     }
     e.preventDefault();
     window.dispatchEvent(new CustomEvent<MarkdownMenuRequest>(MARKDOWN_MENU_EVENT, {
         detail: { textarea, kind, start, end, x: e.clientX, y: e.clientY },
+    }));
+};
+
+/** onContextMenu for a plain text field (a name, a URL, a search box): the same menu with the markdown taken
+ *  out, just Cut and Copy (with text selected) and Paste (when the field can be typed in). */
+export const handlePlainContextMenu = (e: MouseEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+    const field = e.currentTarget;
+    if (field.disabled) return;
+    const start = field.selectionStart ?? 0;
+    const end = field.selectionEnd ?? start;
+    if (start === end && field.readOnly) return; // nothing to copy, nowhere to paste
+    e.preventDefault();
+    window.dispatchEvent(new CustomEvent<MarkdownMenuRequest>(MARKDOWN_MENU_EVENT, {
+        detail: { textarea: field, kind: 'plain', start, end, x: e.clientX, y: e.clientY },
     }));
 };

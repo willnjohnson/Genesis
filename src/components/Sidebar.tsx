@@ -1,5 +1,5 @@
 import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, ClipboardPaste, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, BookA, ListVideo, Paperclip, Monitor, Cloud } from 'lucide-react';
-import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, forwardRef, useImperativeHandle } from 'react';
 import { flushSync } from 'react-dom';
 import { LifeLoader } from './LifeLoader';
 import { checkVideoExists, summarizeTranscript, getSummary, saveSummary, getSetting, setSetting, openExternalUrl, getCustomPrompt, setCustomPrompt, getOllamaPrompt, getVenicePrompt, getGlossaryTerms, saveTranscript, getEmbedServerPort, updateVideoWdbs, decodeWdbs, encodeWdbs, getWdbsSuggestions, getVideoWdbs, getVideoWdbsLinks, addVideoWdbsLink, removeVideoWdbsLink, getSimilarVideos, getWdbsAliases, getHandleDrives, getVideoById, getVideoAttachments, trashList, trashRestore, type Video, type GlossaryTerm } from '../api';
@@ -10,8 +10,9 @@ import { useFindReplace } from './sidebar/useFindReplace';
 import { FindReplacePanel } from './sidebar/FindReplacePanel';
 import { GlossaryDetectPanel } from './sidebar/GlossaryDetectPanel';
 import { ConfirmDialog } from './ConfirmDialog';
+import { Modal } from './Modal';
 import { TranscriptText } from './sidebar/TranscriptText';
-import { useReadFind } from './sidebar/useReadFind';
+import { useReadFind, FIND_SCOPE_SELECTOR } from './sidebar/useReadFind';
 import { PhotosynthesisPanel } from './sidebar/PhotosynthesisPanel';
 import { VideoTagsPanel } from './sidebar/VideoTagsPanel';
 import { SequenceDock } from './sidebar/SequenceDock';
@@ -21,7 +22,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../lib/remark-highlight';
 import { remarkSourceLines, lineAt, indexOfLine, caretY, scrollPreviewToLine, topVisibleLine } from '../lib/preview-sync';
-import { markdownUrlTransform } from '../lib/internal-links';
+import { markdownUrlTransform, findGlossaryTerms } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { useWorkspace } from '../hooks/useWorkspace';
@@ -92,6 +93,10 @@ interface Props {
     onHandleClick?: (handle: string) => void;
     onAddTag?: (term: string) => void;
     onRemoveTag?: (term: string) => void;
+    /** Called with the raw (comma-joined) tags string after any summary save, since saving syncs
+     *  the Term subset of Videos.tags to whatever's now linked in the summary — see saveSummary's
+     *  doc comment in api.ts. */
+    onTagsChanged?: (rawTags: string) => void;
     onSearchInLibrary?: (term: string, mode: 'tag' | 'term' | 'library') => void;
     initialTab?: 'transcript' | 'summary';
     showBiography?: boolean;
@@ -125,7 +130,17 @@ interface Props {
  * directly, since the two panes are asymmetric (only the summary pane supports image hover-to-
  * delete) rather than a clean shared abstraction.
  */
-export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, onRestored, onTranscriptChange, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSummarizeOllama = true, showSummarizeVenice = true, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, driveContext, onVideoSelect }: Props) {
+/** Imperative handle (App.tsx holds a ref) so something outside the sidebar — switching to a
+ *  different video while this one has unsaved edits — can go through the same unsaved-changes
+ *  guard as the sidebar's own close button/backdrop, instead of silently discarding a draft. */
+export interface SidebarHandle {
+    hasUnsavedChanges: () => boolean;
+    /** Runs `proceed` immediately if there's nothing unsaved, otherwise asks first (Save/Discard/
+     *  Cancel) and only runs it on Save (after saving) or Discard. */
+    requestLeave: (proceed: () => void) => void;
+}
+
+export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, onRestored, onTranscriptChange, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSummarizeOllama = true, showSummarizeVenice = true, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onTagsChanged, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, driveContext, onVideoSelect }: Props, ref) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
@@ -558,7 +573,8 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         if (!videoId) return;
         setIsSaving(true);
         try {
-            await saveSummary(videoId, editedSummary);
+            const newTags = await saveSummary(videoId, editedSummary);
+            onTagsChanged?.(newTags);
             // save_summary appends a "Channel Info:" footer server-side; re-fetch so what's
             // displayed/cached matches what's actually persisted.
             const saved = await getSummary(videoId);
@@ -579,6 +595,34 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
             setIsSaving(false);
         }
     };
+
+    // Unsaved-changes guard: a draft that differs from what's actually saved, while still in Edit
+    // Mode for it. Backdrop click and the X button (below) go through requestLeave instead of
+    // calling onClose directly; App.tsx does the same (via the imperative handle) before switching
+    // to a different video while this one's mid-edit, so "accidentally leaving" can't silently
+    // drop a draft either way.
+    const hasUnsavedChanges = (isEditingTranscript && editedTranscript !== transcript) || (isEditingSummary && editedSummary !== (summary ?? ''));
+    const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
+    const requestLeave = useCallback((proceed: () => void) => {
+        if (!hasUnsavedChanges) { proceed(); return; }
+        setPendingLeave(() => proceed);
+    }, [hasUnsavedChanges]);
+    const cancelLeave = () => setPendingLeave(null);
+    const discardAndLeave = () => {
+        const proceed = pendingLeave;
+        setPendingLeave(null);
+        setIsEditingTranscript(false);
+        setIsEditingSummary(false);
+        proceed?.();
+    };
+    const saveAndLeave = async () => {
+        const proceed = pendingLeave;
+        setPendingLeave(null);
+        if (isEditingTranscript) await handleSaveTranscript();
+        else if (isEditingSummary) await handleSaveEditedSummary();
+        proceed?.();
+    };
+    useImperativeHandle(ref, () => ({ hasUnsavedChanges: () => hasUnsavedChanges, requestLeave }), [hasUnsavedChanges, requestLeave]);
 
     useEffect(() => {
         if (isOpen) {
@@ -797,7 +841,8 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
 
             if (videoId) {
                 try {
-                    await saveSummary(videoId, result);
+                    const newTags = await saveSummary(videoId, result);
+                    onTagsChanged?.(newTags);
                     // save_summary appends a "Channel Info:" footer server-side; re-fetch so
                     // what's displayed matches what's actually persisted, instead of showing
                     // the raw pre-footer text the summarizer returned. If the video hasn't been
@@ -824,11 +869,16 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         }
     }, [transcript, showSummary, hasExistingSummary, summary, videoId, onSummaryGenerated, onCacheSummary, onRefetch, handle]);
 
+    // Same unsaved-changes guard as leaving the sidebar entirely (requestLeave) — switching back
+    // to the Transcript while a summary edit is still a draft would otherwise silently drop it,
+    // the same oversight backdrop-click/X used to have before requestLeave existed.
     const handleBackToTranscript = useCallback(() => {
-        setShowSummary(false);
-        setIsEditingSummary(false);
-        setIsEditingTranscript(false);
-    }, []);
+        requestLeave(() => {
+            setShowSummary(false);
+            setIsEditingSummary(false);
+            setIsEditingTranscript(false);
+        });
+    }, [requestLeave]);
 
     // Error sentinels are always short, app-generated strings (see App.tsx), so gate the
     // substring match on length too — otherwise a real transcript that happens to mention
@@ -1139,6 +1189,48 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
     // editing, the full Find & Replace. It looks at nothing but that text.
     const editingText = isEditingTranscript || isEditingSummary;
     const readFind = useReadFind(showReadFind, showSummary && summary ? summary : transcript);
+
+    // The Terms panel shows only what's linked in whichever of the two is currently on screen — see
+    // VideoTagsPanel.tsx's doc comment. Videos.tags itself still carries the union of both (kept in
+    // sync server-side, see db/summaries.rs's sync_terms_from_video_text) for Library search/export/
+    // sync; this is just the tab-scoped view of it.
+    const linkedTerms = useMemo(() => findGlossaryTerms(showSummary ? (summary ?? '') : transcript), [showSummary, summary, transcript]);
+
+    // A Terms chip's click (VideoTagsPanel's onJumpToTerm): highlights that term's link in whichever
+    // tab is already showing (its read-only display is the only render with the data-glossary-term
+    // attribute MarkdownLink adds — see its doc comment; the chip is only visible while that tab is
+    // active in the first place, since detection is tab-scoped too), painted the same way Ctrl+F's
+    // matches are (the CSS Custom Highlight API, so the text itself is never touched). Cleared on
+    // the next click anywhere else ("steps off"); the chip's own click never reaches this listener,
+    // since VideoTagsPanel's chip onClick already calls stopPropagation.
+    const [highlightedTerm, setHighlightedTerm] = useState<string | null>(null);
+    const handleJumpToTerm = useCallback((term: string) => {
+        setHighlightedTerm(term);
+    }, []);
+    useEffect(() => {
+        if (!highlightedTerm) return;
+        const root = document.querySelector(FIND_SCOPE_SELECTOR);
+        const el = root?.querySelector<HTMLElement>(`[data-glossary-term="${CSS.escape(highlightedTerm)}"]`);
+        if (!el) { setHighlightedTerm(null); return; }
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const supportsHighlight = typeof CSS !== 'undefined' && 'highlights' in CSS;
+        if (supportsHighlight) {
+            CSS.highlights.set('term-jump', new Highlight(range));
+        } else {
+            const selection = window.getSelection();
+            selection?.removeAllRanges();
+            selection?.addRange(range);
+        }
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        const stepOff = () => setHighlightedTerm(null);
+        document.addEventListener('click', stepOff);
+        return () => {
+            document.removeEventListener('click', stepOff);
+            if (supportsHighlight) CSS.highlights.delete('term-jump');
+        };
+    }, [highlightedTerm]);
+
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
             if (!(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLowerCase() !== 'f') return;
@@ -1204,7 +1296,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                     // Starts below the title bar, which stays usable.
                     style={{ top: 'var(--k-titlebar-height)' }}
                     className="fixed inset-0 bg-black/70 z-40 transition-opacity"
-                    onClick={onClose}
+                    onClick={() => requestLeave(onClose)}
                 />
             )}
 
@@ -1238,7 +1330,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                 )}
                             </div>
                         </div>
-                        <button onClick={onClose} className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1 flex-shrink-0">
+                        <button onClick={() => requestLeave(onClose)} className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1 flex-shrink-0">
                             <X className="w-5 h-5" />
                         </button>
                     </div>
@@ -1404,6 +1496,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                         <VideoTagsPanel
                                                             kind={activeLeftTab}
                                                             videoTags={videoTags}
+                                                            detectedTerms={activeLeftTab === 'terms' ? linkedTerms : undefined}
                                                             glossaryTerms={glossaryTerms}
                                                             preferredDrives={videoDriveRoots}
                                                             priorityTerms={activeLeftTab === 'terms' ? driveTerms : undefined}
@@ -1412,6 +1505,7 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                                                             onAddTag={onAddTag}
                                                             onRemoveTag={onRemoveTag}
                                                             onSelectTerm={setSelectedTerm}
+                                                            onJumpToTerm={handleJumpToTerm}
                                                         />
                                                     ) : activeLeftTab === 'attachments' ? (
                                                         <AttachmentsPanel
@@ -2081,6 +2175,39 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
                 />
             )}
 
+            {/* Unsaved-changes guard: shown instead of immediately closing/switching away from an
+                in-progress transcript/summary edit (backdrop click, the X button, or App.tsx opening
+                a different video via the imperative handle above). */}
+            {pendingLeave && (
+                <Modal onClose={cancelLeave} title="Unsaved Changes" layer="top" size="sm" footer={
+                    <>
+                        <button
+                            onClick={cancelLeave}
+                            className="px-4 py-2 rounded-lg bg-[#222222] border border-[#383838] hover:bg-[#3f3f3f] cursor-pointer text-white text-sm font-semibold transition-colors"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={discardAndLeave}
+                            className="px-4 py-2 rounded-lg bg-[#222222] border border-[#383838] hover:bg-red-900/40 hover:border-red-800 cursor-pointer text-white text-sm font-semibold transition-colors"
+                        >
+                            Discard
+                        </button>
+                        <button
+                            onClick={() => void saveAndLeave()}
+                            disabled={isSaving}
+                            className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-50 cursor-pointer text-white text-sm font-semibold transition-colors"
+                        >
+                            {isSaving ? "Saving..." : "Save"}
+                        </button>
+                    </>
+                }>
+                    <p className="text-[#aaaaaa] leading-relaxed">
+                        You have unsaved changes to this {isEditingTranscript ? "transcript" : "summary"}. Save them before leaving?
+                    </p>
+                </Modal>
+            )}
+
             {/* Term Definition Modal */}
             {selectedTerm && onSearchInLibrary && (
                 <TermDefinitionModal
@@ -2134,4 +2261,4 @@ export function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, 
         )}
         </>
     );
-}
+});

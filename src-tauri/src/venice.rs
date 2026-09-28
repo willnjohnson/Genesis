@@ -111,7 +111,25 @@ pub async fn summarize_transcript(app: AppHandle, transcript: String, handle: Op
         .unwrap_or_else(|| DEFAULT_VENICE_MODEL.to_string());
 
     let client = reqwest::Client::new();
-    call_venice_api(&client, &route, &model, &prompt).await
+    let result = call_venice_api(&client, &route, &model, &prompt).await?;
+    Ok(post_process(&db_path, result))
+}
+
+/// Applies whichever "Post-Processing Options" (Settings > API Key > Venice) are turned on to a
+/// freshly generated Venice summary, before it's ever shown or saved — not on every save any more
+/// (see db/summaries.rs's doc comments on the two functions below), and not applied to an
+/// Ollama-generated or hand-edited summary at all, since Venice is the one known to emit the
+/// markdown patterns (redundant blockquote quoting, leading emoji) these clean up.
+fn post_process(db_path: &str, text: String) -> String {
+    let Ok(conn) = rusqlite::Connection::open(db_path) else { return text };
+    let mut out = text;
+    if db::get_setting_bool(&conn, "stripQuoteblockQuotes") {
+        out = db::strip_quoteblock_quotes(&out);
+    }
+    if db::get_setting_bool(&conn, "stripHeaderEmojis") {
+        out = db::strip_header_and_paragraph_emojis(&out);
+    }
+    out
 }
 
 #[derive(Debug, Serialize, Deserialize)]

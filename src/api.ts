@@ -298,8 +298,12 @@ export async function installOllama(): Promise<void> {
     await invoke("install_ollama");
 }
 
-export async function saveSummary(videoId: string, summary: string): Promise<void> {
-    await invoke("save_summary", { videoId, summary });
+/** Saves a summary and returns the video's tags afterward (comma-joined, split the same way
+ *  Video.tags is parsed elsewhere): saving syncs the Term subset of the tags to whatever glossary
+ *  links are now in the summary (see src-tauri/src/db/summaries.rs's `sync_terms_from_video_text`),
+ *  so the caller needs the result of that, not just an acknowledgement that it saved. */
+export async function saveSummary(videoId: string, summary: string): Promise<string> {
+    return await invoke("save_summary", { videoId, summary });
 }
 
 export async function saveTags(videoId: string, tags: string): Promise<void> {
@@ -707,6 +711,12 @@ export async function removeAttachment(id: number): Promise<void> {
     await invoke("remove_attachment", { id });
 }
 
+/** Drag-and-drop reordering in the Attachments panel. `orderedIds` is whichever tab (files or
+ *  links) is currently showing — the other kind's order is untouched. */
+export async function reorderAttachments(videoId: string, orderedIds: number[]): Promise<void> {
+    await invoke("reorder_attachments", { videoId, orderedIds });
+}
+
 /** Opens the attachment in the system's default app. */
 export async function openAttachment(id: number): Promise<void> {
     await invoke("open_attachment", { id });
@@ -881,17 +891,41 @@ export interface WdbsNode {
     // The node's curated icon (tblWDBS.WDIcon) — one of WDBS_ICON_KEYS, or null when unset/
     // unrecognized/no tblWDBS. See setWdbsIcon.
     icon: string | null;
+    // The node's curated color decoration (tblWDBS.WDColor) — one of WDBS_COLOR_KEYS, or null when
+    // unset/unrecognized/no tblWDBS. See setWdbsColor. Rendered as a small colored chip before the
+    // node's icon; which exact shade that resolves to is picked client-side (lib/wdbs-colors.ts),
+    // not carried in this value.
+    color: string | null;
+    // The color decoration's container shape (tblWDBS.WDShape) — one of WDBS_SHAPE_KEYS, or null
+    // when unset/unrecognized/no tblWDBS. See setWdbsShape. `null` renders the same as "square" —
+    // the original/default look — see lib/wdbs-shapes.tsx.
+    shape: string | null;
 }
 
 // The fixed set of icons a Warp Drive taxonomy node's WDIcon can hold — must match the Rust side's
 // db::WDBS_ICONS exactly (that's what commands::wdbs::set_wdbs_icon validates against). Order here
-// is just the order they're offered in WdbsIconMenu's picker.
+// is just the order they're offered in WdbsIconMenu's picker. No "star" — see db::WDBS_ICONS's own
+// comment for why it moved to the color decoration's shapes instead.
 export const WDBS_ICON_KEYS = [
-    "star", "company", "person", "music", "sports", "gaming", "podcast", "fitness", "food",
+    "company", "person", "music", "sports", "gaming", "podcast", "fitness", "food",
     "news", "education", "comedy", "tech", "finance", "guides",
     "health", "privacy", "repair", "coding", "art", "reading", "project", "ai",
 ] as const;
 export type WdbsIconKey = typeof WDBS_ICON_KEYS[number];
+
+// The fixed set of color decorations a Warp Drive taxonomy node's WDColor can hold — must match
+// the Rust side's db::WDBS_COLORS exactly (that's what commands::wdbs::set_wdbs_color validates
+// against). Order here is the order they're offered in WdbsColorMenu's picker.
+export const WDBS_COLOR_KEYS = [
+    "red", "yellow", "green", "aqua", "magenta", "slate_gray", "charcoal",
+] as const;
+export type WdbsColorKey = typeof WDBS_COLOR_KEYS[number];
+
+// The fixed set of container shapes a color decoration can use — must match the Rust side's
+// db::WDBS_SHAPES exactly (that's what commands::wdbs::set_wdbs_shape validates against). "square"
+// is the original/default look; order here is the order offered in WdbsColorMenu's "Shape" row.
+export const WDBS_SHAPE_KEYS = ["square", "circle", "star", "diamond", "heart"] as const;
+export type WdbsShapeKey = typeof WDBS_SHAPE_KEYS[number];
 
 export async function getWdbsTree(): Promise<WdbsNode[]> {
     return await invoke("get_wdbs_tree");
@@ -911,6 +945,24 @@ export async function setWdbsAlias(path: string, alias: string): Promise<void> {
 // database without the production tblWDBS schema.
 export async function setWdbsIcon(path: string, icon: string): Promise<void> {
     await invoke("set_wdbs_icon", { path, icon });
+}
+
+// Sets (or clears, given '') the curated color decoration for one Warp Drive taxonomy node —
+// shown as a small colored chip before its icon in the tree (see
+// components/WdbsTreePanel.tsx's "Edit Color Decoration" context menu). `path` is a WdbsNode.path
+// value; `color` must be one of WDBS_COLOR_KEYS or ''. Independent of setWdbsShape — clearing or
+// changing one never touches the other. A no-op against a database without the production
+// tblWDBS schema.
+export async function setWdbsColor(path: string, color: string): Promise<void> {
+    await invoke("set_wdbs_color", { path, color });
+}
+
+// Sets (or clears, given '') the color decoration's container shape for one Warp Drive taxonomy
+// node — which of WdbsColorMenu's "Shape" row options (square/circle/star/diamond) the chip above
+// is drawn as. `path` is a WdbsNode.path value; `shape` must be one of WDBS_SHAPE_KEYS or ''. A
+// no-op against a database without the production tblWDBS schema.
+export async function setWdbsShape(path: string, shape: string): Promise<void> {
+    await invoke("set_wdbs_shape", { path, shape });
 }
 
 // `wdbsPath` is a WdbsNode.path value (or any encoded prefix) — selects that category and

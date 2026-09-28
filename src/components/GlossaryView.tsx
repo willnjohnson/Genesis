@@ -10,7 +10,7 @@ import type { NotificationContent } from './Notification';
 import { useEntryPreview } from './GlossaryPreview';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { normalizeText } from '../lib/utils';
-import { handleMarkdownKeyDown, handleMarkdownContextMenu } from '../lib/markdown-editor';
+import { handleMarkdownKeyDown, handleMarkdownContextMenu, handlePlainContextMenu } from '../lib/markdown-editor';
 import { useFlags } from '../hooks/useFlags';
 
 // The dropdown's value for "all Quick Tags" (drive roots look like ":CRYPTO", so this can't clash).
@@ -460,6 +460,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                             required
                             value={newTerm}
                             onChange={e => setNewTerm(e.target.value)}
+                            onContextMenu={handlePlainContextMenu}
                             className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600 transition-all placeholder-gray-600"
                             placeholder="Enter term..."
                         />
@@ -521,6 +522,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                             required
                             value={termToEdit.term}
                             onChange={e => setTermToEdit({ ...termToEdit, term: e.target.value })}
+                            onContextMenu={handlePlainContextMenu}
                             className="w-full bg-[#121212] border border-[#333] text-white rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600 transition-all placeholder-gray-600"
                         />
                     </div>

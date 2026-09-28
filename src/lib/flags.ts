@@ -76,6 +76,13 @@ export const FLAG_DEFAULTS = {
     showSynthesizeVenice: true,
     showSynthesizePixabay: true,
     showSynthesizeUpload: true,
+    // Venice post-processing (Settings > API Key > Venice, applied once right when Venice generates
+    // a summary — see src-tauri/src/venice.rs's post_process — not on every save, and not applied to
+    // an Ollama-generated or hand-edited summary). Quote-stripping on by default: a blockquote
+    // already visually quotes its content, so Venice also wrapping it in literal quote marks is
+    // always redundant. Emoji-stripping off by default: purely a style preference.
+    stripQuoteblockQuotes: true,
+    stripHeaderEmojis: false,
     // Glossary and biographies
     allowModificationGlossary: true,
     showQuickTags: true,

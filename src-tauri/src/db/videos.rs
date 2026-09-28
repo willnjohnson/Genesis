@@ -1,6 +1,6 @@
 use crate::{Video, types::normalize_published_at};
 use rusqlite::{params, Connection, OptionalExtension, Result};
-use super::summaries::{append_channel_info_footer, clean_blockquote_lines, clear_transcript_after_summary, has_real_summary};
+use super::summaries::{append_channel_info_footer, clear_transcript_after_summary, has_real_summary, sync_terms_from_video_text};
 use super::settings::get_setting_bool;
 use super::search::{video_row, video_columns_sql, filter_kind_where, library_order_by};
 
@@ -114,10 +114,10 @@ pub fn save_video(
         params![video_id],
     );
     super::tokens::regenerate_tokens(&conn, video_id)?;
-    // Covers the "summarize before saving" workflow: a real summary can already be provided
-    // at insert time, so it needs the same quote-marker cleanup applied on later saves.
-    clean_blockquote_lines(&conn, video_id)?;
     append_channel_info_footer(&conn, video_id)?;
+    // Reads the transcript/summary actually stored, not the arguments above (`summary` is `None` on
+    // a plain re-save, per the COALESCE above) — see its own doc comment.
+    sync_terms_from_video_text(&conn, video_id)?;
     if summary.map(has_real_summary).unwrap_or(false) && get_setting_bool(&conn, "setTranscriptAfterSummarizeToNA") {
         clear_transcript_after_summary(&conn, video_id)?;
     }
@@ -542,6 +542,7 @@ pub fn save_transcript(db_path: &str, video_id: &str, transcript: &str) -> Resul
         params![transcript, video_id],
     )?;
     super::tokens::regenerate_tokens(&tx, video_id)?;
+    sync_terms_from_video_text(&tx, video_id)?;
     tx.commit()?;
     Ok(())
 }

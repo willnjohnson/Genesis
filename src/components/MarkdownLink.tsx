@@ -28,6 +28,10 @@ export function MarkdownLink({ href, title, children }: { href?: string; title?:
                     }}
                     title={hover ? undefined : `${linkKindLabel(internal.kind, labels)}: ${target}`}
                     {...(hover ? hover.handlers : {})}
+                    // The real target doesn't otherwise survive into the DOM (href above is just
+                    // "#") — this is what a Terms chip's jump-to-summary click looks for
+                    // (see Sidebar.tsx's handleJumpToTerm).
+                    {...(internal.kind === 'glossary' ? { 'data-glossary-term': internal.key } : {})}
                     className="text-red-500 hover:text-red-400 underline decoration-dotted decoration-red-500/60 underline-offset-4"
                 >
                     {children}

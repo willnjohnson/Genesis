@@ -159,6 +159,9 @@ pub(crate) struct SearchFacets {
     pub tag_exact: bool,
     pub term: String,
     pub term_exact: bool,
+    /// The `no_tags:` facet ("!#" in the Library search bar): true when it was present at all —
+    /// there's no value to carry, unlike every other facet here, just its presence.
+    pub untagged: bool,
     /// Whatever's left after every recognized facet token is stripped out — feed this to
     /// build_fts_query, not the original query.
     pub free_text: String,
@@ -180,6 +183,7 @@ pub(crate) fn parse_search_facets(query: &str) -> SearchFacets {
     let mut term = String::new();
     let mut tag_exact = false;
     let mut term_exact = false;
+    let mut untagged = false;
     let mut remaining = query.to_string();
 
     for cap in facet_re.captures_iter(query) {
@@ -202,12 +206,21 @@ pub(crate) fn parse_search_facets(query: &str) -> SearchFacets {
                 term = if quoted.is_some() { value.to_string() } else { star_to_like(value) };
                 term_exact = quoted.is_some();
             }
+            // Presence-only — the captured value (normally empty) is ignored.
+            "no_tags" => untagged = true,
             _ => {}
         }
         remaining = remaining.replace(&cap[0], "");
     }
 
-    SearchFacets { handle, channel, video, tag, tag_exact, term, term_exact, free_text: remaining.trim().to_string() }
+    SearchFacets { handle, channel, video, tag, tag_exact, term, term_exact, untagged, free_text: remaining.trim().to_string() }
+}
+
+/// WHERE-clause fragment for the `no_tags:` facet: every video with nothing at all in `tags` — no
+/// Quick Tags, no Terms. Plain interpolated SQL text, like `glossary_tag_clause` below, not a bound
+/// parameter: there's nothing to bind, just two shapes the clause can take.
+pub(crate) fn untagged_clause(untagged: bool) -> &'static str {
+    if untagged { "(v.tags IS NULL OR v.tags = '')" } else { "1=1" }
 }
 
 /// WHERE clause for the `tag_search` / `term_search` facets. A video's `tags` column is a comma
@@ -258,6 +271,7 @@ pub fn search_library_videos(
 
     let tag_clause = glossary_tag_clause(false, facets.tag_exact, ":tag");
     let term_clause = glossary_tag_clause(true, facets.term_exact, ":term");
+    let untagged_clause = untagged_clause(facets.untagged);
 
     let fts_query = build_fts_query(&facets.free_text);
 
@@ -274,6 +288,7 @@ pub fn search_library_videos(
                AND (:video = '' OR v.video_id LIKE :video_like)
                AND {tag_clause}
                AND {term_clause}
+               AND {untagged_clause}
                AND {filter_where}"
         );
         let handle_like = format!("%{}%", handle_val);
@@ -314,6 +329,7 @@ pub fn search_library_videos(
                AND (:video = '' OR v.video_id LIKE :video_like)
                AND {tag_clause}
                AND {term_clause}
+               AND {untagged_clause}
                AND {filter_where}"
         );
         let handle_like = format!("%{}%", handle_val);
@@ -775,6 +791,32 @@ mod similar_videos_tests {
         assert!(ids("term_search:Halfway").is_empty());
         // Both facets together narrow to videos with both kinds.
         assert_eq!(ids("term_search:Halving tag_search:Halfway"), vec!["vidC"]);
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn no_tags_finds_only_untagged_videos_and_stacks_with_a_plain_search() {
+        let db_path = temp_db_path();
+        db::init_db(&db_path).unwrap();
+        db::save_video(&db_path, "vidA", "Bitcoin basics", "X", 60, "t", 1, "2026-01-01T00:00:00Z", "@a", None).unwrap();
+        db::save_video(&db_path, "vidB", "Bitcoin advanced", "X", 60, "t", 1, "2026-01-02T00:00:00Z", "@b", None).unwrap();
+        db::save_video(&db_path, "vidC", "Ethereum basics", "X", 60, "t", 1, "2026-01-03T00:00:00Z", "@c", None).unwrap();
+        db::save_tags(&db_path, "vidA", "Halving").unwrap();
+        // vidB and vidC are left with no tags at all (the default).
+
+        let ids = |q: &str| -> Vec<String> {
+            let mut v: Vec<String> = db::search_library_videos(&db_path, q, None, None, None, 10, 0)
+                .unwrap().0.into_iter().map(|v| v.id).collect();
+            v.sort();
+            v
+        };
+        // "!#" alone (sent as "no_tags:"): every untagged video, regardless of title.
+        assert_eq!(ids("no_tags:"), vec!["vidB", "vidC"]);
+        // "!#basics" (sent as "no_tags: basics"): untagged AND still a real title/text match — not
+        // a tag-name search for the literal word "basics".
+        assert_eq!(ids("no_tags: basics"), vec!["vidC"]);
+        // A tagged video never matches, no matter what it's about.
+        assert!(!ids("no_tags:").contains(&"vidA".to_string()));
         std::fs::remove_file(&db_path).ok();
     }
 

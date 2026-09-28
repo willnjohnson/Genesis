@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, Download, ExternalLink, File, FileImage, FileSpreadsheet, FileText, Link2, Loader2, Paperclip, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, Download, ExternalLink, File, FileImage, FileSpreadsheet, FileText, GripVertical, Link2, Loader2, Paperclip, Pencil, Plus, Trash2, X } from 'lucide-react';
 import {
     addAttachmentLink, addAttachments, getAttachmentLink, getVideoAttachments, openAttachment, openExternalUrl,
-    pickAttachmentFiles, removeAttachment, saveAttachmentAs, saveVideoNote, updateAttachmentLink, type AttachmentInfo,
+    pickAttachmentFiles, removeAttachment, reorderAttachments, saveAttachmentAs, saveVideoNote, updateAttachmentLink, type AttachmentInfo,
 } from '../../api';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { useFlags } from '../../hooks/useFlags';
+import { useDragReorder, DropIndicator } from '../../hooks/useDragReorder';
 
 // Keep in step with MAX_ATTACHMENTS and MAX_LINKS in src-tauri/src/db/attachments.rs (the backend enforces them).
 const MAX_ATTACHMENTS = 5;
@@ -239,11 +240,10 @@ export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
         }
     };
 
-    if (loading) {
-        return <p className="text-[11px] text-[#666666] italic py-2">Loading attachments...</p>;
-    }
-
-    // Files and links have their own limits, and (below) their own section of the list.
+    // Files and links have their own limits, and (below) their own section of the list. Computed
+    // (and the drag hook called) before the `loading` return below, not after: a hook can never be
+    // called conditionally — React needs the exact same hooks, in the same order, on every render,
+    // even one that bails out early.
     const files = attachments.filter(a => !isLink(a));
     const links = attachments.filter(isLink);
     const fileCount = files.length;
@@ -251,8 +251,41 @@ export function AttachmentsPanel({ videoId, canEdit, onCountChange }: Props) {
     const atLimit = fileCount >= MAX_ATTACHMENTS;
     const linksAtLimit = linkCount >= MAX_LINKS;
 
+    // Which kind is currently on screen (matches the tab-vs-single-list logic below) — files and
+    // links are dragged and persisted independently, so this also decides which half of
+    // `attachments` a drop leaves untouched.
+    const activeKind: 'files' | 'links' = files.length > 0 && links.length > 0 ? attachTab : links.length > 0 && files.length === 0 ? 'links' : 'files';
+    const shown = activeKind === 'files' ? files : links;
+    const dragReorder = useDragReorder(shown, a => a.id);
+    const handleReordered = async (newOrder: AttachmentInfo[]) => {
+        const other = activeKind === 'files' ? links : files;
+        // Shown at once; reverted by a reload if the save fails.
+        setAttachments(activeKind === 'files' ? [...newOrder, ...other] : [...other, ...newOrder]);
+        try {
+            await reorderAttachments(videoId, newOrder.map(a => a.id));
+        } catch (e) {
+            setErrors([messageOf(e, 'Failed to save the new order.')]);
+            await reload();
+        }
+    };
+
+    if (loading) {
+        return <p className="text-[11px] text-[#666666] italic py-2">Loading attachments...</p>;
+    }
+
     const renderRow = (a: AttachmentInfo) => (
-        <li key={a.id} className="flex items-center gap-2 bg-[#1a1a1a] border border-[#333] rounded-lg px-2.5 py-1.5">
+        <li
+            key={a.id}
+            {...(canEdit ? dragReorder.rowProps(a, handleReordered) : {})}
+            // relative: anchors DropIndicator, a floating line in the gap above/below this row (not
+            // the row's own border), so it reads as "between these two rows".
+            className={`group relative flex items-center gap-2 bg-[#1a1a1a] border border-[#333] rounded-lg px-2.5 py-1.5 transition-colors ${dragReorder.isDragging(a) ? 'opacity-40' : ''}`}
+        >
+            {canEdit && <DropIndicator side={dragReorder.dropSide(a)} />}
+            {/* Purely a visual affordance — the whole row is the drag source/drop target.
+                -mr-2 cancels the row's own gap-2 right after the grip, so whatever follows sits
+                snug against it instead of matching every other pair's spacing in the row. */}
+            {canEdit && <GripVertical className="w-3.5 h-3.5 shrink-0 -mr-2 text-[#555555] cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-100 transition-opacity" />}
             {isLink(a) ? <Link2 className="w-4 h-4 shrink-0 text-blue-400" /> : <FileIcon ext={a.ext} />}
             <div className="min-w-0 flex-1">
                 {/* A link shows the title it was given, never the address itself (that's shown, with a warning, when it's opened). */}

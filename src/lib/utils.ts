@@ -5,6 +5,11 @@ export function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs));
 }
 
+/** `Video.tags`/the backend's comma-joined tags string, as the list of names the UI works with. */
+export function parseTagList(raw: string | null | undefined): string[] {
+    return raw ? raw.split(',').map(t => t.trim()).filter(Boolean) : [];
+}
+
 // Decode HTML entities for display (e.g., &#39; -> ', &amp; -> &)
 export function decodeHtmlEntities(text: string): string {
     const textarea = document.createElement('textarea');

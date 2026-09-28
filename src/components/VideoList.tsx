@@ -696,7 +696,9 @@ export function VideoList({
                                     transform: `translateY(${virtualRow.start - rowVirtualizer.options.scrollMargin}px)`,
                                 }}
                             >
-                                <div className={`grid gap-x-3 pb-8 ${compact ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'}`}>
+                                {/* px-1: a selected card's ring (2px, plus its 2px offset) draws 4px outside the card, which
+                                    the scrolling pane would clip on the first and last columns. */}
+                                <div className={`grid gap-x-3 pb-8 px-1 ${compact ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'}`}>
                                     {rows[virtualRow.index].map((video) => (
                                         <VideoCard
                                             key={video.id}

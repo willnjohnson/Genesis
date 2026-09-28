@@ -4,12 +4,12 @@ import {
     getApiKey, getKeyStatus, getSetting, openExternalUrl, bulkUpdateVideoWdbs, addToDriveSequence,
     type Video, type BiographyEntry, saveTags, getBiography,
     getVideoById, getGlossaryTerms, getWdbsTree, decodeWdbs, type WdbsNode,
-    UNSORTED_WDBS_FILTER, TRASH_RESTORED_EVENT, type TrashKind,
+    UNSORTED_WDBS_FILTER, TRASH_RESTORED_EVENT, TRASH_CHANGED_EVENT, type TrashKind,
 } from "./api";
 import { useTrash } from "./hooks/useTrash";
 import { useNavHistory } from "./hooks/useNavHistory";
 import { TrashModal } from "./components/TrashModal";
-import { driveSegmentLabel, formatBytes } from "./lib/utils";
+import { driveSegmentLabel, formatBytes, parseTagList } from "./lib/utils";
 import { resolveEntry } from "./lib/glossary";
 import { setInternalLinkHandler, linkKindLabel, type LinkKind } from "./lib/internal-links";
 import { LinkPicker } from "./components/LinkPicker";
@@ -19,7 +19,7 @@ import { saveImageAs } from "./lib/save-image-as";
 import { applyTheme, resolveTheme, loadCustomThemes } from "./lib/themes";
 import { SearchBar, type Facet } from "./components/SearchBar";
 import { VideoList, type SortField, type SortOrder, type FilterType } from "./components/VideoList";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, type SidebarHandle } from "./components/Sidebar";
 import { BRAND } from "./branding";
 import { WorkspaceSwitcher } from "./components/workspace/WorkspaceSwitcher";
 import { BrandLogo } from "./components/BrandLogo";
@@ -32,11 +32,12 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SettingsModal, type SettingsTarget } from "./components/SettingsModal";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { SETTINGS_ENTRIES, TAB_LABELS, type SettingsTabId } from "./lib/settings-search";
-import { Settings, ChevronUp, LayoutGrid, List, ChevronDown, Sparkles, Search, BookMarked, BookA, UserSearch, HardDrive, MousePointerClick, Key, Layers, Monitor, Palette, History, Cpu, RefreshCw, FileDown, Trash2, ArrowLeft, ArrowRight } from "lucide-react";
+import { Settings, ChevronUp, LayoutGrid, List, ChevronDown, Sparkles, Search, BookMarked, BookA, UserSearch, HardDrive, MousePointerClick, FolderTree, Key, Layers, Monitor, Palette, History, Cpu, RefreshCw, FileDown, Trash2, ArrowLeft, ArrowRight } from "lucide-react";
 import { GlossaryView } from "./components/GlossaryView";
 import { BiographyView } from "./components/BiographyView";
 import { BiographyModal } from "./components/BiographyView";
 import { WdbsTreePanel } from "./components/WdbsTreePanel";
+import { useWdbsTree } from "./hooks/useWdbsTree";
 import { BulkAssignMenu } from "./components/BulkAssignMenu";
 import { useSearch } from "./hooks/useSearch";
 import { useLibrary } from "./hooks/useLibrary";
@@ -54,7 +55,7 @@ function getLibraryFacets(q: string, viewMode: ViewMode): Facet[] {
         ? ['term_search', 'definition_search']
         : viewMode === 'biography'
             ? ['person_search', 'bio_search']
-            : ['tag_search', 'term_search', 'video', 'handle', 'channel_name'];
+            : ['tag_search', 'term_search', 'no_tags', 'video', 'handle', 'channel_name'];
 
     const FACET_RE = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
     const facets: Facet[] = [];
@@ -71,7 +72,7 @@ function getLibraryQuery(q: string, viewMode: ViewMode): string {
         ? ['term_search', 'definition_search']
         : viewMode === 'biography'
             ? ['person_search', 'bio_search']
-            : ['tag_search', 'term_search', 'video', 'handle', 'channel_name'];
+            : ['tag_search', 'term_search', 'no_tags', 'video', 'handle', 'channel_name'];
 
     // Check if q starts with a facet prefix and has exactly one colon
     const colonIndex = q.indexOf(':');
@@ -83,7 +84,10 @@ function getLibraryQuery(q: string, viewMode: ViewMode): string {
     const isKnownFacetPrefix = colonIndex > 0 && whitelist.includes(q.slice(0, colonIndex));
 
     if (isKnownFacetPrefix && (firstSpaceIndex === -1 || firstSpaceIndex > colonIndex)) {
-        const rest = q.slice(colonIndex + 1);
+        // trimStart: harmless for every other facet here (their value starts right after the
+        // colon, no space) but no_tags always has one ("no_tags: foo"), to keep it separate from
+        // the free text that follows rather than swallowing it as no_tags' own value.
+        const rest = q.slice(colonIndex + 1).trimStart();
         const whitelistPattern = `(${whitelist.join('|')})`;
         if (!new RegExp(`${whitelistPattern}:`).test(rest)) {
             let val = rest;
@@ -150,15 +154,22 @@ function App() {
         allowEditWDBS,
     } = flags;
     // Bumped whenever a video's WDBS assignment or symlinks change (Sidebar's editor, bulk
-    // assign) so WdbsTreePanel's per-category counts refetch — those mutations happen outside
-    // the tree panel itself, which otherwise has no way to know its counts just went stale.
+    // assign) so the Drive tree's data refetches — those mutations happen outside the tree
+    // itself, which otherwise has no way to know its counts just went stale. Owned here (not by
+    // WdbsTreePanel) via useWdbsTree so the fetched tree survives that panel unmounting whenever
+    // the user leaves the Library view — see that hook's own doc comment.
     const [driveVersion, setDriveVersion] = useState(0);
+    const wdbsTree = useWdbsTree(driveVersion);
 
     // ── Sidebar / transcript state ───────────────────────────────────────────
     const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
     const [transcript, setTranscript] = useState("");
     const [loadingTranscript, setLoadingTranscript] = useState(false);
     const [sidebarOpen, setSidebarOpen] = useState(false);
+    // Lets handleSelectVideo ask the sidebar (via its imperative handle) whether switching to a
+    // different video right now would silently drop an in-progress transcript/summary edit, the
+    // same guard the sidebar's own close button/backdrop already go through.
+    const sidebarRef = useRef<SidebarHandle>(null);
     const [cachedSummaries, setCachedSummaries] = useState<Record<string, string>>({});
     const [videoTags, setVideoTags] = useState<string[]>([]);
     const [sidebarInitialTab, setSidebarInitialTab] = useState<'transcript' | 'summary' | undefined>(undefined);
@@ -266,17 +277,6 @@ function App() {
         }
     }, [canBulkAssign]);
 
-    useEffect(() => {
-        // Which database is open is the workspace's business (see WorkspaceGate): by the time this
-        // runs the backend already has one, so there's nothing to restore here.
-        const initialize = async () => {
-            await loadFlags();
-        };
-        initialize().catch(error => {
-            console.error('Failed to initialize app:', error);
-        });
-    }, [loadFlags]);
-
     const handleSaveImageAs = useCallback(async (url: string) => {
         // Try to suggest a filename based on the URL or default
         let suggestedName = 'image.webp';
@@ -321,7 +321,31 @@ function App() {
         }).catch(() => applyTheme(resolveTheme(undefined, [])));
     }, []);
 
-    useEffect(() => { loadDisplay(); }, [loadDisplay]);
+    // Startup, in one place: flags, workspace labels and the real theme/layout settings, all read
+    // from the database asynchronously. Taking down the launch screen (public/k-life.js's cold-
+    // launch mode — see its own header comment) before these resolve would show it off a beat
+    // early: the shell would still be on its hardcoded defaults (Erebos, horizontal nav, grid
+    // list, every feature flag's fallback) and then visibly snap to the workspace's actual
+    // configuration right after. window.kLife.hide() is deferred until after all of it, plus a
+    // double rAF so the resulting repaint has actually happened first — not "hidden until
+    // everything loads", exactly, since some things (video thumbnails, per-view data) always load
+    // in afterward regardless; this is "hidden until nothing left would visibly change out from
+    // under the user in the first frame."
+    useEffect(() => {
+        const initialize = async () => {
+            await Promise.all([loadFlags(), loadDisplay()]);
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+                window.kLife?.hide();
+            }));
+        };
+        initialize().catch(error => {
+            console.error('Failed to initialize app:', error);
+            // Reveal anyway: a broken app the user can see and report is better than one stuck
+            // behind the launch screen forever (its own 10s fallback would get there eventually,
+            // but there's no reason to wait for that here).
+            window.kLife?.hide();
+        });
+    }, [loadFlags, loadDisplay]);
 
     // The vertical rail's width, published as a CSS variable rather than threaded down as a prop:
     // a true `fixed` element anywhere in the tree (like AlphabetJumpNav's bottom bar) can stay clear
@@ -398,11 +422,11 @@ function App() {
     }, [viewMode, pluginSummarizeEnabled]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Handlers ─────────────────────────────────────────────────────────────
-    const handleSelectVideo = useCallback(async (video: Video, tab?: 'transcript' | 'summary') => {
+    const doSelectVideo = useCallback(async (video: Video, tab?: 'transcript' | 'summary') => {
         void recordRecent({ kind: 'video', key: video.id, label: video.title, sub: video.author, thumb: video.thumbnail || undefined });
         setSidebarInitialTab(tab);
         setSelectedVideo(video);
-        setVideoTags(video.tags ? video.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : []);
+        setVideoTags(parseTagList(video.tags));
         setSidebarOpen(true);
         setTranscript("");
         setLoadingTranscript(true);
@@ -422,6 +446,19 @@ function App() {
 
         setLoadingTranscript(false);
     }, []);
+
+    // Guards against silently discarding an in-progress transcript/summary edit when switching to
+    // a different video while the sidebar's already open on one — the same case its own close
+    // button/backdrop already guard, via the same imperative handle (see Sidebar.tsx's
+    // requestLeave). Re-selecting the SAME video (e.g. re-opening it from a link) isn't "leaving"
+    // anything, so that skips the guard and always goes straight through.
+    const handleSelectVideo = useCallback((video: Video, tab?: 'transcript' | 'summary') => {
+        if (sidebarOpen && selectedVideo && selectedVideo.id !== video.id && sidebarRef.current?.hasUnsavedChanges()) {
+            sidebarRef.current.requestLeave(() => { void doSelectVideo(video, tab); });
+            return;
+        }
+        void doSelectVideo(video, tab);
+    }, [sidebarOpen, selectedVideo, doSelectVideo]);
 
     const handleSearch = useCallback(async (query: string) => {
         if (viewMode === 'library') {
@@ -643,6 +680,21 @@ function App() {
             }
         },
     );
+    // nav.back/nav.forward jump straight to restoring the target place — including closing the
+    // sidebar outright when that place had it closed, which skips right past handleSelectVideo's
+    // own unsaved-changes guard (that only fires for a *different video*, not "no video at all").
+    // Guarding here instead, before the jump, covers every case in one place: same video, a
+    // different one, or none. Every trigger (Alt+Left/Right, the mouse's side buttons, the command
+    // palette's Go back/forward, and the title bar's Back/Forward buttons — see the `history` prop
+    // passed to TitleBar below) goes through these, never the raw nav.back/nav.forward.
+    const guardedBack = useCallback(() => {
+        if (sidebarRef.current?.hasUnsavedChanges()) sidebarRef.current.requestLeave(nav.back);
+        else nav.back();
+    }, [nav.back]);
+    const guardedForward = useCallback(() => {
+        if (sidebarRef.current?.hasUnsavedChanges()) sidebarRef.current.requestLeave(nav.forward);
+        else nav.forward();
+    }, [nav.forward]);
     useEffect(() => {
         // Not while something is on top of the page (a dialog, Settings, the Trash): those aren't places. The
         // sidebar's own dimming layer is marked so it doesn't count.
@@ -659,14 +711,14 @@ function App() {
             if (dir === 0) return;
             e.preventDefault();
             if (covered()) return;
-            if (dir < 0) nav.back(); else nav.forward();
+            if (dir < 0) guardedBack(); else guardedForward();
         };
         const onMouse = (e: MouseEvent) => {
             // The side buttons of a mouse: 3 is back, 4 is forward.
             if (e.button !== 3 && e.button !== 4) return;
             e.preventDefault();
             if (covered()) return;
-            if (e.button === 3) nav.back(); else nav.forward();
+            if (e.button === 3) guardedBack(); else guardedForward();
         };
         window.addEventListener('keydown', onKey, true);
         window.addEventListener('mouseup', onMouse, true);
@@ -674,7 +726,7 @@ function App() {
             window.removeEventListener('keydown', onKey, true);
             window.removeEventListener('mouseup', onMouse, true);
         };
-    }, [nav.back, nav.forward]);
+    }, [guardedBack, guardedForward]);
 
     // The Trash window is App's, so the status bar chips and the command palette both open it. Nothing in it is
     // saved anywhere: it's emptied when the app closes.
@@ -693,6 +745,14 @@ function App() {
         window.addEventListener(TRASH_RESTORED_EVENT, onRestored);
         return () => window.removeEventListener(TRASH_RESTORED_EVENT, onRestored);
     }, [library.refreshLibrary]);
+    // The Drive tree's per-category counts (and whether a category exists at all) are computed server-side, so any
+    // delete or restore, from wherever it's done (Undo on the message, the Trash window, the chip menu, the Sidebar),
+    // re-fetches it. Otherwise a Drive emptied by a delete stays gone after the video is put back.
+    useEffect(() => {
+        const bump = () => setDriveVersion(v => v + 1);
+        window.addEventListener(TRASH_CHANGED_EVENT, bump);
+        return () => window.removeEventListener(TRASH_CHANGED_EVENT, bump);
+    }, []);
 
     const paletteCommands = useMemo<PaletteCommand[]>(() => {
         const cmds: PaletteCommand[] = [];
@@ -731,14 +791,14 @@ function App() {
         if (flags.viewVisible.glossary && glossaryTrash.count > 0) {
             cmds.push({ id: 'trash-glossary', label: `Open Trash: ${labels.aliasGlossary}`, hint: `${glossaryTrash.count} in Trash`, icon: Trash2, keywords: 'trash deleted restore undo terms tags', run: () => setTrashOpen('glossary') });
         }
-        if (nav.canBack) cmds.push({ id: 'nav-back', label: 'Go back', hint: 'Alt + Left', icon: ArrowLeft, keywords: 'previous back history return', run: nav.back });
-        if (nav.canForward) cmds.push({ id: 'nav-forward', label: 'Go forward', hint: 'Alt + Right', icon: ArrowRight, keywords: 'next forward history', run: nav.forward });
+        if (nav.canBack) cmds.push({ id: 'nav-back', label: 'Go back', hint: 'Alt + Left', icon: ArrowLeft, keywords: 'previous back history return', run: guardedBack });
+        if (nav.canForward) cmds.push({ id: 'nav-forward', label: 'Go forward', hint: 'Alt + Right', icon: ArrowRight, keywords: 'next forward history', run: guardedForward });
         if (flags.showListModeToggle) {
             cmds.push({ id: 'layout', label: videoListMode === 'grid' ? 'Switch to compact layout' : 'Switch to grid layout', icon: videoListMode === 'grid' ? List : LayoutGrid, keywords: 'layout list grid compact view', run: () => { void toggleVideoListMode(); } });
         }
         return cmds;
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [flags, labels, videoListMode, videoTrash.count, glossaryTrash.count, nav.canBack, nav.canForward]);
+    }, [flags, labels, videoListMode, videoTrash.count, glossaryTrash.count, nav.canBack, nav.canForward, guardedBack, guardedForward]);
 
 
     const handleAddTag = async (term: string) => {
@@ -756,6 +816,21 @@ function App() {
                     console.error('Failed to save tag:', e);
                 }
             }
+        }
+    };
+
+    // Saving a summary syncs Videos.tags' Term subset server-side (see saveSummary's doc comment in
+    // api.ts) — Sidebar.tsx calls this with the result so the sidebar's Terms chips and the rest of
+    // the app's videoTags/selectedVideo/libraryVideos copies stay in step, the same way
+    // handleAddTag/handleRemoveTag already keep them in step for a manual Quick Tag change.
+    const handleTagsChanged = (rawTags: string) => {
+        const newTags = parseTagList(rawTags);
+        setVideoTags(newTags);
+        if (selectedVideo) {
+            setSelectedVideo(prev => prev ? { ...prev, tags: rawTags } : null);
+            library.libraryVideos.forEach(v => {
+                if (v.id === selectedVideo.id) v.tags = rawTags;
+            });
         }
     };
 
@@ -972,10 +1047,8 @@ function App() {
     // Deleting the video the dialog asked about (or, with Confirm Before Deleting off, the one a delete button asked
     // about, with no dialog at all).
     const runConfirmedDelete = async () => {
+        // The Drive tree re-fetches on its own: deleteVideo fires TRASH_CHANGED_EVENT (see the listener above).
         await library.confirmDeleteAction(() => { setSidebarOpen(false); setSelectedVideo(null); });
-        // The Drive tree's per-category video counts (and any category that just
-        // emptied) are computed server-side, so re-fetch instead of leaving them stale.
-        setDriveVersion(v => v + 1);
     };
     const autoDeletingRef = useRef(false);
     useEffect(() => {
@@ -988,7 +1061,7 @@ function App() {
         <div className="h-screen overflow-hidden bg-[#0f0f0f] text-white font-sans selection:bg-red-500/30 selection:text-white select-none flex flex-col">
             <ResizeEdges />
             <TitleBar
-                history={{ back: nav.back, forward: nav.forward, canBack: nav.canBack, canForward: nav.canForward }}
+                history={{ back: guardedBack, forward: guardedForward, canBack: nav.canBack, canForward: nav.canForward }}
                 // Title bar layout: the workspace button after the arrows. The other layouts keep the workspace shortcut in the
                 // page header (horizontal) or at the bottom of the rail (vertical).
                 workspaceButton={navigationOrientation === 'titlebar' ? (showName => <WorkspaceSwitcher variant="icon" name={labels.workspaceName} showName={showName} />) : undefined}
@@ -1273,27 +1346,52 @@ function App() {
                                             setDriveFilterAlias(alias);
                                         }
                                     }}
-                                    refreshKey={driveVersion}
                                     allowEditAlias={allowEditWDBS}
+                                    tree={wdbsTree.tree}
+                                    setTree={wdbsTree.setTree}
+                                    unsortedCount={wdbsTree.unsortedCount}
+                                    loading={wdbsTree.loading}
+                                    expanded={wdbsTree.expanded}
+                                    setExpanded={wdbsTree.setExpanded}
                                 />
-                                {canBulkAssign && (
+                                {/* mb-2: this column's own h-full already stops right at the fixed bottom bar's top edge
+                                    (via the shared marginBottom on the content region above), so without this the buttons
+                                    sit flush against it with no breathing room. */}
+                                <div className="shrink-0 mb-2 flex gap-2">
+                                    {/* Not built yet: shown greyed out so the spot is kept for it. */}
                                     <button
-                                        onClick={() => setBulkAssignMode(prev => {
-                                            const next = !prev;
-                                            if (!next) setBulkSelectedIds(new Set());
-                                            return next;
-                                        })}
-                                        // mb-2: this column's own h-full already stops right at the
-                                        // fixed bottom bar's top edge (via the shared marginBottom
-                                        // on the content region above), so without this the button
-                                        // sits flush against it with no breathing room.
-                                        className={`shrink-0 mb-2 w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${bulkAssignMode ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
-                                        title={`Select videos, then right-click to ${allowEditWDBS ? `assign them to a ${labels.aliasDriveName} category` : ''}${allowEditWDBS && canBulkSequence ? ', optionally also adding them to its sequence' : canBulkSequence ? 'add them to a sequence' : ''}`}
+                                        type="button"
+                                        disabled
+                                        // Only as wide as its label, leaving the rest of the row to Bulk Assign Mode (the longer one).
+                                        className="shrink-0 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold bg-[#121212] border-[#303030] text-gray-600 cursor-not-allowed"
+                                        title="Coming soon"
                                     >
-                                        <MousePointerClick className="w-3.5 h-3.5" />
-                                        {bulkAssignMode ? `Bulk Assign Mode (${bulkSelectedIds.size} selected)` : "Bulk Assign Mode"}
+                                        <FolderTree className="w-3.5 h-3.5 shrink-0" />
+                                        <span className="whitespace-nowrap">Manage Drive</span>
                                     </button>
-                                )}
+                                    {canBulkAssign && (
+                                        <button
+                                            onClick={() => setBulkAssignMode(prev => {
+                                                const next = !prev;
+                                                if (!next) setBulkSelectedIds(new Set());
+                                                return next;
+                                            })}
+                                            className={`flex-1 min-w-0 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${bulkAssignMode ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
+                                            title={`Select videos, then right-click to ${allowEditWDBS ? `assign them to a ${labels.aliasDriveName} category` : ''}${allowEditWDBS && canBulkSequence ? ', optionally also adding them to its sequence' : canBulkSequence ? 'add them to a sequence' : ''}`}
+                                        >
+                                            <MousePointerClick className="w-3.5 h-3.5 shrink-0" />
+                                            <span className="truncate">Bulk Assign Mode</span>
+                                            {/* The count as a small badge, not "(N selected)" in the label: the longer label got cut
+                                                short in the half-width row. */}
+                                            {bulkAssignMode && (
+                                                // h-4: no taller than the label's 16px line, or turning the mode on grows the whole row.
+                                                <span className="shrink-0 min-w-4 h-4 px-1 rounded-full bg-white/20 text-[10px] leading-4 text-center tabular-nums" title={`${bulkSelectedIds.size} selected`}>
+                                                    {bulkSelectedIds.size}
+                                                </span>
+                                            )}
+                                        </button>
+                                    )}
+                                </div>
                             </div>
                         )}
                         {/* position: relative makes this VideoList.tsx's gridRef offsetParent, so
@@ -1418,6 +1516,7 @@ function App() {
             </div>
 
             <Sidebar
+                ref={sidebarRef}
                 isOpen={sidebarOpen}
                 onClose={() => {
                     setSidebarOpen(false);
@@ -1449,6 +1548,7 @@ function App() {
                 onHandleClick={handleViewBiography}
                 onAddTag={handleAddTag}
                 onRemoveTag={handleRemoveTag}
+                onTagsChanged={handleTagsChanged}
                 onSearchInLibrary={handleSearchInLibrary}
                 initialTab={sidebarInitialTab}
                 showBiography={showBiography}

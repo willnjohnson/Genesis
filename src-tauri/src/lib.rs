@@ -3,12 +3,9 @@ use tauri::Manager;
 use std::sync::Mutex;
 mod http_server;
 
-#[cfg(feature = "genesis")]
-const APP_NAME: &str = "Genesis";
-#[cfg(not(feature = "genesis"))]
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.4.8";
+const VERSION: &str = "0.4.9";
 
 /// The smallest the window can be dragged to (logical pixels). 800 is also the smallest size
 /// offered under Settings > Display, so every choice there still fits; below this the header
@@ -212,6 +209,8 @@ pub fn run() {
             commands::bulk_update_wdbs,
             commands::set_wdbs_alias,
             commands::set_wdbs_icon,
+            commands::set_wdbs_color,
+            commands::set_wdbs_shape,
             // AI / Summarize / Ollama / Venice
             commands::check_ollama,
             commands::check_model_pulled,
@@ -289,6 +288,7 @@ pub fn run() {
             commands::update_attachment_link,
             commands::get_attachment_link,
             commands::remove_attachment,
+            commands::reorder_attachments,
             commands::open_attachment,
             commands::save_attachment_as,
             // Biography
@@ -365,6 +365,23 @@ pub fn run() {
                 // still provides resizable edges for a frameless window on Windows and Linux, and macOS resizes
                 // natively. The title above is still what the taskbar shows.
                 .decorations(false)
+                // Tauri's native drag-drop handler otherwise swallows drag events on Windows before
+                // they reach the page, showing the "not allowed" cursor and refusing every drop —
+                // this is required for the frontend's own HTML5 drag-and-drop (Drive Sequences,
+                // Attachments) to work at all there. Nothing in the app listens for Tauri's own
+                // drag-drop event (a file dragged in from outside the window), so there's nothing to
+                // lose by turning its handler off.
+                .disable_drag_drop_handler()
+                // A webview defaults to a white backing surface until its content has actually
+                // loaded and painted, and shows that default the instant the OS window appears —
+                // before the page's own `background: #0f0f0f` rule has had any chance to apply.
+                // Setting the window's own native backdrop here means that gap is black, not
+                // white, regardless of how long the page takes to load behind it. The "loading
+                // workspace" illusion itself (the Game of Life board index.html shows over this)
+                // is a same-window overlay, not a separate splash window — see k-life.js's own
+                // header comment for why that turned out simpler and more reliable than a second
+                // window coordinated over IPC.
+                .background_color(tauri::webview::Color(0x0f, 0x0f, 0x0f, 0xff))
                 .build()?;
             if let Some((x, y)) = plan.position {
                 let _ = window.set_position(tauri::PhysicalPosition::new(x, y));

@@ -78,3 +78,7 @@ window.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
   if (((e.ctrlKey || e.metaKey) && !e.altKey && (key === 'f' || key === 'g')) || key === 'f3') e.preventDefault();
 }, true);
+
+// The webview's own right-click menu (Back, Refresh, Save as, Print, Inspect...) never shows, anywhere, text boxes
+// included. Only stops the browser's default: the app's own menus (onContextMenu handlers) still open as before.
+window.addEventListener('contextmenu', (e) => e.preventDefault());

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Version update script for Kinesis/Genesis Tauri app.
+Version update script for the Kinesis Tauri app.
 
 Usage: python3 updateVersion.py <new_version>
 

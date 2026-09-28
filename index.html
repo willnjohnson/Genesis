@@ -9,7 +9,10 @@
 </head>
 
 <body>
-  <!-- The Game of Life screen shown while switching workspaces (public/k-life.js): first, so it's up before anything else loads. -->
+  <!-- The Game of Life screen (public/k-life.js): shown while switching workspaces, and — branded — for an
+       ordinary cold launch too, so there's an illusion of "loading" instead of a plain dark screen while
+       Tauri and the app itself boot. Loaded first, so it's up before anything else loads; see App.tsx for
+       where it gets taken back down. -->
   <script src="/k-life.js"></script>
   <div id="root"></div>
   <script type="module" src="/src/main.tsx"></script>

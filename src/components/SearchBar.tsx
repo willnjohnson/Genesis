@@ -2,6 +2,7 @@ import { Search, AtSign, ListVideo, Filter, X, Lightbulb, History, Clock, Type, 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { addSearchHistory, getSearchHistory, getGlossaryTerms, getSearchSuggestions, type HistoryEntry } from '../api';
 import { decodeHtmlEntities } from '../lib/utils';
+import { handlePlainContextMenu } from '../lib/markdown-editor';
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
 
@@ -30,15 +31,16 @@ function unescapeSpecial(text: string): string {
     return text.replace(/^(\s*)\\([#^@>!\\])/, '$1$2');
 }
 
-export type SearchFacet = 'handle' | 'channel_name' | 'playlist' | 'video' | 'title_search' | 'term_search' | 'definition_search' | 'tag_search' | 'person_search' | 'bio_search';
+export type SearchFacet = 'handle' | 'channel_name' | 'playlist' | 'video' | 'title_search' | 'term_search' | 'definition_search' | 'tag_search' | 'person_search' | 'bio_search' | 'no_tags';
 
 /**
  * Search input with facet detection and mode-specific keyboard shortcuts. Typing (or pasting) a
  * recognizable YouTube URL/handle/video-ID/playlist-ID auto-converts the input into a facet chip
  * (see `handleInput`/`extractHandle`/`extractVideoId`/`extractPlaylistId`); `!`-prefixed shortcuts
  * switch search mode per view (`!n`/`!p` in search mode for title/playlist search, `!d` in
- * glossary mode for term/definition search), and in the library `#` starts a Quick Tag search and
- * `^` a glossary term search.
+ * glossary mode for term/definition search), and in the library `#` starts a Quick Tag search,
+ * `^` a glossary term search, and `!#` filters to videos with no tags at all (any text typed right
+ * after it, like `!#foo`, stays a normal search on top of that filter, not a tag-name search).
  */
 export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search', initialFacets = [], initialQuery = '', placeholder }: Props) {
     const [query, setQuery] = useState(initialQuery);
@@ -182,11 +184,17 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     useEffect(() => {
         if (!userActionRef.current) return;
 
-        const fullQuery = facets.map(f => {
-            const val = f.value || query;
-            const escapedValue = (val.includes(' ') && !val.startsWith('"')) ? `"${val}"` : val;
-            return `${f.type}:${escapedValue}`;
-        }).join(' ') + (facets.length === 0 ? unescapeSpecial(query) : "");
+        // no_tags has no value of its own to carry (it's a plain yes/no filter, not "search this
+        // field for X") — unlike every other facet here, it doesn't consume `query` as its value;
+        // that stays a normal search, ANDed with the filter on the backend side (see
+        // db::search::untagged_clause).
+        const fullQuery = facets.length === 1 && facets[0].type === 'no_tags'
+            ? `no_tags: ${unescapeSpecial(query)}`.trim()
+            : facets.map(f => {
+                const val = f.value || query;
+                const escapedValue = (val.includes(' ') && !val.startsWith('"')) ? `"${val}"` : val;
+                return `${f.type}:${escapedValue}`;
+            }).join(' ') + (facets.length === 0 ? unescapeSpecial(query) : "");
 
         if (isLibrary) {
             onSearch(fullQuery);
@@ -233,6 +241,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
             case 'person_search': return <AtSign className="w-3 h-3" />;
             case 'bio_search': return <FileText className="w-3 h-3" />;
             case 'tag_search': return <span className="text-xs font-bold">#</span>;
+            case 'no_tags': return <span className="text-xs font-bold">!#</span>;
             default: return <Filter className="w-3 h-3" />;
         }
     };
@@ -350,6 +359,16 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                     return;
                 }
             }
+        }
+        // Library mode shortcut: !# → filter to untagged videos. Always reachable, like !d/!b/!m
+        // below, regardless of what's already active. Unlike every other facet here, whatever
+        // follows it (`!#foo`, no space needed) is never consumed as the facet's own value — it
+        // stays a normal search on top of the filter, so "!#foo" means "untagged AND matches foo",
+        // not "search tags for foo" (see the fullQuery effect below for how that's kept separate).
+        if (isLibrary && val.startsWith('!#')) {
+            setFacets([{ type: 'no_tags', value: '' }]);
+            setQuery(val.slice(2).trimStart());
+            return;
         }
         // Glossary mode shortcut: !d → definition_search (there's no !g: a plain search already filters by term name,
         // so a facet that did the same thing again would be redundant).
@@ -541,6 +560,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
         return [
             { type: 'tag_search' as const, label: 'Tag (#)' },
             { type: 'term_search' as const, label: 'Term (^)' },
+            { type: 'no_tags' as const, label: 'Untagged (!#)' },
             { type: 'video' as const, label: 'Video ID (>)' },
             { type: 'handle' as const, label: 'Handle (@)' },
             { type: 'channel_name' as const, label: 'Channel Name (@@)' },
@@ -625,6 +645,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                 type="text"
                                 value={query}
                                 onChange={(e) => handleInput(e.target.value)}
+                                onContextMenu={handlePlainContextMenu}
                                 onKeyDown={handleKeyDown}
                                 onKeyUp={handleKeyUp}
                                 onBlur={closeMenu}
@@ -685,6 +706,10 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                                     <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
                                                         <span>term_search:</span>
                                                         <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">^</span>/ Terms</span>
+                                                    </code>
+                                                    <code className="bg-black/40 px-2 py-1 rounded text-white flex justify-between group/code transition-colors">
+                                                        <span>no_tags:</span>
+                                                        <span className="text-gray-500 group-hover/code:text-gray-300"><span className="text-orange-400 font-bold mr-1">!#</span>/ Untagged</span>
                                                     </code>
                                                 </>
                                             ) : (

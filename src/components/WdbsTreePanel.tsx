@@ -1,10 +1,13 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, type Dispatch, type SetStateAction } from 'react';
 import { ChevronRight, ChevronDown, Inbox } from 'lucide-react';
-import { getWdbsTree, setWdbsAlias, setWdbsIcon, getUnsortedVideoCount, UNSORTED_WDBS_FILTER, type WdbsNode } from '../api';
+import { setWdbsAlias, setWdbsIcon, setWdbsColor, setWdbsShape, UNSORTED_WDBS_FILTER, type WdbsNode } from '../api';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { WdbsAliasMenu } from './WdbsAliasMenu';
 import { WdbsIconMenu } from './WdbsIconMenu';
+import { WdbsColorMenu } from './WdbsColorMenu';
 import { getWdbsIconComponent } from '../lib/wdbs-icons';
+import { getWdbsColorValue } from '../lib/wdbs-colors';
+import { WdbsShapeSwatch } from '../lib/wdbs-shapes';
 
 interface WdbsTreePanelProps {
     // `undefined` means nothing is selected; a real path selects that node (and its descendants
@@ -16,15 +19,22 @@ interface WdbsTreePanelProps {
     // favor of that one shared spot).
     onSelect: (path: string, label: string, alias: string | null) => void;
     className?: string;
-    // Bumped by the caller (App.tsx) whenever a video's WDBS assignment or symlinks change
-    // elsewhere (Sidebar's editor, bulk assign) so the tree's counts stay in sync — those
-    // mutations happen outside this component, so it has no way to know about them on its own.
-    // Only added to the fetch effect's dependencies, not used as a remount `key`, so expand/
-    // collapse state survives a refresh.
-    refreshKey?: number;
     // Gates the right-click "Edit Alias"/"Edit Icon" menu, same settings flag (allowEditWDBS)
     // that gates Bulk Assign Mode and the Sidebar's Warp Drive editor — see App.tsx.
     allowEditAlias?: boolean;
+    // The tree's data and which branches are expanded, owned by the caller (App.tsx, via
+    // hooks/useWdbsTree) rather than by this component — App.tsx never unmounts, so state living
+    // there survives this panel unmounting/remounting every time the user leaves and returns to
+    // the Library view (its own viewMode switch), instead of forcing a full refetch (and losing
+    // which branches were open) on every return for no reason. `setTree` is what this panel's own
+    // alias/icon/color/shape edits patch directly (see patchNodeInTree) — a real WDBS *assignment*
+    // change is what actually bumps App.tsx's driveVersion and triggers a genuine refetch.
+    tree: WdbsNode[];
+    setTree: Dispatch<SetStateAction<WdbsNode[]>>;
+    unsortedCount: number;
+    loading: boolean;
+    expanded: Set<string>;
+    setExpanded: Dispatch<SetStateAction<Set<string>>>;
 }
 
 /** The paths of the nodes above `path` (root first), or null when `path` isn't in the tree. */
@@ -37,13 +47,29 @@ function ancestorPaths(nodes: WdbsNode[], path: string, trail: string[] = []): s
     return null;
 }
 
+/** Applies `patch` to the one node at `path`, leaving everything else untouched — used after an
+ *  alias/icon/color/shape edit succeeds instead of a full tree refetch. Safe specifically because
+ *  none of those four ever change a node's count, children, or which nodes exist at all (that's
+ *  determined purely by videos.WDBS/VideoWDBSLinks, not by anything curated in tblWDBS) — a WDBS
+ *  *assignment* change is a different path entirely (App.tsx's driveVersion, which hooks/useWdbsTree
+ *  refetches on), not something this component edits itself. */
+function patchNodeInTree(nodes: WdbsNode[], path: string, patch: Partial<WdbsNode>): WdbsNode[] {
+    return nodes.map(node => {
+        if (node.path === path) return { ...node, ...patch };
+        if (node.children.length === 0) return node;
+        const children = patchNodeInTree(node.children, path, patch);
+        return children === node.children ? node : { ...node, children };
+    });
+}
+
 // The right-click menu itself — just picks which editor (WdbsAliasMenu/WdbsIconMenu) to open next,
 // so it's a plain two-row list rather than its own separate component file.
-function NodeContextMenu({ x, y, onEditAlias, onEditIcon, onClose }: {
+function NodeContextMenu({ x, y, onEditAlias, onEditIcon, onEditColor, onClose }: {
     x: number;
     y: number;
     onEditAlias: () => void;
     onEditIcon: () => void;
+    onEditColor: () => void;
     onClose: () => void;
 }) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -75,6 +101,9 @@ function NodeContextMenu({ x, y, onEditAlias, onEditIcon, onClose }: {
             <button onClick={onEditIcon} className="w-full text-left px-3 py-2 text-xs text-gray-200 hover:bg-[#272727] cursor-pointer">
                 Edit Icon
             </button>
+            <button onClick={onEditColor} className="w-full text-left px-3 py-2 text-xs text-gray-200 hover:bg-[#272727] cursor-pointer">
+                Edit Color Decoration
+            </button>
         </div>
     );
 }
@@ -82,18 +111,12 @@ function NodeContextMenu({ x, y, onEditAlias, onEditIcon, onClose }: {
 /**
  * The Warp Drive taxonomy tree UI — built from the distinct WDBS values in use (see
  * db/wdbs.rs::get_wdbs_tree) — shown as a toggleable side panel next to the Library/Portal grid
- * (see App.tsx's Drive panel button). Owns fetching and expand/collapse state; selection itself
- * is controlled by the caller (App.tsx wires it into the Library's own search/filter state).
+ * (see App.tsx's Drive panel button). The tree's data and expand/collapse state are owned by the
+ * caller (hooks/useWdbsTree), not this component, so they survive this panel unmounting when the
+ * user leaves the Library view; selection itself is controlled by the caller too (wired into the
+ * Library's own search/filter state).
  */
-export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, allowEditAlias = false }: WdbsTreePanelProps) {
-    const [tree, setTree] = useState<WdbsNode[]>([]);
-    const [loading, setLoading] = useState(true);
-    // The synthetic "Unsorted" entry's count (see UnsortedRow below) — videos with no home Warp
-    // Drive at all, not a real taxonomy node so it isn't part of `tree`. Refetched on the same
-    // trigger as the tree itself, since a video landing here or leaving is exactly the kind of
-    // WDBS-assignment change refreshKey already exists to catch.
-    const [unsortedCount, setUnsortedCount] = useState(0);
-    const [expanded, setExpanded] = useState<Set<string>>(new Set());
+export function WdbsTreePanel({ selectedPath, onSelect, className, allowEditAlias = false, tree, setTree, unsortedCount, loading, expanded, setExpanded }: WdbsTreePanelProps) {
     const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: WdbsNode } | null>(null);
     const [aliasMenu, setAliasMenu] = useState<{ x: number; y: number; path: string; segment: string; alias: string } | null>(null);
     const [savingAlias, setSavingAlias] = useState(false);
@@ -101,25 +124,10 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
     const [iconMenu, setIconMenu] = useState<{ x: number; y: number; path: string; segment: string; icon: string | null } | null>(null);
     const [savingIcon, setSavingIcon] = useState(false);
     const [iconError, setIconError] = useState<string | null>(null);
+    const [colorMenu, setColorMenu] = useState<{ x: number; y: number; path: string; segment: string; color: string | null; shape: string | null } | null>(null);
+    const [savingColor, setSavingColor] = useState(false);
+    const [colorError, setColorError] = useState<string | null>(null);
     const label = useWorkspace().labels.aliasDriveName;
-
-    const fetchTree = useCallback(() => {
-        let cancelled = false;
-        setLoading(true);
-        getWdbsTree()
-            .then(nodes => { if (!cancelled) setTree(nodes); })
-            .catch(() => { if (!cancelled) setTree([]); })
-            .finally(() => { if (!cancelled) setLoading(false); });
-        return () => { cancelled = true; };
-    }, []);
-
-    useEffect(() => fetchTree(), [fetchTree, refreshKey]);
-
-    useEffect(() => {
-        let cancelled = false;
-        getUnsortedVideoCount().then(c => { if (!cancelled) setUnsortedCount(c); }).catch(() => { if (!cancelled) setUnsortedCount(0); });
-        return () => { cancelled = true; };
-    }, [refreshKey]);
 
     // A selection made from outside the tree (e.g. a Biography's "In Drive" list) may sit inside
     // collapsed branches, so open the ones above it.
@@ -149,29 +157,90 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
         setAliasError(null);
         try {
             await setWdbsAlias(aliasMenu.path, alias);
+            // Mirrors get_wdbs_tree's own suppression exactly (build_nodes: `!a.is_empty() && *a
+            // != segment`) — a blank alias, or one that just restates the segment name, renders
+            // the same as "nothing curated" there, so it has to here too.
+            const trimmed = alias.trim();
+            const newAlias = trimmed === '' || trimmed === aliasMenu.segment ? null : trimmed;
+            setTree(prev => patchNodeInTree(prev, aliasMenu.path, { alias: newAlias }));
             setAliasMenu(null);
-            fetchTree();
         } catch (e: any) {
             setAliasError(typeof e === "string" ? e : e?.message ?? "Couldn't save that alias.");
         } finally {
             setSavingAlias(false);
         }
-    }, [aliasMenu, fetchTree]);
+    }, [aliasMenu]);
 
+    // Picking an icon keeps the popover open, like the color decoration's: the user may be trying a few to see which
+    // looks best in the tree. The iconMenu.icon update moves the popover's highlight to the new pick.
     const handleSelectIcon = useCallback(async (icon: string) => {
         if (!iconMenu) return;
         setSavingIcon(true);
         setIconError(null);
         try {
             await setWdbsIcon(iconMenu.path, icon);
-            setIconMenu(null);
-            fetchTree();
+            setTree(prev => patchNodeInTree(prev, iconMenu.path, { icon: icon || null }));
+            setIconMenu(m => m && { ...m, icon: icon || null });
         } catch (e: any) {
             setIconError(typeof e === "string" ? e : e?.message ?? "Couldn't save that icon.");
         } finally {
             setSavingIcon(false);
         }
-    }, [iconMenu, fetchTree]);
+    }, [iconMenu]);
+
+    // Picking a color/shape keeps the popover open (unlike WdbsAliasMenu, which has exactly one
+    // thing to set) — there are two independent choices to make here, so closing
+    // after the first would just force a re-open through the context menu to set the second. The
+    // colorMenu.color/shape update keeps the popover's own highlighting and shape previews in
+    // sync; patching `tree` directly (rather than a fetchTree() round trip) is what the actual
+    // row's chip picks up from.
+    const handleSelectColor = useCallback(async (color: string) => {
+        if (!colorMenu) return;
+        setSavingColor(true);
+        setColorError(null);
+        try {
+            await setWdbsColor(colorMenu.path, color);
+            setTree(prev => patchNodeInTree(prev, colorMenu.path, { color: color || null }));
+            setColorMenu(m => m && { ...m, color: color || null });
+        } catch (e: any) {
+            setColorError(typeof e === "string" ? e : e?.message ?? "Couldn't save that color.");
+        } finally {
+            setSavingColor(false);
+        }
+    }, [colorMenu]);
+
+    const handleSelectShape = useCallback(async (shape: string) => {
+        if (!colorMenu) return;
+        setSavingColor(true);
+        setColorError(null);
+        try {
+            await setWdbsShape(colorMenu.path, shape);
+            setTree(prev => patchNodeInTree(prev, colorMenu.path, { shape: shape || null }));
+            setColorMenu(m => m && { ...m, shape: shape || null });
+        } catch (e: any) {
+            setColorError(typeof e === "string" ? e : e?.message ?? "Couldn't save that shape.");
+        } finally {
+            setSavingColor(false);
+        }
+    }, [colorMenu]);
+
+    // "None" clears both — a color decoration with no color has nothing to display, so leaving a
+    // shape choice behind on its own would just be an inert, invisible setting (see
+    // WdbsColorMenu's own doc comment).
+    const handleClearColorDecoration = useCallback(async () => {
+        if (!colorMenu) return;
+        setSavingColor(true);
+        setColorError(null);
+        try {
+            await Promise.all([setWdbsColor(colorMenu.path, ''), setWdbsShape(colorMenu.path, '')]);
+            setTree(prev => patchNodeInTree(prev, colorMenu.path, { color: null, shape: null }));
+            setColorMenu(m => m && { ...m, color: null, shape: null });
+        } catch (e: any) {
+            setColorError(typeof e === "string" ? e : e?.message ?? "Couldn't clear that color decoration.");
+        } finally {
+            setSavingColor(false);
+        }
+    }, [colorMenu]);
 
     return (
         <div className={className}>
@@ -233,6 +302,11 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
                         setIconMenu({ x: contextMenu.x, y: contextMenu.y, path: contextMenu.node.path, segment: contextMenu.node.segment, icon: contextMenu.node.icon });
                         setContextMenu(null);
                     }}
+                    onEditColor={() => {
+                        setColorError(null);
+                        setColorMenu({ x: contextMenu.x, y: contextMenu.y, path: contextMenu.node.path, segment: contextMenu.node.segment, color: contextMenu.node.color, shape: contextMenu.node.shape });
+                        setContextMenu(null);
+                    }}
                     onClose={() => setContextMenu(null)}
                 />
             )}
@@ -260,6 +334,21 @@ export function WdbsTreePanel({ selectedPath, onSelect, className, refreshKey, a
                     error={iconError}
                 />
             )}
+            {colorMenu && (
+                <WdbsColorMenu
+                    x={colorMenu.x}
+                    y={colorMenu.y}
+                    segment={colorMenu.segment}
+                    currentColor={colorMenu.color}
+                    currentShape={colorMenu.shape}
+                    onSelectColor={handleSelectColor}
+                    onSelectShape={handleSelectShape}
+                    onClear={handleClearColorDecoration}
+                    onClose={() => setColorMenu(null)}
+                    saving={savingColor}
+                    error={colorError}
+                />
+            )}
         </div>
     );
 }
@@ -282,6 +371,8 @@ function TreeBranch({ node, depth, expanded, onToggleExpanded, selectedPath, onS
                 label={node.segment}
                 alias={node.alias}
                 icon={node.icon}
+                color={node.color}
+                shape={node.shape}
                 count={node.count}
                 depth={depth}
                 hasChildren={hasChildren}
@@ -329,10 +420,12 @@ function UnsortedRow({ count, selected, onSelect }: { count: number; selected: b
     );
 }
 
-function TreeRow({ label, alias, icon, count, depth, hasChildren, expanded, selected, editable, onToggle, onSelect, onContextMenu }: {
+function TreeRow({ label, alias, icon, color, shape, count, depth, hasChildren, expanded, selected, editable, onToggle, onSelect, onContextMenu }: {
     label: string;
     alias: string | null;
     icon: string | null;
+    color: string | null;
+    shape: string | null;
     count: number;
     depth: number;
     hasChildren: boolean;
@@ -344,6 +437,12 @@ function TreeRow({ label, alias, icon, count, depth, hasChildren, expanded, sele
     onContextMenu: (x: number, y: number) => void;
 }) {
     const Icon = getWdbsIconComponent(icon);
+    // Its own small chip between the icon and the name, rather than a rule under the name itself
+    // (an underline read as accidental link styling, and disappeared under `truncate`'s ellipsis
+    // on a long name). `getWdbsColorValue` resolves to a `var(...)` pointing at index.css's
+    // --k-drive-* tokens, which already carry the light/dark-appropriate shade for whichever theme
+    // is active, so nothing here needs its own light/dark branching.
+    const colorValue = getWdbsColorValue(color);
     return (
         <div
             className={`flex items-center gap-1 rounded-lg cursor-pointer group transition-colors ${selected ? 'bg-red-600 text-white' : 'text-gray-300 hover:bg-[#272727]'}`}
@@ -358,8 +457,18 @@ function TreeRow({ label, alias, icon, count, depth, hasChildren, expanded, sele
             >
                 {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
             </button>
+            {colorValue && (
+                <WdbsShapeSwatch
+                    shape={shape ?? 'square'}
+                    colorValue={colorValue}
+                    className="mr-1.5"
+                    borderClassName={selected ? 'border-white/30' : 'border-black/20'}
+                />
+            )}
             {Icon && <Icon className={`w-3.5 h-3.5 shrink-0 mr-1 ${selected ? 'text-white/80' : 'text-gray-500'}`} />}
-            <span className="flex-1 min-w-0 text-sm py-1.5 truncate" title={alias ?? undefined}>{label}</span>
+            <span className="flex-1 min-w-0 text-sm py-1.5 truncate" title={alias ?? undefined}>
+                {label}
+            </span>
             <span className={`text-[11px] font-medium px-2 shrink-0 ${selected ? 'text-white/80' : 'text-gray-500'}`}>{count}</span>
         </div>
     );

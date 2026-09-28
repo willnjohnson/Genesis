@@ -121,6 +121,16 @@ pub async fn remove_attachment(app: AppHandle, id: i64) -> Result<(), String> {
     attachments::remove_attachment(&db_path, id).map_err(|e| e.to_string())
 }
 
+/// Drag-and-drop reordering in the Attachments panel. `ordered_ids` is whichever tab (files or
+/// links) is currently showing — the other kind's order is untouched (see the doc comment on
+/// `attachments::reorder_attachments`).
+#[command]
+pub async fn reorder_attachments(app: AppHandle, video_id: String, ordered_ids: Vec<i64>) -> Result<(), String> {
+    let db_path = get_db_path(&app);
+    require_edit(&db_path)?;
+    attachments::reorder_attachments(&db_path, &video_id, &ordered_ids).map_err(|e| e.to_string())
+}
+
 fn temp_dir() -> std::path::PathBuf {
     std::env::temp_dir().join("kinesis-attachments")
 }

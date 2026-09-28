@@ -73,8 +73,23 @@ pub async fn save_video(
             let _ = db::save_summary(&db_path, &video_id, s);
         }
 
+        // Re-fetch summary/tags rather than reuse v_data's copy of them: save_summary above (when
+        // a summary was provided) can have changed both — it appends the "Channel Info:" footer and
+        // syncs Videos.tags' Term subset to whatever's now linked in the summary (see
+        // db::summaries::sync_terms_from_video_text) — and the caller needs the result of that, not
+        // what was on the row before it ran.
+        let (summary_now, tags_now): (String, String) = {
+            let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT COALESCE(summary, ''), COALESCE(tags, '') FROM Videos WHERE video_id = ?1",
+                rusqlite::params![video_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or((v_data.9.clone(), v_data.10.clone()))
+        };
+
         let has_transcript = !v_data.4.trim().is_empty();
-        let has_summary = db::has_real_summary(&v_data.9);
+        let has_summary = db::has_real_summary(&summary_now);
         return Ok(Video {
             id: v_data.0,
             title: v_data.1,
@@ -87,8 +102,8 @@ pub async fn save_video(
             date_added: Some(v_data.8),
             length_seconds: Some(v_data.3),
             transcript: Some(v_data.4),
-            summary: Some(v_data.9),
-            tags: Some(v_data.10),
+            summary: Some(summary_now),
+            tags: Some(tags_now),
             has_transcript: Some(has_transcript),
             has_summary: Some(has_summary),
             wdbs: None,
@@ -124,11 +139,21 @@ pub async fn save_video(
             db::save_video(&db_path, &video_id, title_val, &author, length, transcript_val, view_count, &published_at, &handle, summary.as_deref())
                 .map_err(|e| e.to_string())?;
 
-            let date_added = {
+            // Read back rather than assume `tags: None`: save_video above can have populated
+            // Videos.tags' Term subset already, if `summary` came in with glossary links already in
+            // it (see db::summaries::sync_terms_from_video_text) — a summary can be supplied at first
+            // save, not only added afterwards.
+            let (date_added, tags_now): (Option<String>, Option<String>) = {
                 let conn = rusqlite::Connection::open(&db_path).ok();
                 conn.and_then(|c| {
-                    c.query_row("SELECT date_added FROM Videos WHERE video_id = ?", rusqlite::params![video_id], |row| row.get::<_, Option<String>>(0)).ok().flatten()
+                    c.query_row(
+                        "SELECT date_added, tags FROM Videos WHERE video_id = ?",
+                        rusqlite::params![video_id],
+                        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .ok()
                 })
+                .unwrap_or((None, None))
             };
 
             return Ok(Video {
@@ -144,7 +169,7 @@ pub async fn save_video(
                 length_seconds: Some(length),
                 transcript: Some(transcript_val.to_string()),
                 summary,
-                tags: None,
+                tags: tags_now,
                 has_transcript: Some(true),
                 has_summary: Some(has_summary),
                 wdbs: None,

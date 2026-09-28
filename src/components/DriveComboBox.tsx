@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { handleWdbsInputChange } from '../lib/wdbs-input';
+import { handlePlainContextMenu } from '../lib/markdown-editor';
 
 interface DriveComboBoxProps {
     value: string;
@@ -113,6 +114,7 @@ export function DriveComboBox({ value, onValueChange, suggestions, suggestedDriv
                 // Delayed so a list item's onClick still fires before the dropdown unmounts underneath it.
                 onBlur={() => setTimeout(() => setOpen(false), 150)}
                 onChange={(e) => handleWdbsInputChange(e, onValueChange)}
+                onContextMenu={handlePlainContextMenu}
                 onKeyDown={(e) => {
                     if (open && flat.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
                         e.preventDefault();

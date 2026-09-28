@@ -1,14 +1,20 @@
-/* The screen shown while switching between workspaces: a 5x5 block of cells running Conway's Game of
-   Life, drawn like the board behind the Workspaces screen (src/components/workspace/LifeBackground.tsx):
-   plain squares in the theme's text color, fading in and out, a newborn glowing in the accent color.
-   Loaded as a plain script ahead of the app (index.html), so it can be up the instant the page starts
-   loading after a switch reloads the window (see src/lib/transitions.ts, which shows it as the old page
-   zooms away and hides it once the new one is ready).
+/* The screen shown while switching between workspaces, and — branded, see show()'s `launch` param
+   and the bottom of this file — the one shown for an ordinary cold launch too: a 5x5 block of cells
+   running Conway's Game of Life, drawn like the board behind the Workspaces screen
+   (src/components/workspace/LifeBackground.tsx): plain squares in the theme's text color, fading in
+   and out, a newborn glowing in the accent color. Loaded as a plain script ahead of the app
+   (index.html), so it can be up the instant the page starts loading — either after a workspace
+   switch reloads the window (see src/lib/transitions.ts, which shows it as the old page zooms away
+   and hides it once the new one is ready) or, for a cold launch, before Tauri's window has even
+   finished setting up (see src/App.tsx, which hides it once its own startup resolves). A cold
+   launch has no real "theme" loaded yet to draw from, so that case always uses the classic Erebos
+   colors, not whatever the page's CSS custom properties currently say.
 
-   The window has no native title bar (the app draws its own, src/components/TitleBar.tsx), and the page it lives
-   in is gone during the reload. So this screen also puts up a plain title bar of its own, above it: a place
-   to drag the window and the window buttons, in the theme's colors, the same height as the app's. It comes down
-   once the new page's own title bar is underneath it.
+   The window has no native title bar (the app draws its own, src/components/TitleBar.tsx), and either the
+   page it lives in is gone during a reload, or (a cold launch) hasn't loaded far enough to have drawn one
+   yet. So this screen also puts up a plain title bar of its own, above it: a place to drag the window and
+   the window buttons, in the theme's colors, the same height as the app's. It comes down once the real
+   one is underneath it.
 
    The board wraps at its edges, like the Workspaces one. When it dies out or starts repeating it is
    seeded again with fresh cells. */
@@ -24,6 +30,10 @@
     var MIN_MS = 500;
     var ALIVE = 0.3; // how strong a fully alive cell is (the Workspaces board is fainter: it's only texture there)
     var BAR_HEIGHT = '1.75rem'; // --k-titlebar-height in index.css
+    // The Kinesis "K", traced from src/assets/kinesis.png — the same path
+    // src/assets/logo-marks.ts/components/BrandLogo.tsx draw from, copied here since this script
+    // runs before any of that has loaded (see the cold-launch case in show() below).
+    var MARK_PATH = "M308 799.4C306.1 799.2 299.6 798.5 293.6 798C146.9 783.8 24.2 666 3.6 519.5C0.1 495.1 0 486.5 0 248.5C0 19.9 0.1 10.3 1.8 7.1C5.6 0.1 6 -0 48.5 0C86.4 0 98.6 0.6 119.5 3.6C222.6 18.1 316.2 85.2 363.8 178.7C383 216.4 393.8 253.1 398.4 295.5C399.6 307.1 399.8 293 399.9 159.5C400 -7.3 399.4 5.9 407.1 1.8C411.9 -0.8 787 -1.1 792.3 1.5C799.7 5.1 799.5 3.4 799.5 52C799.5 104.9 797.9 120.8 789.5 153.4C755.1 286.9 642.7 383.5 504.5 398.4C492.9 399.6 507 399.8 640.5 399.9C807.3 400 794.1 399.4 798.2 407.1C801.2 412.6 801 787.9 798 792.8C793.6 800 793.8 800 752.5 800C684.9 800 649.6 794.2 603.9 775.5C554.4 755.3 505.1 718.5 472.5 677.5C431.5 626.1 403.9 556.3 400.8 496.2C400.6 493.6 400.3 559.1 400 641.7L399.5 792L395.7 795.7L392 799.5L351.7 799.6C329.6 799.7 309.9 799.6 308 799.4Z";
     var overlay = null;
     var bar = null;
     var timer = null;
@@ -35,12 +45,45 @@
         try { return JSON.parse(sessionStorage.getItem(LOOK) || 'null'); } catch (e) { return null; }
     }
 
-    function build(look, fade, label) {
+    // `brand` (only true for the cold-launch case in show() below) prepends the Kinesis logo and
+    // wordmark above the board — there's no real page underneath yet for a cold launch to imply
+    // "returning to where you were" the way the plain board does for a workspace switch, so this
+    // spells out what's actually loading instead.
+    function build(look, fade, label, brand) {
         var el = document.createElement('div');
         el.id = 'k-life';
         el.setAttribute('aria-hidden', 'true');
         el.style.cssText = 'position:fixed;top:' + BAR_HEIGHT + ';left:0;right:0;bottom:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:' + look.bg +
-            ';opacity:' + (fade ? '0' : '1') + ';transition:opacity .22s ease-out;pointer-events:all;overflow:hidden;';
+            ';opacity:' + (fade ? '0' : '1') + ';transition:opacity .22s ease-out;pointer-events:all;overflow:hidden;-webkit-user-select:none;user-select:none;';
+        el.style.flexDirection = 'column';
+        el.style.gap = '22px';
+        if (brand) {
+            var NS = 'http://www.w3.org/2000/svg';
+            var row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:14px;';
+            var svg = document.createElementNS(NS, 'svg');
+            svg.setAttribute('viewBox', '0 0 800 800');
+            svg.setAttribute('width', '40');
+            svg.setAttribute('height', '40');
+            var path = document.createElementNS(NS, 'path');
+            path.setAttribute('fill', look.accent);
+            path.setAttribute('fill-rule', 'evenodd');
+            path.setAttribute('d', MARK_PATH);
+            svg.appendChild(path);
+            row.appendChild(svg);
+            var word = document.createElement('div');
+            word.style.cssText = 'font:700 24px/1 "Roboto","Inter",system-ui,-apple-system,sans-serif;letter-spacing:.01em;white-space:nowrap;';
+            var prefix = document.createElement('span');
+            prefix.textContent = 'Kin';
+            prefix.style.color = look.accent;
+            var suffix = document.createElement('span');
+            suffix.textContent = 'esis';
+            suffix.style.color = look.fg;
+            word.appendChild(prefix);
+            word.appendChild(suffix);
+            row.appendChild(word);
+            el.appendChild(row);
+        }
         var grid = document.createElement('div');
         grid.style.cssText = 'display:grid;grid-template-columns:repeat(' + SIZE + ',' + CELL + 'px);grid-template-rows:repeat(' + SIZE + ',' + CELL + 'px);gap:' + GAP + 'px;';
         var cells = [];
@@ -50,14 +93,14 @@
             grid.appendChild(c);
             cells.push(c);
         }
-        el.style.flexDirection = 'column';
-        el.style.gap = '22px';
         el.appendChild(grid);
-        // Which workspace is loading, under the board: the same size and color as Search's "No search results" (text-xl).
+        // Which workspace is loading, under the board (or, for a cold launch, a plain "Initializing..."):
+        // the same size and color as Search's "No search results" (text-xl) normally, a step smaller and
+        // dimmer alongside the brand row above, so it reads as a caption rather than competing with it.
         var text = document.createElement('div');
         text.textContent = label;
-        text.style.cssText = 'font:400 20px/28px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:' + look.fg +
-            ';max-width:70vw;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        text.style.cssText = 'font:400 ' + (brand ? '13px/20px' : '20px/28px') + ' system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:' + look.fg +
+            (brand ? ';opacity:.55' : '') + ';max-width:70vw;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
         el.appendChild(text);
         return { el: el, cells: cells };
     }
@@ -205,32 +248,45 @@
         }, STEP_MS);
     }
 
-    function show(fade, remember, label) {
+    // `launch` is the cold-launch case (see the bottom of this file): the classic Erebos colors
+    // always, hardcoded, rather than read off the page's CSS custom properties — there's no theme
+    // applied yet at all this early (nothing's loaded to apply one), and even once the real app
+    // loads behind this screen, the user's actual theme might not be Erebos, so reading it live
+    // would be reading a value that's about to change anyway. Brand row on, default label
+    // "Initializing...". Same overlay/bar/timer state as a workspace switch, safely: the two
+    // cases are mutually exclusive per page load (see the bottom of this file), never both up.
+    function show(fade, remember, label, launch) {
         if (overlay) return;
         // No scrollbars while the page zooms about and reloads (see .k-switching in index.css).
         html.classList.add('k-switching');
         // The page's own title bar stays hidden while the screen's copy of it is up (see index.css).
         html.classList.add('k-bar-swap');
-        var style = getComputedStyle(html);
-        var look = {
-            bg: (style.getPropertyValue('--k-bg') || '').trim(),
-            fg: (style.getPropertyValue('--k-text-white') || '').trim(),
-            accent: (style.getPropertyValue('--k-accent') || '').trim()
-        };
-        var saved = readLook();
-        if (remember && look.bg && look.fg && look.accent) {
-            try { sessionStorage.setItem(LOOK, JSON.stringify(look)); } catch (e) { /* storage blocked */ }
+        var look;
+        if (launch) {
+            look = { bg: '#0f0f0f', fg: '#ffffff', accent: '#dc2626' };
+        } else {
+            var style = getComputedStyle(html);
+            look = {
+                bg: (style.getPropertyValue('--k-bg') || '').trim(),
+                fg: (style.getPropertyValue('--k-text-white') || '').trim(),
+                accent: (style.getPropertyValue('--k-accent') || '').trim()
+            };
+            var saved = readLook();
+            if (remember && look.bg && look.fg && look.accent) {
+                try { sessionStorage.setItem(LOOK, JSON.stringify(look)); } catch (e) { /* storage blocked */ }
+            }
+            look.bg = look.bg || (saved && saved.bg) || '#0f0f0f';
+            look.fg = look.fg || (saved && saved.fg) || '#ffffff';
+            look.accent = look.accent || (saved && saved.accent) || '#dc2626';
         }
-        look.bg = look.bg || (saved && saved.bg) || '#0f0f0f';
-        look.fg = look.fg || (saved && saved.fg) || '#ffffff';
-        look.accent = look.accent || (saved && saved.accent) || '#dc2626';
         if (!label) {
             try { label = sessionStorage.getItem(LABEL); } catch (e) { /* storage blocked */ }
         }
-        var built = build(look, fade, label || 'Loading workspace');
+        var defaultLabel = launch ? 'Initializing...' : 'Loading workspace';
+        var built = build(look, fade, label || defaultLabel, launch);
         overlay = built.el;
         html.appendChild(overlay);
-        bar = buildBar(look, label || 'Loading workspace', !remember);
+        bar = buildBar(look, label || defaultLabel, !remember);
         html.appendChild(bar);
         shownAt = Date.now();
         run(built.cells, look);
@@ -268,7 +324,13 @@
     window.kLife = { show: show, hide: hide };
 
     // Arriving from a workspace switch: up straight away, before the app's own scripts have loaded.
+    // Otherwise, a cold launch: the same screen, branded (see show()'s `launch` param) — so there's
+    // an illusion of "loading" instead of the plain #0f0f0f background (see index.html/App.tsx's
+    // own comments) staring back at the user for however long Tauri and the app take to actually
+    // get going. App.tsx calls the same hide() once its own startup (flags, workspace labels, the
+    // real theme/layout settings) has resolved.
     try {
         if (sessionStorage.getItem(KEY) === 'enter') show(false, false);
+        else show(false, false, undefined, true);
     } catch (e) { /* storage blocked: no interstitial */ }
 })();

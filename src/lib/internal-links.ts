@@ -48,6 +48,28 @@ export function parseInternalHref(href: string | undefined | null): { kind: Link
     }
 }
 
+/** Every unique glossary term linked (`[Text](kinesis://glossary/Term)`) in raw markdown `text`, in
+ *  the order first seen — the Sidebar's Terms panel uses this to show whichever of the transcript
+ *  or the AI Summary is currently being read (see Sidebar.tsx), and the same detection backs what
+ *  actually gets persisted to Videos.tags server-side (src-tauri/src/db/summaries.rs's
+ *  `sync_terms_from_video_text`, which finds these the same way via db/links.rs's `find_links`). */
+export function findGlossaryTerms(text: string): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const m of text.matchAll(/\[[^[\]]*\]\(kinesis:\/\/glossary\/([A-Za-z0-9\-._~%]+)\)/g)) {
+        try {
+            const key = decodeURIComponent(m[1]);
+            if (!seen.has(key)) {
+                seen.add(key);
+                out.push(key);
+            }
+        } catch {
+            // Malformed percent-encoding: skip rather than throw.
+        }
+    }
+    return out;
+}
+
 /** react-markdown drops URLs whose scheme it doesn't know, so in-app links are let through. */
 export function markdownUrlTransform(url: string): string {
     return url.startsWith(LINK_SCHEME) ? url : defaultUrlTransform(url);

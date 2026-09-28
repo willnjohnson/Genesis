@@ -248,9 +248,10 @@ pub fn add_attachment(db_path: &str, video_id: &str, file_name: &str, bytes: Vec
         params![hash, compression, size, stored_size, data],
     )
     .map_err(db_err)?;
+    let position = next_position(&tx, video_id).map_err(db_err)?;
     tx.execute(
-        "INSERT INTO VideoAttachments (video_id, name, ext, hash, added_at) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-        params![video_id, name, ext, hash],
+        "INSERT INTO VideoAttachments (video_id, name, ext, hash, added_at, position) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?5)",
+        params![video_id, name, ext, hash, position],
     )
     .map_err(db_err)?;
     let id = tx.last_insert_rowid();
@@ -258,6 +259,17 @@ pub fn add_attachment(db_path: &str, video_id: &str, file_name: &str, bytes: Vec
     let info = load_info(&tx, id).map_err(db_err)?.ok_or_else(|| "The attachment could not be read back.".to_string())?;
     tx.commit().map_err(db_err)?;
     Ok(info)
+}
+
+/// The position a new attachment (file or link) for this video should get: one past the highest
+/// already used, across both kinds — a shared per-video counter, harmless even though files and
+/// links only ever have their positions compared within their own kind (see `list_attachments`).
+fn next_position(conn: &Connection, video_id: &str) -> Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(position), 0) + 1 FROM VideoAttachments WHERE video_id = ?1",
+        params![video_id],
+        |r| r.get(0),
+    )
 }
 
 /// Adds a file from disk. The size and type are checked from the path and its metadata before any
@@ -306,9 +318,10 @@ pub fn add_link(db_path: &str, video_id: &str, title: &str, url: &str) -> std::r
         params![hash, size, bytes],
     )
     .map_err(db_err)?;
+    let position = next_position(&tx, video_id).map_err(db_err)?;
     tx.execute(
-        "INSERT INTO VideoAttachments (video_id, name, ext, hash, added_at) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-        params![video_id, title, LINK_EXT, hash],
+        "INSERT INTO VideoAttachments (video_id, name, ext, hash, added_at, position) VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?5)",
+        params![video_id, title, LINK_EXT, hash, position],
     )
     .map_err(db_err)?;
     let id = tx.last_insert_rowid();
@@ -409,10 +422,29 @@ pub fn list_attachments(db_path: &str, video_id: &str) -> Result<Vec<AttachmentI
     let mut stmt = conn.prepare(
         "SELECT a.id, a.name, a.ext, b.size, b.stored_size, a.added_at
            FROM VideoAttachments a JOIN AttachmentBlobs b ON b.hash = a.hash
-          WHERE a.video_id = ?1 ORDER BY a.id",
+          WHERE a.video_id = ?1 ORDER BY a.position, a.id",
     )?;
     let rows = stmt.query_map(params![video_id], row_to_info)?;
     rows.collect()
+}
+
+/// Puts this video's attachments in a new order (drag-and-drop in the Attachments panel) — files
+/// and links are reordered independently (the panel drags within one tab at a time), so
+/// `ordered_ids` is whichever subset (all files, or all links) the caller is currently showing; the
+/// other kind's positions are left exactly as they were. Renumbers 1..N over just that subset, in
+/// the order given — an id that isn't actually one of this video's attachments (or belongs to the
+/// other kind) is silently skipped rather than erroring, since the two panics that could cause this
+/// (a stale list, a removed attachment) both resolve themselves the next time the panel reloads.
+pub fn reorder_attachments(db_path: &str, video_id: &str, ordered_ids: &[i64]) -> Result<()> {
+    let mut conn = Connection::open(db_path)?;
+    let tx = conn.transaction()?;
+    for (i, id) in ordered_ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE VideoAttachments SET position = ?1 WHERE id = ?2 AND video_id = ?3",
+            params![(i + 1) as i64, id, video_id],
+        )?;
+    }
+    tx.commit()
 }
 
 /// Removes one attachment, and its stored bytes too once no other video uses them.
@@ -758,5 +790,99 @@ mod tests {
         let cleaned = clean_name(&long);
         assert_eq!(cleaned.chars().count(), NAME_MAX_CHARS);
         assert!(cleaned.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn new_attachments_are_listed_in_the_order_they_were_added() {
+        let db = temp_db("order");
+        video(&db, "v1");
+        let a = add_attachment(&db, "v1", "a.txt", b"a".repeat(10)).unwrap();
+        let b = add_attachment(&db, "v1", "b.txt", b"b".repeat(10)).unwrap();
+        let c = add_attachment(&db, "v1", "c.txt", b"c".repeat(10)).unwrap();
+        assert_eq!(list_attachments(&db, "v1").unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>(), vec![a.id, b.id, c.id]);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn reordering_moves_an_attachment_directly_to_where_it_was_dropped() {
+        let db = temp_db("reorder");
+        video(&db, "v1");
+        let a = add_attachment(&db, "v1", "a.txt", b"a".repeat(10)).unwrap();
+        let b = add_attachment(&db, "v1", "b.txt", b"b".repeat(10)).unwrap();
+        let c = add_attachment(&db, "v1", "c.txt", b"c".repeat(10)).unwrap();
+        // The third moved before the first, in one step — not two adjacent swaps.
+        reorder_attachments(&db, "v1", &[c.id, a.id, b.id]).unwrap();
+        assert_eq!(list_attachments(&db, "v1").unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>(), vec![c.id, a.id, b.id]);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn reordering_files_never_touches_a_links_order_or_vice_versa() {
+        let db = temp_db("reorder_kinds");
+        video(&db, "v1");
+        let f1 = add_attachment(&db, "v1", "a.txt", b"a".repeat(10)).unwrap();
+        let l1 = add_link(&db, "v1", "L1", "https://example.com/1").unwrap();
+        let f2 = add_attachment(&db, "v1", "b.txt", b"b".repeat(10)).unwrap();
+        let l2 = add_link(&db, "v1", "L2", "https://example.com/2").unwrap();
+        // Reverse just the files.
+        reorder_attachments(&db, "v1", &[f2.id, f1.id]).unwrap();
+        let all = list_attachments(&db, "v1").unwrap();
+        let files: Vec<_> = all.iter().filter(|a| a.ext != LINK_EXT).map(|a| a.id).collect();
+        let links: Vec<_> = all.iter().filter(|a| a.ext == LINK_EXT).map(|a| a.id).collect();
+        assert_eq!(files, vec![f2.id, f1.id]);
+        assert_eq!(links, vec![l1.id, l2.id], "links keep their own, untouched order");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn an_id_from_another_video_is_ignored_by_reorder() {
+        let db = temp_db("reorder_cross_video");
+        video(&db, "v1");
+        video(&db, "v2");
+        let a = add_attachment(&db, "v1", "a.txt", b"a".repeat(10)).unwrap();
+        let b = add_attachment(&db, "v1", "b.txt", b"b".repeat(10)).unwrap();
+        let other = add_attachment(&db, "v2", "x.txt", b"x".repeat(10)).unwrap();
+        // A stale/tampered id for a different video's attachment: silently skipped, v1's own two
+        // still land in the order given, and v2's is left completely alone.
+        reorder_attachments(&db, "v1", &[other.id, b.id, a.id]).unwrap();
+        assert_eq!(list_attachments(&db, "v1").unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>(), vec![b.id, a.id]);
+        assert_eq!(list_attachments(&db, "v2").unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>(), vec![other.id]);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn a_pre_existing_database_backfills_position_by_its_old_insertion_order() {
+        // Simulates a database from before `position` existed: the column is absent, so init_db's
+        // migration (schema.rs) has to add it and backfill from `id` order, matching exactly how
+        // these rows were always shown before this feature existed.
+        let db = temp_db("backfill");
+        {
+            let conn = Connection::open(&db).unwrap();
+            // The index over `position` (created by temp_db's own init_db call above) has to go
+            // first — SQLite refuses to drop a column an index still references.
+            conn.execute("DROP INDEX idxVideoAttachmentsOrder", []).unwrap();
+            conn.execute("ALTER TABLE VideoAttachments DROP COLUMN position", []).unwrap();
+        }
+        video(&db, "v1");
+        let a = add_attachment(&db, "v1", "a.txt", b"a".repeat(10));
+        // Without the column, INSERT with a `position` value fails — confirms the column is really gone.
+        assert!(a.is_err());
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "INSERT INTO AttachmentBlobs (hash, compression, size, stored_size, data) VALUES ('h1','none',1,1,x'01'), ('h2','none',1,1,x'02')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO VideoAttachments (video_id, name, ext, hash, added_at) VALUES ('v1','first.txt','txt','h1','2026-01-01T00:00:00Z'), ('v1','second.txt','txt','h2','2026-01-02T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+        init_db(&db).unwrap(); // Re-running the migration is what a normal app launch does anyway.
+        let names: Vec<String> = list_attachments(&db, "v1").unwrap().into_iter().map(|a| a.name).collect();
+        assert_eq!(names, vec!["first.txt".to_string(), "second.txt".to_string()]);
+        let _ = std::fs::remove_file(&db);
     }
 }
