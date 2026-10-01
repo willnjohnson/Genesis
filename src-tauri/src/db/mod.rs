@@ -14,6 +14,7 @@ pub mod links;
 pub mod tokens;
 pub mod workspace;
 pub mod sequences;
+pub mod drive_manage;
 
 pub use schema::*;
 pub use videos::*;
@@ -27,6 +28,7 @@ pub use wdbs::*;
 pub use export::*;
 pub use workspace::*;
 pub use sequences::*;
+pub use drive_manage::*;
 
 #[cfg(test)]
 mod production_tests;

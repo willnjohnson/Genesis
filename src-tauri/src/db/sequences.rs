@@ -37,12 +37,12 @@ pub fn normalize_drive(drive: &str) -> Result<String> {
 }
 
 /// True when `path` is `drive` itself or beneath it.
-fn covers(drive: &str, path: &str) -> bool {
+pub(crate) fn covers(drive: &str, path: &str) -> bool {
     path == drive || path.strip_prefix(drive).is_some_and(|rest| rest.starts_with('-'))
 }
 
 /// Every Drive a video is filed under (its home and its "Also in" links), as display paths.
-fn video_drives(conn: &Connection, video_id: &str) -> Result<Vec<String>> {
+pub(crate) fn video_drives(conn: &Connection, video_id: &str) -> Result<Vec<String>> {
     let mut raw: Vec<String> = Vec::new();
     let home: Option<Option<String>> = conn
         .query_row("SELECT WDBS FROM Videos WHERE video_id = ?1", params![video_id], |row| row.get(0))
@@ -69,7 +69,7 @@ fn video_drives(conn: &Connection, video_id: &str) -> Result<Vec<String>> {
 }
 
 /// Rewrites a sequence's positions as 1..N in their current order.
-fn renumber(conn: &Connection, drive: &str) -> Result<()> {
+pub(crate) fn renumber(conn: &Connection, drive: &str) -> Result<()> {
     let ids: Vec<String> = {
         let mut stmt = conn.prepare("SELECT video_id FROM DriveSequence WHERE drive = ?1 ORDER BY position, video_id")?;
         let rows = stmt.query_map(params![drive], |row| row.get(0))?;
@@ -80,6 +80,56 @@ fn renumber(conn: &Connection, drive: &str) -> Result<()> {
             "UPDATE DriveSequence SET position = ?1 WHERE drive = ?2 AND video_id = ?3 AND position != ?1",
             params![(i + 1) as i64, drive, id],
         )?;
+    }
+    Ok(())
+}
+
+/// Removes invalid memberships for the videos in `_bulk_wdbs_video_ids`, renumbering each
+/// affected sequence once after all of its stale rows have been removed.
+pub(crate) fn prune_video_memberships_batch(tx: &rusqlite::Transaction) -> Result<()> {
+    let memberships: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT s.drive, s.video_id FROM DriveSequence s
+             JOIN _bulk_wdbs_video_ids i ON i.video_id = s.video_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<_>>()?
+    };
+    let mut stale = Vec::new();
+    let mut affected_drives = HashSet::new();
+    for (drive, video_id) in memberships {
+        if !video_drives(tx, &video_id)?.iter().any(|path| covers(&drive, path)) {
+            stale.push((drive.clone(), video_id));
+            affected_drives.insert(drive);
+        }
+    }
+    if !stale.is_empty() {
+        tx.execute_batch(
+            "CREATE TEMP TABLE _bulk_wdbs_stale_memberships (
+                drive TEXT NOT NULL,
+                video_id TEXT NOT NULL,
+                PRIMARY KEY (drive, video_id)
+            )",
+        )?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT INTO _bulk_wdbs_stale_memberships (drive, video_id) VALUES (?1, ?2)",
+            )?;
+            for (drive, video_id) in stale {
+                insert.execute(params![drive, video_id])?;
+            }
+        }
+        tx.execute(
+            "DELETE FROM DriveSequence
+             WHERE EXISTS (
+                 SELECT 1 FROM _bulk_wdbs_stale_memberships stale
+                 WHERE stale.drive = DriveSequence.drive AND stale.video_id = DriveSequence.video_id
+             )",
+            [],
+        )?;
+    }
+    for drive in affected_drives {
+        renumber(tx, &drive)?;
     }
     Ok(())
 }
@@ -153,6 +203,8 @@ pub enum SortKey {
     Published,
     /// When it was added to the library.
     Added,
+    /// YouTube view count.
+    Views,
     Title,
 }
 
@@ -161,8 +213,9 @@ impl SortKey {
         match s {
             "published" => Ok(SortKey::Published),
             "added" => Ok(SortKey::Added),
+            "views" | "popularity" => Ok(SortKey::Views),
             "title" => Ok(SortKey::Title),
-            other => Err(invalid(format!("'{other}' isn't a way to order videos (published, added or title)."))),
+            other => Err(invalid(format!("'{other}' isn't a way to order videos (published, added, views or title)."))),
         }
     }
 }
@@ -212,6 +265,8 @@ struct KeyRow {
     title: String,
     published: String,
     added: String,
+    views: i64,
+    rowid: i64,
 }
 
 fn sort_key_rows(rows: &mut [KeyRow], key: SortKey, descending: bool) {
@@ -220,15 +275,17 @@ fn sort_key_rows(rows: &mut [KeyRow], key: SortKey, descending: bool) {
         let ord = match key {
             SortKey::Published => a.published.cmp(&b.published),
             SortKey::Added => a.added.cmp(&b.added),
+            SortKey::Views => a.views.cmp(&b.views),
             SortKey::Title => natural_cmp(&a.title, &b.title),
         };
+        let ord = ord.then_with(|| a.rowid.cmp(&b.rowid));
         if descending { ord.reverse() } else { ord }
     });
 }
 
 /// `video_ids` reordered by `key`.
 fn sort_ids(conn: &Connection, video_ids: &[String], key: SortKey, descending: bool) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT title, published_at, date_added FROM Videos WHERE video_id = ?1")?;
+    let mut stmt = conn.prepare("SELECT title, published_at, date_added, view_count, rowid FROM Videos WHERE video_id = ?1")?;
     let mut rows: Vec<KeyRow> = Vec::with_capacity(video_ids.len());
     for id in video_ids {
         let found = stmt
@@ -238,11 +295,13 @@ fn sort_ids(conn: &Connection, video_ids: &[String], key: SortKey, descending: b
                     title: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
                     published: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                     added: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    views: row.get::<_, Option<i64>>(3)?.unwrap_or_default(),
+                    rowid: row.get(4)?,
                 })
             })
             .optional()?;
         // An id that isn't in the library sorts as blank; the add itself reports it.
-        rows.push(found.unwrap_or_else(|| KeyRow { id: id.clone(), ..Default::default() }));
+        rows.push(found.unwrap_or_else(|| KeyRow { id: id.clone(), rowid: i64::MAX, ..Default::default() }));
     }
     sort_key_rows(&mut rows, key, descending);
     Ok(rows.into_iter().map(|r| r.id).collect())
@@ -436,8 +495,13 @@ fn addable_rowids(conn: &Connection, drive: &str, query: &str) -> Result<HashSet
 /// transcripts); a title order reads just the titles of the matches.
 fn order_rowids(conn: &Connection, matched: &HashSet<i64>, key: SortKey, descending: bool) -> Result<Vec<i64>> {
     match key {
-        SortKey::Published | SortKey::Added => {
-            let column = if key == SortKey::Published { "published_at" } else { "date_added" };
+        SortKey::Published | SortKey::Added | SortKey::Views => {
+            let column = match key {
+                SortKey::Published => "published_at",
+                SortKey::Added => "date_added",
+                SortKey::Views => "view_count",
+                SortKey::Title => unreachable!(),
+            };
             let dir = if descending { "DESC" } else { "ASC" };
             let mut stmt = conn.prepare(&format!("SELECT rowid FROM Videos ORDER BY {column} {dir}, rowid {dir}"))?;
             let mut rows = stmt.query([])?;
@@ -467,7 +531,7 @@ fn order_rowids(conn: &Connection, matched: &HashSet<i64>, key: SortKey, descend
 }
 
 /// Videos that could be added to a Drive's sequence (see `addable_rowids`), ordered by `sort`
-/// ("published", "added" or "title"; ascending unless `descending`). Returns one page and the count
+/// ("published", "added", "views" or "title"; ascending unless `descending`). Returns one page and the count
 /// across all pages.
 pub fn list_drive_videos_for_sequence(
     db_path: &str,
@@ -819,6 +883,29 @@ mod tests {
     }
 
     #[test]
+    fn bulk_drive_assignment_prunes_and_compacts_affected_sequences() {
+        let db = temp_db();
+        for id in ["v1", "v2", "v3"] {
+            video(&db, id, "θψCS");
+        }
+        add_to_drive_sequence(&db, ":CS", &ids(&["v1", "v2", "v3"])).unwrap();
+
+        db::bulk_update_video_wdbs(&db, &ids(&["v1", "v2"]), "θψPYTHON").unwrap();
+
+        assert_eq!(order(&db, ":CS"), ["v3"]);
+        let conn = Connection::open(&db).unwrap();
+        let homes: Vec<String> = conn
+            .prepare("SELECT WDBS FROM Videos WHERE video_id IN ('v1', 'v2') ORDER BY video_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(homes, ["θψPYTHON", "θψPYTHON"]);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
     fn the_only_video_cannot_be_removed_one_by_one_but_clearing_empties_the_sequence() {
         let db = temp_db();
         video(&db, "v1", "θψCS");
@@ -912,6 +999,25 @@ mod tests {
         dated(&db, "c", "Second", "X", "2026-01-02T00:00:00Z", "θψCS");
         add_to_drive_sequence_sorted(&db, ":CS", &ids(&["a", "b", "c"]), "published", false).unwrap();
         assert_eq!(order(&db, ":CS"), ["b", "c", "a"]);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn selected_videos_can_be_appended_by_views_in_both_directions() {
+        let db = temp_db();
+        for id in ["a", "b", "c"] {
+            dated(&db, id, id, "X", "2026-01-01T00:00:00Z", "θψCS_DSA");
+        }
+        let conn = Connection::open(&db).unwrap();
+        for (id, views) in [("a", 25), ("b", 5), ("c", 15)] {
+            conn.execute("UPDATE Videos SET view_count = ?1 WHERE video_id = ?2", params![views, id]).unwrap();
+        }
+        drop(conn);
+
+        add_to_drive_sequence_sorted(&db, ":CS-DSA", &ids(&["a", "b", "c"]), "views", false).unwrap();
+        assert_eq!(order(&db, ":CS-DSA"), ["b", "c", "a"]);
+        add_to_drive_sequence_sorted(&db, ":CS", &ids(&["a", "b", "c"]), "views", true).unwrap();
+        assert_eq!(order(&db, ":CS"), ["a", "c", "b"]);
         std::fs::remove_file(&db).ok();
     }
 

@@ -8,10 +8,22 @@ pub(crate) const BOT_DETECTION_PHRASES: &[&str] = &[
     "please solve this captcha",
     "unusual traffic from your computer network",
     "this page checks to see if it's really you sending the requests",
+    // What the player answers with (as a "can't play" status) when it's limiting this network.
+    "confirm you're not a bot",
 ];
 
+/// `lowercased` must already be lowercase. Curly apostrophes count as straight ones: YouTube uses both.
 pub(crate) fn contains_bot_detection_text(lowercased: &str) -> bool {
-    BOT_DETECTION_PHRASES.iter().any(|phrase| lowercased.contains(phrase))
+    let text = lowercased.replace('\u{2019}', "'");
+    BOT_DETECTION_PHRASES.iter().any(|phrase| text.contains(phrase))
+}
+
+/// Whether the player's "can't play" answer is really YouTube limiting this network ("Sign in to confirm you're not a
+/// bot"), not something about the video: asking another way, or later, or from elsewhere, can still work.
+pub fn is_bot_check(player_json: &Value) -> bool {
+    let status = &player_json["playabilityStatus"];
+    status["status"].as_str().is_some_and(|s| s != "OK")
+        && status["reason"].as_str().is_some_and(|r| contains_bot_detection_text(&r.to_lowercase()))
 }
 
 fn caption_tracks(player_json: &Value) -> Option<&Vec<Value>> {
@@ -259,6 +271,10 @@ mod tests {
         assert_eq!(playability_problem(&private).as_deref(), Some("This video is private"));
         let odd = json!({"playabilityStatus": {"status": "ERROR"}});
         assert_eq!(playability_problem(&odd).as_deref(), Some("its status is ERROR"));
+        assert!(!is_bot_check(&private) && !is_bot_check(&odd) && !is_bot_check(&none));
+        // YouTube limiting the network comes as a "can't play" status too, curly apostrophe and all.
+        let bot = json!({"playabilityStatus": {"status": "LOGIN_REQUIRED", "reason": "Sign in to confirm you\u{2019}re not a bot"}});
+        assert!(is_bot_check(&bot));
     }
 
     #[test]

@@ -21,10 +21,12 @@ import { AttachmentsPanel } from './sidebar/AttachmentsPanel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../lib/remark-highlight';
+import { remarkEmbeds } from '../lib/remark-embeds';
 import { remarkSourceLines, lineAt, indexOfLine, caretY, scrollPreviewToLine, topVisibleLine } from '../lib/preview-sync';
 import { markdownUrlTransform, findGlossaryTerms } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
 import { TermDefinitionModal } from './TermDefinitionModal';
+import { useCloseOnNavigate } from '../lib/navigation';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { useFlags } from '../hooks/useFlags';
 
@@ -136,8 +138,12 @@ interface Props {
 export interface SidebarHandle {
     hasUnsavedChanges: () => boolean;
     /** Runs `proceed` immediately if there's nothing unsaved, otherwise asks first (Save/Discard/
-     *  Cancel) and only runs it on Save (after saving) or Discard. */
-    requestLeave: (proceed: () => void) => void;
+     *  Cancel) and only runs it on Save (after saving) or Discard. `onCancel` runs on Cancel (closing the app
+     *  uses it to call the exit off). */
+    requestLeave: (proceed: () => void, onCancel?: () => void) => void;
+    /** Makes the sequence bar under the video follow this Drive's sequence (display path), as when a video is opened
+     *  from it: what a sequence link does after opening its first video. */
+    followSequence: (drive: string) => void;
 }
 
 export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, onRestored, onTranscriptChange, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSummarizeOllama = true, showSummarizeVenice = true, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onTagsChanged, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, driveContext, onVideoSelect }: Props, ref) {
@@ -185,6 +191,9 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
     const [promptTab, setPromptTab] = useState<'local' | 'cloud'>('local');
     const [glossaryTerms, setGlossaryTerms] = useState<GlossaryTerm[]>([]);
     const [selectedTerm, setSelectedTerm] = useState<GlossaryTerm | null>(null);
+    // A term's definition opened from here closes when the app goes somewhere else (its "search in Library", a link to
+    // a Drive): the Sidebar itself closes then, and this window would otherwise stay on top of the new page.
+    useCloseOnNavigate(selectedTerm !== null, () => setSelectedTerm(null));
     const [isEditingTranscript, setIsEditingTranscript] = useState(false);
     const [isEditingSummary, setIsEditingSummary] = useState(false);
     const [editedTranscript, setEditedTranscript] = useState('');
@@ -603,14 +612,23 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
     // drop a draft either way.
     const hasUnsavedChanges = (isEditingTranscript && editedTranscript !== transcript) || (isEditingSummary && editedSummary !== (summary ?? ''));
     const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
-    const requestLeave = useCallback((proceed: () => void) => {
+    // What to tell the caller when the user picks Cancel (only closing the app asks).
+    const onCancelLeaveRef = useRef<(() => void) | undefined>(undefined);
+    const requestLeave = useCallback((proceed: () => void, onCancel?: () => void) => {
         if (!hasUnsavedChanges) { proceed(); return; }
+        onCancelLeaveRef.current = onCancel;
         setPendingLeave(() => proceed);
     }, [hasUnsavedChanges]);
-    const cancelLeave = () => setPendingLeave(null);
+    const cancelLeave = () => {
+        setPendingLeave(null);
+        const onCancel = onCancelLeaveRef.current;
+        onCancelLeaveRef.current = undefined;
+        onCancel?.();
+    };
     const discardAndLeave = () => {
         const proceed = pendingLeave;
         setPendingLeave(null);
+        onCancelLeaveRef.current = undefined;
         setIsEditingTranscript(false);
         setIsEditingSummary(false);
         proceed?.();
@@ -618,11 +636,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
     const saveAndLeave = async () => {
         const proceed = pendingLeave;
         setPendingLeave(null);
+        onCancelLeaveRef.current = undefined;
         if (isEditingTranscript) await handleSaveTranscript();
         else if (isEditingSummary) await handleSaveEditedSummary();
         proceed?.();
     };
-    useImperativeHandle(ref, () => ({ hasUnsavedChanges: () => hasUnsavedChanges, requestLeave }), [hasUnsavedChanges, requestLeave]);
+    useImperativeHandle(ref, () => ({ hasUnsavedChanges: () => hasUnsavedChanges, requestLeave, followSequence: setActiveSeqDrive }), [hasUnsavedChanges, requestLeave]);
 
     useEffect(() => {
         if (isOpen) {
@@ -1504,6 +1523,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                             canEdit={flags.allowEditTermsAndTags}
                                                             onAddTag={onAddTag}
                                                             onRemoveTag={onRemoveTag}
+                                                            onGlossaryChanged={() => getGlossaryTerms().then(setGlossaryTerms).catch(console.error)}
                                                             onSelectTerm={setSelectedTerm}
                                                             onJumpToTerm={handleJumpToTerm}
                                                         />
@@ -1759,7 +1779,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                              <div ref={previewScrollRef} className="absolute inset-0 p-3 overflow-y-auto custom-scrollbar whitespace-normal">
                                                                  <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none">
 <ReactMarkdown
-                                                                     remarkPlugins={[remarkGfm, remarkHighlight, remarkSourceLines]}
+                                                                     remarkPlugins={[remarkGfm, remarkHighlight, remarkEmbeds, remarkSourceLines]}
  urlTransform={markdownUrlTransform}
                                                                      components={{
                                                                          a: MarkdownLink,
@@ -1836,7 +1856,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                         there's one copy control per view, not two disagreeing ones. */}
                                                     <div data-find-scope className="leading-relaxed prose dark:prose-invert prose-sm max-w-none">
                                                         <ReactMarkdown
-                                                            remarkPlugins={[remarkGfm, remarkHighlight]}
+                                                            remarkPlugins={[remarkGfm, remarkHighlight, remarkEmbeds]}
  urlTransform={markdownUrlTransform}
                                                             components={{
                                                                 a: MarkdownLink,
@@ -2007,6 +2027,18 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                         <div className="text-center mt-10 flex flex-col items-center gap-3">
                                             {/* The panel's ordinary muted helper text, not a shouted heading. */}
                                             <p className="text-[11px] text-[#888888] leading-relaxed max-w-xs">{transcript || "No transcript data available."}</p>
+                                            {/* A fetch that failed (not a video with no captions at all): what usually causes it. YouTube
+                                                often serves a video's transcript only to some countries, so a VPN is the likeliest fix. */}
+                                            {transcript.startsWith("Failed to load transcript:") && !transcript.includes("has no captions") && (
+                                                <div className="max-w-xs text-left text-[11px] text-[#777777] leading-relaxed">
+                                                    <p className="text-[#888888]">If the video has a transcript, likely causes may be:</p>
+                                                    <ul className="mt-1 space-y-1 list-disc pl-4">
+                                                        <li>Region-blocked: YouTube only gives out this video's transcript in some countries, and where your connection appears to be (your VPN or router's location) isn't one of them. Switching VPN location, or turning the VPN off, often fixes it.</li>
+                                                        <li>YouTube is limiting requests from your network. Try again later, or from another network or VPN location.</li>
+                                                        <li>The video is private, removed, members-only or age-restricted.</li>
+                                                    </ul>
+                                                </div>
+                                            )}
                                             <div className="flex items-center gap-2">
                                                 {onRefetch && (
                                                     <button

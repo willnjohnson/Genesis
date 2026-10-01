@@ -1,3 +1,19 @@
+# Changelog (v0.5.0)
+
+## Added
+
+### Manage Drive
+
+* **Manage Drive Section**:
+  * Get an overview of an entire drive.
+  * View all of the sequences that exist.
+  * View all videos that aren't sorted into a Drive and view each Drive (similar to the existing Drive Tree).
+  * Viewing an individual drive shows an overview, allows user to edit markers and alias.
+* **Drive Node Actions**:
+  * Add sub-drives.
+  * Rename the current drive node.
+  * Move/merge into another node.
+
 # Changelog (v0.4.9)
 
 ## Added

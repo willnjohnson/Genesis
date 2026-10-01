@@ -3,12 +3,13 @@ import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
     getApiKey, getKeyStatus, getSetting, openExternalUrl, bulkUpdateVideoWdbs, addToDriveSequence,
     type Video, type BiographyEntry, saveTags, getBiography,
-    getVideoById, getGlossaryTerms, getWdbsTree, decodeWdbs, type WdbsNode,
+    getVideoById, getGlossaryTerms, getWdbsTree, decodeWdbs, getSequenceSummary, type WdbsNode,
     UNSORTED_WDBS_FILTER, TRASH_RESTORED_EVENT, TRASH_CHANGED_EVENT, type TrashKind,
 } from "./api";
 import { useTrash } from "./hooks/useTrash";
 import { useNavHistory } from "./hooks/useNavHistory";
 import { TrashModal } from "./components/TrashModal";
+import { DriveManagerModal } from "./components/drive-manager/DriveManagerModal";
 import { driveSegmentLabel, formatBytes, parseTagList } from "./lib/utils";
 import { resolveEntry } from "./lib/glossary";
 import { setInternalLinkHandler, linkKindLabel, type LinkKind } from "./lib/internal-links";
@@ -45,64 +46,23 @@ import { useAutoSync } from "./hooks/useAutoSync";
 import { onKinpakExportFinished } from "./lib/kinpak-export";
 import { useFlags } from "./hooks/useFlags";
 import { useWorkspace } from "./hooks/useWorkspace";
+import { getLibraryFacets, getLibraryQuery } from "./lib/search-facets";
+import { setExitGuard } from "./lib/exit-guard";
+import { announceNavigation, useCloseOnNavigate } from "./lib/navigation";
 
 type ViewMode = 'search' | 'library' | 'glossary' | 'biography';
 
 
-function getLibraryFacets(q: string, viewMode: ViewMode): Facet[] {
-    if (!q) return [];
-    const whitelist = viewMode === 'glossary'
-        ? ['term_search', 'definition_search']
-        : viewMode === 'biography'
-            ? ['person_search', 'bio_search']
-            : ['tag_search', 'term_search', 'no_tags', 'video', 'handle', 'channel_name'];
-
-    const FACET_RE = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
-    const facets: Facet[] = [];
-    let m;
-    while ((m = FACET_RE.exec(q)) !== null) {
-        facets.push({ type: m[1] as any, value: "" });
-    }
-    return facets;
-}
-
-function getLibraryQuery(q: string, viewMode: ViewMode): string {
-    if (!q) return '';
-    const whitelist = viewMode === 'glossary'
-        ? ['term_search', 'definition_search']
-        : viewMode === 'biography'
-            ? ['person_search', 'bio_search']
-            : ['tag_search', 'term_search', 'no_tags', 'video', 'handle', 'channel_name'];
-
-    // Check if q starts with a facet prefix and has exactly one colon
-    const colonIndex = q.indexOf(':');
-    const firstSpaceIndex = q.indexOf(' ');
-    // Only treat this as a bare "facetname:value" display-unwrap when what's actually before the
-    // colon is one of this mode's known facet names — otherwise a bare leading ':' (a Warp Drive
-    // designator, e.g. ":UAP floating" in Library mode — see db/search.rs) would have its colon
-    // eaten here even though it isn't a facet at all.
-    const isKnownFacetPrefix = colonIndex > 0 && whitelist.includes(q.slice(0, colonIndex));
-
-    if (isKnownFacetPrefix && (firstSpaceIndex === -1 || firstSpaceIndex > colonIndex)) {
-        // trimStart: harmless for every other facet here (their value starts right after the
-        // colon, no space) but no_tags always has one ("no_tags: foo"), to keep it separate from
-        // the free text that follows rather than swallowing it as no_tags' own value.
-        const rest = q.slice(colonIndex + 1).trimStart();
-        const whitelistPattern = `(${whitelist.join('|')})`;
-        if (!new RegExp(`${whitelistPattern}:`).test(rest)) {
-            let val = rest;
-            if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
-            return val;
-        }
-    }
-
-    const FACET_RE = new RegExp(`(${whitelist.join('|')}):(?:"([^"]*)"|([^ ]*))`, 'g');
-    return q.replace(FACET_RE, '');
-}
 
 function App() {
     // ── App-level state ─────────────────────────────────────────────────────
     const [viewMode, setViewMode] = useState<ViewMode>('search');
+    // Any change of section (the nav icons, the palette, back / forward, a link) closes what was open over the old one.
+    const firstViewRef = useRef(true);
+    useEffect(() => {
+        if (firstViewRef.current) { firstViewRef.current = false; return; }
+        announceNavigation();
+    }, [viewMode]);
     const [showGlossaryMenu, setShowGlossaryMenu] = useState(false);
     // Toggleable Drive/Warp Drive side panel inside the Library/Portal grid (see
     // components/WdbsTreePanel.tsx) — replaced the standalone Drive/Warp Drive tab this app used
@@ -170,12 +130,26 @@ function App() {
     // different video right now would silently drop an in-progress transcript/summary edit, the
     // same guard the sidebar's own close button/backdrop already go through.
     const sidebarRef = useRef<SidebarHandle>(null);
+    // Closing the app with an unsaved transcript or summary edit asks first, with the Sidebar's own Save / Discard /
+    // Cancel (see lib/exit-guard.ts); Cancel keeps the app open.
+    useEffect(() => {
+        setExitGuard((allow, cancel) => {
+            const sidebar = sidebarRef.current;
+            if (!sidebar?.hasUnsavedChanges()) return false;
+            sidebar.requestLeave(allow, cancel);
+            return true;
+        });
+        return () => setExitGuard(null);
+    }, []);
     const [cachedSummaries, setCachedSummaries] = useState<Record<string, string>>({});
     const [videoTags, setVideoTags] = useState<string[]>([]);
     const [sidebarInitialTab, setSidebarInitialTab] = useState<'transcript' | 'summary' | undefined>(undefined);
     const [selectedBiography, setSelectedBiography] = useState<BiographyEntry | null>(null);
     // A glossary term opened from a link inside some markdown (see lib/internal-links.ts).
     const [linkedTerm, setLinkedTerm] = useState<{ term: string; definition: string; drives: string[] } | null>(null);
+    // A term or biography opened over the page closes when the app goes somewhere else (lib/navigation.ts).
+    useCloseOnNavigate(linkedTerm !== null, () => setLinkedTerm(null));
+    useCloseOnNavigate(selectedBiography !== null, () => setSelectedBiography(null));
 
     // ── Hooks ────────────────────────────────────────────────────────────────
     const search = useSearch(hasApiKey);
@@ -423,6 +397,9 @@ function App() {
 
     // ── Handlers ─────────────────────────────────────────────────────────────
     const doSelectVideo = useCallback(async (video: Video, tab?: 'transcript' | 'summary') => {
+        // Opening a video in the sidebar is going somewhere too: a term or biography window it was opened from
+        // (a link, a card, a playlist) closes rather than sit over the sidebar (lib/navigation.ts).
+        announceNavigation();
         void recordRecent({ kind: 'video', key: video.id, label: video.title, sub: video.author, thumb: video.thumbnail || undefined });
         setSidebarInitialTab(tab);
         setSelectedVideo(video);
@@ -470,6 +447,20 @@ function App() {
         if (videoResult) handleSelectVideo(videoResult);
     }, [viewMode, library, search, handleSelectVideo]);
 
+    const handleLibrarySearch = useCallback((query: string) => {
+        setBulkAssignMode(false);
+        setBulkSelectedIds(new Set());
+        setBulkAssignMenu(null);
+        library.setLibrarySearch(query);
+    }, [library.setLibrarySearch]);
+
+    const handleLibraryFilterChange = useCallback((filter: FilterType) => {
+        setBulkAssignMode(false);
+        setBulkSelectedIds(new Set());
+        setBulkAssignMenu(null);
+        library.setFilterKind(filter);
+    }, [library.setFilterKind]);
+
     const toggleVideoListMode = async () => {
         const newMode = videoListMode === 'grid' ? 'compact' : 'grid';
         setVideoListMode(newMode);
@@ -490,6 +481,7 @@ function App() {
     // assign state that only makes sense while it's open — mirrors the panel's own toggle-off
     // handler below) before setting the query avoids both problems.
     const goToLibrarySearch = useCallback((query: string) => {
+        announceNavigation();
         setShowDrivePanel(false);
         library.setWdbsFilter(null);
         setDriveFilterLabel('');
@@ -506,6 +498,7 @@ function App() {
     // (and would narrow the Drive's videos by it).
     const goToLibraryDrive = useCallback((storagePath: string, label: string, alias: string | null = null) => {
         void recordRecent({ kind: 'drive', key: storagePath, label: alias ?? label, sub: label, alias });
+        announceNavigation();
         setBulkAssignMode(false);
         setBulkSelectedIds(new Set());
         setBulkAssignMenu(null);
@@ -583,11 +576,25 @@ function App() {
                     goToLibraryDrive(node.path, driveSegmentLabel(decodeWdbs(node.path)));
                     return;
                 }
+                case 'playlist': {
+                    // Opens whatever is first in the sequence now (so reordering it never breaks the link), with the
+                    // bar under the video following that sequence.
+                    if (!flags.showDrive || !flags.showSequences) return unavailable();
+                    const summary = await getSequenceSummary(key);
+                    if (!summary?.firstVideoId) return say(`${key} has no ${labels.aliasSequence.toLowerCase()} any more.`);
+                    const video = await getVideoById(summary.firstVideoId);
+                    if (!video) return say(`That ${labels.aliasSequence.toLowerCase()}'s first video is no longer in the library.`);
+                    setLinkedTerm(null);
+                    setSelectedBiography(null);
+                    sidebarRef.current?.followSequence(key);
+                    await handleSelectVideo(video);
+                    return;
+                }
             }
         } catch (e) {
             say(typeof e === 'string' ? e : (e as { message?: string })?.message ?? "Couldn't open that link.");
         }
-    }, [flags.showGlossary, flags.showBiography, flags.showDrive, handleSelectVideo, goToLibraryDrive, library.wdbsFilter]);
+    }, [flags.showGlossary, flags.showBiography, flags.showDrive, flags.showSequences, handleSelectVideo, goToLibraryDrive, library.wdbsFilter]);
 
     useEffect(() => setInternalLinkHandler(handleOpenLink), [handleOpenLink]);
     // A biography opened from anywhere (a link, Ctrl+K) goes on Ctrl+K's recent list.
@@ -687,18 +694,30 @@ function App() {
     // different one, or none. Every trigger (Alt+Left/Right, the mouse's side buttons, the command
     // palette's Go back/forward, and the title bar's Back/Forward buttons — see the `history` prop
     // passed to TitleBar below) goes through these, never the raw nav.back/nav.forward.
+    // Manage Drive closes on the way (the title bar's Back/Forward sit above it and would otherwise move the page
+    // underneath it). It's declared further down, which is fine: these only run on a click or key, after rendering.
     const guardedBack = useCallback(() => {
+        setManageDriveOpen(false);
         if (sidebarRef.current?.hasUnsavedChanges()) sidebarRef.current.requestLeave(nav.back);
         else nav.back();
     }, [nav.back]);
     const guardedForward = useCallback(() => {
+        setManageDriveOpen(false);
         if (sidebarRef.current?.hasUnsavedChanges()) sidebarRef.current.requestLeave(nav.forward);
         else nav.forward();
     }, [nav.forward]);
     useEffect(() => {
         // Not while something is on top of the page (a dialog, Settings, the Trash): those aren't places. The
-        // sidebar's own dimming layer is marked so it doesn't count.
-        const covered = () => !!document.querySelector('div.fixed.inset-0:not(#k-life):not([data-nav-ok])');
+        // sidebar's own dimming layer is marked so it doesn't count. A window marked data-nav-closes (Manage Drive,
+        // see Modal's closeOnNavigate) is closed instead, and then the move goes ahead; but not with anything else
+        // open over it (a confirmation, say), which still blocks the move as any dialog does.
+        const covered = () => {
+            const over = Array.from(document.querySelectorAll<HTMLElement>('div.fixed.inset-0:not(#k-life):not([data-nav-ok])'));
+            if (over.length === 0) return false;
+            if (!over.every(el => el.hasAttribute('data-nav-closes'))) return true;
+            over.forEach(el => el.click()); // its backdrop: clicking it closes the window
+            return false;
+        };
         // Option+Arrow moves by word in a text box on a Mac; Cmd+[ and Cmd+] are its own back and forward.
         const mac = /Mac/i.test(navigator.platform);
         const onKey = (e: KeyboardEvent) => {
@@ -731,6 +750,8 @@ function App() {
     // The Trash window is App's, so the status bar chips and the command palette both open it. Nothing in it is
     // saved anywhere: it's emptied when the app closes.
     const [trashOpen, setTrashOpen] = useState<TrashKind | null>(null);
+    // The Manage Drive window (the button beside Bulk Assign Mode under the Drive panel).
+    const [manageDriveOpen, setManageDriveOpen] = useState(false);
     const videoTrash = useTrash('video');
     const glossaryTrash = useTrash('glossary');
     // Bumped when a term is put back, so a mounted Glossary reloads.
@@ -910,7 +931,8 @@ function App() {
             if (alsoSequence && wdbs.trim() && result.succeeded.length > 0) {
                 const shown = new Map(displayedVideos.map((v, i) => [v.id, i]));
                 const ids = [...result.succeeded].sort((a, b) => (shown.get(a) ?? Infinity) - (shown.get(b) ?? Infinity));
-                const seqOut = await addToDriveSequence(wdbs, ids);
+                const seqSort = library.sortField === 'added' ? 'added' : library.sortField === 'popularity' ? 'views' : 'published';
+                const seqOut = await addToDriveSequence(wdbs, ids, { sort: seqSort, descending: library.sortOrder === 'desc' });
                 seqAdded = seqOut.added;
                 seqAlreadyIn = seqOut.alreadyIn;
             }
@@ -918,7 +940,7 @@ function App() {
             const assignPart = `Assigned ${result.succeeded.length} video${result.succeeded.length === 1 ? '' : 's'} to ${label}`;
             const failedPart = result.failed.length > 0 ? `; ${result.failed.length} failed` : '';
             const seqPart = alsoSequence && wdbs.trim()
-                ? `, added ${seqAdded} to its sequence${seqAlreadyIn > 0 ? ` (${seqAlreadyIn} already in it)` : ''}`
+                ? `, added ${seqAdded} to its ${labels.aliasSequence.toLowerCase()}${seqAlreadyIn > 0 ? ` (${seqAlreadyIn} already in it)` : ''}`
                 : '';
             setNotification({ message: `${assignPart}${seqPart}${failedPart}.`, type: result.failed.length === 0 ? "success" : "info" });
             setBulkSelectedIds(new Set());
@@ -941,7 +963,8 @@ function App() {
         try {
             const shown = new Map(displayedVideos.map((v, i) => [v.id, i]));
             const ids = [...bulkAssignMenu.videoIds].sort((a, b) => (shown.get(a) ?? Infinity) - (shown.get(b) ?? Infinity));
-            const out = await addToDriveSequence(drive, ids);
+            const seqSort = library.sortField === 'added' ? 'added' : library.sortField === 'popularity' ? 'views' : 'published';
+            const out = await addToDriveSequence(drive, ids, { sort: seqSort, descending: library.sortOrder === 'desc' });
             const name = drive.trim().toUpperCase();
             const skipped = [
                 out.alreadyIn > 0 ? `${out.alreadyIn} already in it` : '',
@@ -951,14 +974,14 @@ function App() {
                 setBulkAssignError(`Nothing added${skipped ? `: ${skipped}` : ''}.`);
             } else {
                 setNotification({
-                    message: `Added ${out.added} video${out.added === 1 ? '' : 's'} to the ${name} sequence${skipped ? `; ${skipped}` : ''}.`,
+                    message: `Added ${out.added} video${out.added === 1 ? '' : 's'} to the ${name} ${labels.aliasSequence.toLowerCase()}${skipped ? `; ${skipped}` : ''}.`,
                     type: skipped ? "info" : "success",
                 });
                 setBulkSelectedIds(new Set());
                 setBulkAssignMenu(null);
             }
         } catch (e: any) {
-            setBulkAssignError(typeof e === "string" ? e : e?.message ?? "Couldn't add to the sequence.");
+            setBulkAssignError(typeof e === "string" ? e : e?.message ?? `Couldn't add to the ${labels.aliasSequence.toLowerCase()}.`);
         } finally {
             setBulkAssigning(false);
         }
@@ -1276,11 +1299,11 @@ function App() {
                         <div className={`flex-1 min-w-0 ${viewMode === 'library' && showDrive ? '-ml-3' : ''}`}>
                             <SearchBar
                                 key={viewMode}
-                                onSearch={viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : handleSearch))}
+                                onSearch={viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? handleLibrarySearch : handleSearch))}
                                 onLiveFilter={
                                     viewMode === 'search'
                                         ? (search.videos.length > 0 ? search.handleInput : undefined)
-                                        : (viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? library.setLibrarySearch : undefined)))
+                                        : (viewMode === 'glossary' ? setGlossarySearchQuery : (viewMode === 'biography' ? setBiographySearchQuery : (viewMode === 'library' ? handleLibrarySearch : undefined)))
                                 }
                                 loading={search.loading}
                                 viewMode={viewMode}
@@ -1358,17 +1381,19 @@ function App() {
                                     (via the shared marginBottom on the content region above), so without this the buttons
                                     sit flush against it with no breathing room. */}
                                 <div className="shrink-0 mb-2 flex gap-2">
-                                    {/* Not built yet: shown greyed out so the spot is kept for it. */}
-                                    <button
-                                        type="button"
-                                        disabled
-                                        // Only as wide as its label, leaving the rest of the row to Bulk Assign Mode (the longer one).
-                                        className="shrink-0 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold bg-[#121212] border-[#303030] text-gray-600 cursor-not-allowed"
-                                        title="Coming soon"
-                                    >
-                                        <FolderTree className="w-3.5 h-3.5 shrink-0" />
-                                        <span className="whitespace-nowrap">Manage Drive</span>
-                                    </button>
+                                    {/* Changing the Drive's shape is editing it: same flag as its right-click menu and the Sidebar's Drive editor. */}
+                                    {allowEditWDBS && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setManageDriveOpen(true)}
+                                            // Only as wide as its label, leaving the rest of the row to Bulk Assign Mode (the longer one).
+                                            className="shrink-0 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]"
+                                            title={`Every Drive in one place: looks, structure, videos, ${labels.aliasSequence.toLowerCase()}s and terms`}
+                                        >
+                                            <FolderTree className="w-3.5 h-3.5 shrink-0" />
+                                            <span className="whitespace-nowrap">Manage Drive</span>
+                                        </button>
+                                    )}
                                     {canBulkAssign && (
                                         <button
                                             onClick={() => setBulkAssignMode(prev => {
@@ -1377,7 +1402,7 @@ function App() {
                                                 return next;
                                             })}
                                             className={`flex-1 min-w-0 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${bulkAssignMode ? 'bg-red-600 border-red-600 text-white' : 'bg-[#121212] border-[#404040] text-gray-400 hover:text-white hover:border-[#505050]'}`}
-                                            title={`Select videos, then right-click to ${allowEditWDBS ? `assign them to a ${labels.aliasDriveName} category` : ''}${allowEditWDBS && canBulkSequence ? ', optionally also adding them to its sequence' : canBulkSequence ? 'add them to a sequence' : ''}`}
+                                            title={`Select videos, then right-click to ${allowEditWDBS ? `assign them to a ${labels.aliasDriveName} category` : ''}${allowEditWDBS && canBulkSequence ? `, optionally also adding them to its ${labels.aliasSequence.toLowerCase()}` : canBulkSequence ? `add them to a ${labels.aliasSequence.toLowerCase()}` : ''}`}
                                         >
                                             <MousePointerClick className="w-3.5 h-3.5 shrink-0" />
                                             <span className="truncate">Bulk Assign Mode</span>
@@ -1412,13 +1437,17 @@ function App() {
                                 sortOrder={library.sortOrder}
                                 onToggleSortOrder={library.toggleSortOrder}
                                 filterKind={library.filterKind}
-                                onFilterKindChange={library.setFilterKind}
+                                onFilterKindChange={handleLibraryFilterChange}
                                 onLoadMore={library.loadMore}
                                 loadingMore={library.loadingMore}
                                 hasMore={library.hasMore}
                                 loading={library.loading}
                                 emptyTitle={library.wdbsFilter ? "No videos" : (library.librarySearch.trim() ? "No results" : `Build your ${labels.aliasLibrary}`)}
                                 emptyMessage={libraryEmptyMessage}
+                                // A Drive that has videos, just none matching: one click back to all of them.
+                                emptyAction={library.wdbsFilter && (library.librarySearch.trim() || library.filterKind !== 'all')
+                                    ? { label: 'Clear filter', onClick: () => { handleLibrarySearch(''); handleLibraryFilterChange('all'); } }
+                                    : undefined}
                                 bulkAssignMode={bulkAssignMode}
                                 bulkSelectedIds={bulkSelectedIds}
                                 onToggleBulkSelect={handleToggleBulkSelect}
@@ -1594,6 +1623,31 @@ function App() {
                 showSynthesizeUpload={showSynthesizeUpload}
             />
 
+            {manageDriveOpen && (
+                <DriveManagerModal
+                    onClose={() => setManageDriveOpen(false)}
+                    onChanged={() => { setDriveVersion(v => v + 1); library.refreshLibrary(); }}
+                    onRelocated={(from, to) => {
+                        // A Library filter on the moved Drive (or beneath it) follows it to its new place.
+                        const current = library.wdbsFilter;
+                        if (!current || !(current === from || current.startsWith(`${from}_`))) return;
+                        const moved = to + current.slice(from.length);
+                        library.setWdbsFilter(moved);
+                        setDriveFilterLabel(decodeWdbs(moved).split(/[-:]/).pop() ?? '');
+                        setDriveFilterAlias(null);
+                    }}
+                    onOpenVideo={async (videoId) => {
+                        const video = await getVideoById(videoId);
+                        if (video) await handleSelectVideo(video);
+                        else setNotification({ message: "That video is no longer in the library.", type: "error" });
+                    }}
+                    onShowInLibrary={goToLibraryDrive}
+                    canEditSequences={flags.showSequences && flags.allowEditSequences}
+                    canBuildSequences={flags.showSequences && flags.allowEditSequences && flags.allowEditVideosInSequenceList}
+                    initialPath={library.wdbsFilter ?? undefined}
+                />
+            )}
+
             {trashOpen && (
                 <TrashModal
                     kind={trashOpen}
@@ -1683,26 +1737,32 @@ function App() {
             </button>
 
             {viewMode === 'library' && effectivePluginSummarizeEnabled && showSummarizeButton && flags.allowSummarizeAll && !sidebarOpen && (
-                <button
-                    onClick={library.handleSummarizeAll}
-                    disabled={!!library.summarizeProgress}
-                    className={`fixed summarize-btn h-10 px-4 bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-500 hover:to-blue-500 rounded-lg text-sm font-bold transition-all shadow-lg hover:shadow-purple-500/25 disabled:opacity-50 flex items-center gap-2 z-40 ${!library.summarizeProgress ? 'cursor-pointer' : 'cursor-default'}`}
+                <div
+                    className={`summarize-all-wrapper fixed inline-flex rounded-[10px] p-[1.5px] overflow-hidden z-40 shadow-lg transition-shadow hover:shadow-purple-500/25 ${!library.summarizeProgress ? 'summarize-all-active' : ''}`}
                     // At the left edge of the Videos section (wherever the Drive panel leaves it), on the same line as
                     // the back-to-top button at the right, so it never sits over the Drive panel.
                     style={{ left: videosLeft + 16, bottom: 'max(3rem, calc(var(--k-bottom-bar-height, 0px) + 1rem))' }}
                 >
-                    {library.summarizeProgress ? (
-                        <>
-                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                            {library.summarizeProgress}
-                        </>
-                    ) : (
-                        <>
-                            <Sparkles className="w-4 h-4" />
-                            {library.summarizedCount > 0 ? `Summarized (${library.summarizedCount}/${library.totalCount})` : 'Summarize All'}
-                        </>
-                    )}
-                </button>
+                    <span aria-hidden="true" className="summarize-all-glow-blur" />
+                    <span aria-hidden="true" className="summarize-all-glow" />
+                    <button
+                        onClick={library.handleSummarizeAll}
+                        disabled={!!library.summarizeProgress}
+                        className={`summarize-btn relative z-[1] h-10 px-4 bg-gradient-to-r from-purple-600 to-blue-600 text-white hover:from-purple-500 hover:to-blue-500 rounded-[8.5px] text-sm font-bold transition-all disabled:opacity-50 flex items-center gap-2 ${!library.summarizeProgress ? 'cursor-pointer' : 'cursor-default'}`}
+                    >
+                        {library.summarizeProgress ? (
+                            <>
+                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                {library.summarizeProgress}
+                            </>
+                        ) : (
+                            <>
+                                <Sparkles className="w-4 h-4" />
+                                {library.summarizedCount > 0 ? `Summarized (${library.summarizedCount}/${library.totalCount})` : 'Summarize All'}
+                            </>
+                        )}
+                    </button>
+                </div>
             )}
         </div>
     );

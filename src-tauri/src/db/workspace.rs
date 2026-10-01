@@ -31,6 +31,7 @@ pub const LABELS: &[(&str, &str, usize)] = &[
     // A video's extra Drive categories: the "Also in" link and its symbolic-link flavor.
     ("aliasDriveLink", "Link", MAX_ALIAS_LEN),
     ("aliasDriveSymlink", "Symlink", MAX_ALIAS_LEN),
+    ("aliasSequence", "Sequence", MAX_ALIAS_LEN),
 ];
 
 fn label_def(key: &str) -> Option<&'static (&'static str, &'static str, usize)> {

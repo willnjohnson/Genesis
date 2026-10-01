@@ -10,6 +10,7 @@ import { setupImageSaveHandler } from './lib/image-save';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { QuickAdd } from './components/QuickAdd'
 import { TooltipLayer } from './components/TooltipLayer'
+import { installExitListener } from './lib/exit-guard'
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean, error: Error | null }> {
   constructor(props: { children: ReactNode }) {
@@ -62,6 +63,11 @@ createRoot(document.getElementById('root')!).render(
     )}
   </ErrorBoundary>
 );
+
+// Closing the app (the window, or the tray's Quit) asks the main window first, for an unsaved edit (lib/exit-guard.ts).
+if (!isQuickAddWindow) {
+  try { installExitListener(); } catch (e) { console.warn('exit listener init failed', e); }
+}
 
 // Register the image-save handler in the browser environment.
 // This will be a no-op on web builds but active inside the Tauri desktop app.

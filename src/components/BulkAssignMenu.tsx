@@ -103,7 +103,7 @@ export function BulkAssignMenu({
             <div className="text-xs font-bold text-white mb-2">
                 {canAssignDrive
                     ? `Assign ${count} ${noun} to ${labels.aliasDriveName}`
-                    : `Add ${count} ${noun} to a sequence`}
+                    : `Add ${count} ${noun} to a ${labels.aliasSequence.toLowerCase()}`}
             </div>
             <div className="flex items-center gap-1.5">
                 <input
@@ -120,7 +120,7 @@ export function BulkAssignMenu({
                 <button
                     onClick={submit}
                     disabled={assigning || !canSubmit}
-                    title={canAssignDrive ? "Assign" : "Add to this Drive's sequence"}
+                    title={canAssignDrive ? "Assign" : `Add to this Drive's ${labels.aliasSequence.toLowerCase()}`}
                     className="text-green-500 hover:text-green-400 transition-colors cursor-pointer p-1.5 disabled:opacity-50 shrink-0"
                 >
                     <Check className="w-4 h-4" />
@@ -144,14 +144,14 @@ export function BulkAssignMenu({
                         disabled={assigning}
                         className="cursor-pointer"
                     />
-                    Also add to this {labels.aliasDriveName}'s sequence
+                    Also add to this {labels.aliasDriveName}'s {labels.aliasSequence.toLowerCase()}
                 </label>
             )}
 
             <p className="text-[10px] text-[#666] mt-1.5">
                 {canAssignDrive
                     ? both
-                        ? "Leave blank to clear back to unassigned (skips sequencing). Sequenced in the order shown; already-included videos are skipped."
+                        ? `Leave blank to clear back to unassigned (skips the ${labels.aliasSequence.toLowerCase()}). Added in the order shown; ones already in it are skipped.`
                         : "Leave blank to clear back to unassigned."
                     : "Added in the order shown. Ones already in it are skipped."}
             </p>

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Shield } from "lucide-react";
 import { getSettings, setSetting } from "../../api";
 import { useFlags } from "../../hooks/useFlags";
+import { useWorkspace } from "../../hooks/useWorkspace";
 import { useLockedSettings, LOCKED_TITLE } from "../../hooks/useLockedSettings";
 import { READ_ONLY_OVERRIDE_KEYS, parseBool, type FlagKey } from "../../lib/flags";
 import { ConfirmDialog } from "../ConfirmDialog";
@@ -20,7 +21,7 @@ import { ErrorBox } from "../workspace/shared";
 // reason; ROWS below filters READ_ONLY_OVERRIDE_KEYS down to the keys actually present here, rather
 // than assuming full coverage, so the render order still comes from that one shared list and the two
 // can't silently drift apart.
-const PERMISSIONS: Partial<Record<FlagKey, { label: string; hint: string }>> = {
+const permissionsFor = (sequenceLabel: string): Partial<Record<FlagKey, { label: string; hint: string }>> => ({
     allowSaveToLibrary: { label: "Saving Videos", hint: "Save a video from Search into the Library." },
     allowSaveAll: { label: "Bulk Save", hint: "Save every current search result at once (needs Saving Videos too)." },
     allowDeletionLibrary: { label: "Deleting Videos", hint: "Remove a video from the Library." },
@@ -32,11 +33,11 @@ const PERMISSIONS: Partial<Record<FlagKey, { label: string; hint: string }>> = {
     allowEditTranscriptOnNA: { label: "Cleared Transcripts", hint: "Edit a transcript that was cleared to N/A after summarizing." },
     allowEditWDBS: { label: "Drive Assignment", hint: "Assign, change, or symlink a saved video's Drive category." },
     allowEditDriveLinking: { label: "Drive Editing UI", hint: "The Drive pencil editor and Bulk Assign Mode." },
-    allowEditSequences: { label: "Sequence Reordering", hint: "Reorder or remove one video at a time from a sequence." },
-    allowEditVideosInSequenceList: { label: "Sequence Building", hint: "Add Videos, Add to the End, and Clear Sequence." },
+    allowEditSequences: { label: `${sequenceLabel} Reordering`, hint: `Reorder or remove one video at a time from a ${sequenceLabel.toLowerCase()}.` },
+    allowEditVideosInSequenceList: { label: `${sequenceLabel} Building`, hint: `Add Videos, Add to the End, and Clear ${sequenceLabel}.` },
     allowModificationGlossary: { label: "Glossary", hint: "Add, edit, or delete Terms and Tags in the Glossary itself." },
     allowEditBio: { label: "Biographies", hint: "Edit a creator's biography." },
-};
+});
 
 // Not permissions: switches for "are you sure?" questions. Read-only doesn't turn them off (that would mean "don't
 // ask"); it turns the action itself off, so they are greyed out then and their stored value is left alone. They come
@@ -76,8 +77,6 @@ const CONFIRM_ROWS = [
 type ConfirmKey = typeof CONFIRM_ROWS[number]["key"];
 const CONFIRM_KEYS = CONFIRM_ROWS.map(r => r.key);
 
-const ROWS = READ_ONLY_OVERRIDE_KEYS.filter(key => key in PERMISSIONS).map(key => ({ key, ...PERMISSIONS[key]! }));
-
 /** Settings > Workspace > Advanced > Permissions: a master Read-only switch, plus every
  *  content-editing flag individually (see lib/flags.ts's READ_ONLY_OVERRIDE_KEYS — this list and
  *  what Read-only forces off are the same list by construction). Reads and writes the Settings
@@ -85,6 +84,9 @@ const ROWS = READ_ONLY_OVERRIDE_KEYS.filter(key => key in PERMISSIONS).map(key =
  *  (useLockedSettings) disables a row exactly like it disables any other control here. */
 export function PermissionsPanel() {
     const { reload } = useFlags();
+    const { labels } = useWorkspace();
+    const permissions = permissionsFor(labels.aliasSequence);
+    const rows = READ_ONLY_OVERRIDE_KEYS.filter(key => key in permissions).map(key => ({ key, ...permissions[key]! }));
     const isLocked = useLockedSettings();
     const [values, setValues] = useState<Record<string, boolean> | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -93,7 +95,7 @@ export function PermissionsPanel() {
     // Asked before turning one of the "Confirm Before ..." switches off (a second confirmation): which one, if any.
     const [confirmingOff, setConfirmingOff] = useState<ConfirmKey | null>(null);
 
-    const allKeys = ['workspaceReadOnly', ...CONFIRM_KEYS, ...ROWS.map(r => r.key)];
+    const allKeys = ['workspaceReadOnly', ...CONFIRM_KEYS, ...rows.map(r => r.key)];
 
     const load = () => {
         getSettings(allKeys)
@@ -153,7 +155,7 @@ export function PermissionsPanel() {
             <div>
                 <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Specific Permissions</h4>
                 <div className="divide-y divide-[#232323] border border-[#232323] rounded-xl overflow-hidden">
-                    {ROWS.map(({ key, label, hint }) => {
+                    {rows.map(({ key, label, hint }) => {
                         const locked = isLocked(key);
                         const disabled = locked || readOnly || savingKey === key;
                         return (

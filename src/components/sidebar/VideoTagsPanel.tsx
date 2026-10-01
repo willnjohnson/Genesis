@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Plus, X } from 'lucide-react';
 import type { GlossaryTerm } from '../../api';
 import { resolveEntry, termKinds } from '../../lib/glossary';
+import { AddQuickTagModal } from '../AddQuickTagModal';
 
 interface Props {
     /** 'terms' = glossary entries with a definition; 'tags' = Quick Tags (no definition). */
@@ -34,6 +35,7 @@ interface Props {
      *  (a DB owner's allowEditTermsAndTags flag — one flag for both, since this is the same component
      *  for either tab). */
     canEdit?: boolean;
+    onGlossaryChanged?: () => void;
 }
 
 /** Displays a video's terms or tags as chips. Tags keep the "add" dropdown/remove-X pair filtered
@@ -43,7 +45,7 @@ interface Props {
  *  not something added or removed here — a chip click instead jumps to and highlights that link
  *  (`onJumpToTerm`). The dropdown closes on an outside click. Renders just the tag row — the
  *  surrounding card/header is owned by Sidebar.tsx's Tags/Similar Videos tab switcher. */
-export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, preferredDrives, onAddTag, onRemoveTag, onSelectTerm, onJumpToTerm, priorityTerms, priorityLabel, canEdit = true }: Props) {
+export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, preferredDrives, onAddTag, onRemoveTag, onSelectTerm, onJumpToTerm, priorityTerms, priorityLabel, canEdit = true, onGlossaryChanged }: Props) {
     const noun = kind === 'terms' ? 'term' : 'tag';
     // Terms are never user-editable any more — see the doc comment above.
     const editable = canEdit && kind === 'tags';
@@ -53,6 +55,7 @@ export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, 
         [glossaryTerms, kind],
     );
     const [showTagDropdown, setShowTagDropdown] = useState(false);
+    const [showCreateTagModal, setShowCreateTagModal] = useState(false);
     const [tagFilter, setTagFilter] = useState("");
     const plusRef = useRef<HTMLButtonElement>(null);
     // Where the open dropdown sits, in window coordinates (see `place`).
@@ -231,10 +234,33 @@ export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, 
                                     </>
                                 )}
                             </div>
+                            <div className="shrink-0 border-t border-[#303030] p-1">
+                                <button
+                                    onClick={() => {
+                                        setShowTagDropdown(false);
+                                        setTagFilter('');
+                                        setShowCreateTagModal(true);
+                                    }}
+                                    className="w-full flex items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold text-gray-300 hover:bg-[#2a2a2a] hover:text-white transition-colors cursor-pointer rounded"
+                                >
+                                    <Plus className="w-3.5 h-3.5" />
+                                    Create new tag
+                                </button>
+                            </div>
                         </div>,
                         document.body,
                     )}
                 </div>
+                )}
+                {showCreateTagModal && (
+                    <AddQuickTagModal
+                        onClose={() => setShowCreateTagModal(false)}
+                        onCreated={tag => {
+                            setShowCreateTagModal(false);
+                            onGlossaryChanged?.();
+                            onAddTag?.(tag);
+                        }}
+                    />
                 )}
             </div>
     );

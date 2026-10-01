@@ -194,7 +194,8 @@ impl LinkResolver {
             LinkKind::Glossary => self.glossary.get(&key.to_ascii_lowercase()).cloned(),
             LinkKind::Bio => self.biographies.get(&key.trim_start_matches('@').to_lowercase()).cloned(),
             LinkKind::Video => self.videos.get(key).cloned(),
-            LinkKind::Drive => None,
+            // No note of their own in the vault: they keep just their text, like Drive links.
+            LinkKind::Drive | LinkKind::Playlist => None,
         }
     }
 
@@ -203,7 +204,7 @@ impl LinkResolver {
     }
 }
 
-/// One Drive's Prev/Next around a video, for its "## Sequence" section. `prev`/`next` are the note
+/// One Drive's Prev/Next around a video, for its "## Playlist" section. `prev`/`next` are the note
 /// basenames to link to; both are always videos that are themselves being exported, since a video
 /// only reaches here by surviving the same scope filtering the sequence it belongs to did.
 struct SequenceLine {
@@ -275,7 +276,7 @@ fn build_video_note(video: &crate::Video, links: &LinkResolver, sequences: Optio
         body.push_str(&format!("Tags: {}\n\n", links.join(" ")));
     }
     if let Some(lines) = sequences.filter(|l| !l.is_empty()) {
-        body.push_str("## Sequence\n\n");
+        body.push_str("## Playlist\n\n");
         for line in lines {
             let prev = line.prev.as_deref().map(|b| format!("[[{}]]", b)).unwrap_or_else(|| "-".to_string());
             let next = line.next.as_deref().map(|b| format!("[[{}]]", b)).unwrap_or_else(|| "-".to_string());
@@ -1063,7 +1064,7 @@ mod tests {
         assert!(v2.contains("- **:FIN** (2 of 2) - Prev: [[v1 (v1)]] · Next: -"), "{v2}");
         // Last of :UAP, not in :FIN at all: exactly one line.
         assert!(v3.contains("- **:UAP** (3 of 3) - Prev: [[v2 (v2)]] · Next: -"), "{v3}");
-        assert_eq!(v3.matches("## Sequence").count(), 1);
+        assert_eq!(v3.matches("## Playlist").count(), 1);
         assert!(!v3.contains(":FIN"), "{v3}");
 
         // Dropping v2 out of the library entirely closes the gap: v1 and v3 become each other's

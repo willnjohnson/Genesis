@@ -210,6 +210,46 @@ input, textarea, [contenteditable=""], [contenteditable="true"] {
 /* Gradient buttons — always white text regardless of theme, for contrast against the gradient */
 .summarize-btn, .summarize-btn svg { color: #ffffff !important; }
 
+/* A pair of radial lights travel along the clipped wrapper's rounded perimeter. */
+.summarize-all-wrapper {
+    isolation: isolate;
+    background: rgba(255,255,255,0.16);
+}
+.summarize-all-glow,
+.summarize-all-glow-blur {
+    position: absolute;
+    top: -35px;
+    left: -35px;
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    offset-path: inset(0 round 12px);
+    offset-rotate: 0deg;
+    pointer-events: none;
+    opacity: 0;
+}
+.summarize-all-glow {
+    background: radial-gradient(circle, rgba(232,121,249,1) 0%, rgba(168,85,247,0.85) 35%, rgba(168,85,247,0) 70%);
+}
+.summarize-all-glow-blur {
+    background: radial-gradient(circle, rgba(232,121,249,0.65) 0%, rgba(168,85,247,0.42) 40%, transparent 70%);
+    filter: blur(6px);
+}
+.summarize-all-active .summarize-all-glow,
+.summarize-all-active .summarize-all-glow-blur {
+    opacity: 1;
+    animation: summarize-light-travel 3s linear infinite;
+}
+.summarize-all-active .summarize-all-glow-blur { animation-delay: -0.12s; }
+@keyframes summarize-light-travel {
+    from { offset-distance: 0%; }
+    to { offset-distance: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .summarize-all-glow,
+    .summarize-all-glow-blur { animation: none !important; opacity: 0; }
+}
+
 /* Lightbulb icon / shortcut hints / bookmarked-video marker — the app's "warning/caution/hint"
    color family (distinct from accent/danger/success). */
 .hover\:text-orange-400:hover { color: var(--k-warning) !important; }

@@ -6,6 +6,7 @@ import { SiWikipedia } from 'react-icons/si';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../lib/remark-highlight';
+import { remarkEmbeds } from '../lib/remark-embeds';
 import { markdownUrlTransform } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
 import { useBioPreview } from './GlossaryPreview';
@@ -14,6 +15,7 @@ import { getBiographies, updateBiography, type BiographyEntry, fetchChannelVideo
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { normalizeText, driveSegmentLabel } from '../lib/utils';
+import { useCloseOnNavigate } from '../lib/navigation';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu, handlePlainContextMenu } from '../lib/markdown-editor';
 
 type EditableBiography = BiographyEntry | null;
@@ -195,6 +197,8 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
     const [entries, setEntries] = useState<BiographyEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [selected, setSelected] = useState<BiographyEntry | null>(null);
+    // Closes when the app goes somewhere else (its "See more" search, a Drive, a link: lib/navigation.ts).
+    useCloseOnNavigate(selected !== null, () => setSelected(null));
     const [editing, setEditing] = useState<EditableBiography>(null);
     const [activeSocialTab, setActiveSocialTab] = useState<SocialTab>('website');
     const [pendingSocialPins, setPendingSocialPins] = useState<DetectedSocial[] | null>(null);
@@ -582,7 +586,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                                oversized next to it. */}
                            <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
                                <ReactMarkdown
-                                   remarkPlugins={[remarkGfm, remarkHighlight]}
+                                   remarkPlugins={[remarkGfm, remarkHighlight, remarkEmbeds]}
  urlTransform={markdownUrlTransform}
                                    components={{
                                        a: MarkdownLink,

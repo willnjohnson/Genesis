@@ -37,13 +37,13 @@ function PreviewMarkdown({ children }: { children: string }) {
 
 /** A card with a title and the start of some markdown text, cut off with an ellipsis after six lines: a detailed entry shows its
  *  opening, and the rest is one click away. `side` is where it goes around `anchor` (flipped if there is no room). */
-export function SnippetCard({ anchor, title, markdown, onOpen, side = 'auto', copyText, onMouseEnter, onMouseLeave }: {
+export function SnippetCard({ anchor, title, markdown, onOpen, side = 'auto', copyText, onMouseEnter, onMouseLeave, zIndex }: {
     anchor: DOMRect; title: string; markdown: string; side?: Side | 'auto';
     /** With this, the bottom row reads "Open" and opens the entry when clicked (rather than only the hovered element doing so). */
     onOpen?: () => void;
     /** With this, the card can be moved onto and has a button that copies this text (the whole entry, where the card shows its start,
      *  as real markdown rather than the flattened preview text). */
-    copyText?: string; onMouseEnter?: () => void; onMouseLeave?: () => void;
+    copyText?: string; onMouseEnter?: () => void; onMouseLeave?: () => void; zIndex?: number;
 }) {
     const [copied, setCopied] = useState(false);
     const copy = () => {
@@ -53,7 +53,7 @@ export function SnippetCard({ anchor, title, markdown, onOpen, side = 'auto', co
         }).catch(() => {});
     };
     return (
-        <FloatingCard anchor={anchor} side={side} interactive={copyText !== undefined} onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} className="w-80 max-w-[calc(100vw-1rem)] px-3.5 py-3 text-left">
+        <FloatingCard anchor={anchor} side={side} zIndex={zIndex} interactive={copyText !== undefined} onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} className="w-80 max-w-[calc(100vw-1rem)] px-3.5 py-3 text-left">
             <div className="flex items-start gap-2">
                 <div className="flex-1 min-w-0 text-sm font-semibold text-white leading-snug">{title}</div>
                 {copyText !== undefined && (
@@ -97,6 +97,8 @@ interface PreviewContent {
 interface PreviewOptions {
     /** Where the card opens around the hovered element. Defaults to below/above (an inline link's usual spot). */
     side?: Side | 'auto';
+    /** Overrides the default layer when this preview must appear above a modal. */
+    zIndex?: number;
 }
 
 /**
@@ -106,7 +108,7 @@ interface PreviewOptions {
  * once the pointer has been off both the element and the card for a moment, rather than the instant either is left; without
  * it, leaving the element closes it at once, same as any tooltip. Also closes on a click, or when anything scrolls.
  */
-function usePreviewCard(load: () => Promise<PreviewContent | null>, { side }: PreviewOptions = {}) {
+function usePreviewCard(load: () => Promise<PreviewContent | null>, { side, zIndex }: PreviewOptions = {}) {
     const [open, setOpen] = useState<{ rect: DOMRect; content: PreviewContent } | null>(null);
     const openTimer = useRef(0);
     const leaveTimer = useRef(0);
@@ -166,6 +168,7 @@ function usePreviewCard(load: () => Promise<PreviewContent | null>, { side }: Pr
             title={open.content.title}
             markdown={open.content.markdown}
             copyText={open.content.copyText}
+            zIndex={zIndex}
             onOpen={open.content.onOpen && (() => { open.content.onOpen!(); closeNow(); })}
             onMouseEnter={open.content.copyText !== undefined ? stay : undefined}
             onMouseLeave={open.content.copyText !== undefined ? leaveSoon : undefined}
@@ -207,12 +210,12 @@ export function useBioPreview(person: { handle: string; displayName: string; bio
 
 /** Like useBioPreview, for a link to a person (`kinesis://bio/handle`), which only has the handle: the biography is looked
  *  up when the pointer rests on it. Its "Open" opens the biography the same way clicking the link does. */
-export function useBioLinkPreview(handle: string) {
+export function useBioLinkPreview(handle: string, options?: PreviewOptions) {
     return usePreviewCard(async () => {
         if (!handle) return null;
         const person = await getBiography(handle);
         return person && person.bio.trim() !== ''
             ? { title: person.displayName.trim() || person.handle, markdown: inlineMarkdown(person.bio, person.displayName), copyText: person.bio, onOpen: () => openInternalLink('bio', handle) }
             : null;
-    });
+    }, options);
 }

@@ -97,7 +97,7 @@ const ADVANCED_TABS: { id: string; label: string; icon: LucideIcon; keys: LabelK
     { id: 'library', label: 'Library', icon: BookMarked, keys: ['aliasLibrary'] },
     { id: 'glossary', label: 'Glossary', icon: BookA, keys: ['aliasGlossary'] },
     { id: 'biography', label: 'Biography', icon: UserSearch, keys: ['aliasBiography', 'aliasBiographyItem'] },
-    { id: 'drive', label: 'Drive', icon: HardDrive, keys: ['aliasDriveName', 'aliasDriveLink', 'aliasDriveSymlink'] },
+    { id: 'drive', label: 'Drive', icon: HardDrive, keys: ['aliasDriveName', 'aliasDriveLink', 'aliasDriveSymlink', 'aliasSequence'] },
     { id: 'permissions', label: 'Permissions', icon: Shield, keys: [] },
 ];
 

@@ -7,6 +7,8 @@ import {
     type DriveVideo, type SequenceEntry, type SequenceSort,
 } from '../../api';
 import { ConfirmDialog } from '../ConfirmDialog';
+import { useWorkspace } from '../../hooks/useWorkspace';
+import { useVideoPreview } from '../VideoPreview';
 import { handlePlainContextMenu } from '../../lib/markdown-editor';
 import { useDragReorder, DropIndicator } from '../../hooks/useDragReorder';
 
@@ -36,6 +38,24 @@ interface Props {
 
 const PICKER_PAGE = 50;
 const SEARCH_DEBOUNCE_MS = 250;
+const PREVIEW_Z = 150;
+
+function SequenceEntryTitle({ entry, current, onOpen }: { entry: SequenceEntry; current: boolean; onOpen: () => void }) {
+    const { handlers, card } = useVideoPreview(entry.videoId, undefined, PREVIEW_Z);
+    return (
+        <>
+            <button
+                onClick={onOpen}
+                {...handlers}
+                aria-label={entry.title}
+                className={`flex-1 min-w-0 text-left text-sm text-white truncate cursor-pointer hover:underline underline-offset-2 ${current ? 'font-bold' : ''}`}
+            >
+                {entry.title}
+            </button>
+            {card}
+        </>
+    );
+}
 
 // The orders videos can be added in. Upload date is first: it's what a course or a channel's series
 // usually follows. `asc`/`desc` are what the direction arrow's tooltip says.
@@ -57,6 +77,9 @@ const describeOrder = (sort: SequenceSort, descending: boolean) => {
  *  yet, in the order you pick; tick the ones to add, or select everything and untick the ones to
  *  leave out. They go on the end in that order. */
 export function SequenceModal({ drive: startDrive, driveLabel: startLabel, currentVideoId, currentTitle, ownDrives, canEdit, canAddVideos, startInAdd = false, onClose, onOpenVideo, onChanged }: Props) {
+    const { labels } = useWorkspace();
+    const sequenceLabel = labels.aliasSequence;
+    const sequenceLower = sequenceLabel.toLowerCase();
     // The Drive being looked at: where the modal opened, until the breadcrumb or its "More" moves it.
     const [drive, setDrive] = useState(startDrive);
     const driveLabel = drive === startDrive ? startLabel : drive;
@@ -258,7 +281,7 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
             onChanged();
             await load();
             if (out.added === 0) {
-                setError(out.notInDrive > 0 ? `Nothing added: not filed under ${drive}.` : 'Nothing added: already in the sequence.');
+                setError(out.notInDrive > 0 ? `Nothing added: not filed under ${drive}.` : `Nothing added: already in the ${sequenceLower}.`);
             } else {
                 setView('list');
             }
@@ -283,7 +306,7 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                 <div className="px-6 py-3 border-b border-[#303030] flex items-center justify-between gap-3 bg-[#141414]">
                     <div className="flex items-center gap-2.5 min-w-0">
                         {view === 'add' ? (
-                            <button onClick={() => setView('list')} title="Back to the sequence" className="text-gray-400 hover:text-white cursor-pointer shrink-0">
+                            <button onClick={() => setView('list')} title={`Back to the ${sequenceLower}`} className="text-gray-400 hover:text-white cursor-pointer shrink-0">
                                 <ArrowLeft className="w-4 h-4" />
                             </button>
                         ) : (
@@ -299,11 +322,18 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                                     <Fragment key={crumb.path}>
                                         {i > 0 && <ChevronRight className="w-3.5 h-3.5 text-gray-600 shrink-0" />}
                                         {i === crumbs.length - 1 ? (
-                                            <span className="text-white truncate" title={aliases[encodeWdbs(crumb.path)] ?? crumb.path}>{crumb.label}</span>
+                                            <>
+                                                <span className="text-white truncate" title={aliases[encodeWdbs(crumb.path)] ?? crumb.path}>{crumb.label}</span>
+                                                {view === 'list' && entries && entries.length > 0 && (
+                                                    <span className="ml-1 shrink-0 text-sm font-normal text-gray-500">
+                                                        ({entries.length} {entries.length === 1 ? 'video' : 'videos'})
+                                                    </span>
+                                                )}
+                                            </>
                                         ) : (
                                             <button
                                                 onClick={() => setDrive(crumb.path)}
-                                                title={`${aliases[encodeWdbs(crumb.path)] ?? crumb.path}: Show This Sequence`}
+                                                title={`${aliases[encodeWdbs(crumb.path)] ?? crumb.path}: Show This ${sequenceLabel}`}
                                                 className="text-gray-400 hover:text-white hover:underline underline-offset-4 truncate cursor-pointer"
                                             >
                                                 {crumb.label}
@@ -336,7 +366,7 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                                                                 <span className="truncate text-[11px] font-mono text-white">{child.drive.split('-').pop()}</span>
                                                                 <span className="shrink-0 text-[10px] text-[#888888]">
                                                                     {child.videos} {child.videos === 1 ? 'video' : 'videos'}
-                                                                    {child.sequenceTotal > 1 ? ` · ${child.sequenceTotal} in Sequence` : ''}
+                                                                    {child.sequenceTotal > 1 ? ` · ${child.sequenceTotal} in ${sequenceLabel}` : ''}
                                                                 </span>
                                                             </button>
                                                         ))}
@@ -350,11 +380,6 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                         )}
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
-                        {view === 'list' && entries && entries.length > 0 && (
-                            <span className="px-2 py-0.5 rounded-md bg-[#222] border border-[#333] text-[11px] font-bold text-gray-300">
-                                {entries.length} {entries.length === 1 ? 'video' : 'videos'}
-                            </span>
-                        )}
                         <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors cursor-pointer">
                             <X className="w-4 h-4" />
                         </button>
@@ -370,7 +395,7 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                                 // stands alone). Adding starts one, with the video being watched already ticked when
                                 // it's filed under this Drive.
                                 <p className="text-sm text-[#888888] py-8 px-6 text-center">
-                                    No sequence for {driveLabel}.
+                                    No {sequenceLower} for {driveLabel}.
                                     {canAddVideos && (
                                         <>
                                             {' '}
@@ -385,7 +410,7 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                                 <>
                                     {direct && !inSequence && (
                                         <div className="mx-1 mb-2 px-4 py-3 rounded-lg bg-[#1a1a1a] border border-[#303030] flex items-center justify-between gap-3">
-                                            <span className="text-xs text-[#aaaaaa]">This video isn't in this sequence.</span>
+                                            <span className="text-xs text-[#aaaaaa]">This video isn't in this {sequenceLower}.</span>
                                             {canAddVideos && (
                                                 <button
                                                     disabled={busy}
@@ -416,17 +441,15 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                                                     {/* Purely a visual affordance — the whole row is the drag source/drop target, not just this icon. */}
                                                     {/* -mr-2 cancels the row's own gap-2 right after the grip, so whatever follows sits
                                                         snug against it instead of matching every other pair's spacing in the row. */}
-                                                    {draggableRow && (
-                                                        <GripVertical className="w-3.5 h-3.5 shrink-0 -mr-2 text-[#555555] cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-100 transition-opacity" />
+                                                    {canEdit && removable && (
+                                                        <GripVertical className={`w-3.5 h-3.5 shrink-0 -mr-2 text-[#555555] transition-opacity ${draggableRow ? 'cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-100' : 'opacity-0'}`} />
                                                     )}
                                                     <span className="w-7 shrink-0 text-right text-[11px] font-mono text-[#666666]">{i + 1}</span>
-                                                    <button
-                                                        onClick={() => { onOpenVideo(entry.videoId, drive); onClose(); }}
-                                                        className={`flex-1 min-w-0 text-left text-sm text-white truncate cursor-pointer hover:underline underline-offset-2 ${current ? 'font-bold' : ''}`}
-                                                        title={entry.title}
-                                                    >
-                                                        {entry.title}
-                                                    </button>
+                                                    <SequenceEntryTitle
+                                                        entry={entry}
+                                                        current={current}
+                                                        onOpen={() => { onOpenVideo(entry.videoId, drive); onClose(); }}
+                                                    />
                                                     {canEdit && removable && (
                                                         <div className="flex items-center shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                                                             <button disabled={busy || i === 0} onClick={() => move(i, -1)} title="Move up" className={iconButton}>
@@ -435,7 +458,7 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                                                             <button disabled={busy || i === entries.length - 1} onClick={() => move(i, 1)} title="Move down" className={iconButton}>
                                                                 <ChevronDown className="w-4 h-4" />
                                                             </button>
-                                                            <button disabled={busy} onClick={() => setToRemove(entry)} title="Remove from this sequence" className={`${iconButton} hover:!text-red-500`}>
+                                                            <button disabled={busy} onClick={() => setToRemove(entry)} title={`Remove from this ${sequenceLower}`} className={`${iconButton} hover:!text-red-500`}>
                                                                 <X className="w-4 h-4" />
                                                             </button>
                                                         </div>
@@ -464,11 +487,11 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
                                     <button
                                         disabled={busy}
                                         onClick={() => setConfirmClear(true)}
-                                        title="Take every video out of this sequence"
+                                        title={`Take every video out of this ${sequenceLower}`}
                                         className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#222] hover:bg-[#333] text-gray-300 hover:text-red-400 transition-all text-xs font-bold cursor-pointer border border-[#333] disabled:opacity-50"
                                     >
                                         <Eraser className="w-3.5 h-3.5" />
-                                        Clear Sequence
+                                        Clear {sequenceLabel}
                                     </button>
                                 )}
                             </div>
@@ -582,8 +605,8 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
 
             {toRemove && (
                 <ConfirmDialog
-                    title="Remove from Sequence"
-                    message={`Remove "${toRemove.title}" from the ${driveLabel} sequence? The video itself stays in your library.`}
+                    title={`Remove from ${sequenceLabel}`}
+                    message={`Remove "${toRemove.title}" from the ${driveLabel} ${sequenceLower}? The video itself stays in your library.`}
                     confirmLabel="Remove"
                     onCancel={() => setToRemove(null)}
                     onConfirm={() => {
@@ -596,10 +619,10 @@ export function SequenceModal({ drive: startDrive, driveLabel: startLabel, curre
 
             {confirmClear && entries && entries.length > 0 && (
                 <ConfirmDialog
-                    title="Clear Sequence"
+                    title={`Clear ${sequenceLabel}`}
                     message={entries.length === 1
-                        ? `Clear the ${driveLabel} sequence? "${entries[0].title}" comes out of it but stays in your library.`
-                        : `Clear the ${driveLabel} sequence? All ${entries.length} videos come out of it but stay in your library.`}
+                        ? `Clear the ${driveLabel} ${sequenceLower}? "${entries[0].title}" comes out of it but stays in your library.`
+                        : `Clear the ${driveLabel} ${sequenceLower}? All ${entries.length} videos come out of it but stay in your library.`}
                     confirmLabel="Clear"
                     onCancel={() => setConfirmClear(false)}
                     onConfirm={() => {

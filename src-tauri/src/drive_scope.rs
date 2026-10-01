@@ -290,6 +290,8 @@ impl ScopePlan {
                     .filter(|_| link.key.starts_with(':'))
                     .or_else(|| root_of_storage(&link.key))
                     .is_some_and(|r| !self.root_kept(&r)),
+                // A sequence link carries its Drive's display path.
+                LinkKind::Playlist => root_of_display(&link.key).is_some_and(|r| !self.root_kept(&r)),
             };
             if gone {
                 LinkAction::Unlink

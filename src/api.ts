@@ -223,6 +223,11 @@ export async function getVideoById(videoId: string): Promise<Video | null> {
     return await invoke("get_video_by_id", { videoId });
 }
 
+/** A saved video as its card shows it, without the transcript (light enough for a hover preview). */
+export async function getVideoCard(videoId: string): Promise<Video | null> {
+    return await invoke("get_video_card", { videoId });
+}
+
 export async function checkVideoExists(id: string): Promise<boolean> {
     return await invoke("check_video_exists", { videoId: id });
 }
@@ -583,7 +588,7 @@ export interface DriveVideoPage {
 }
 
 /** What to order videos by: upload date, when added to the library, or title (natural: "2" before "10"). */
-export type SequenceSort = 'published' | 'added' | 'title';
+export type SequenceSort = 'published' | 'added' | 'views' | 'title';
 
 /** Videos filed at or beneath `drive` (home or "Also in") that aren't in its sequence yet, in `sort` order. */
 export async function listDriveVideosForSequence(drive: string, query: string, sort: SequenceSort, descending: boolean, limit: number, offset: number): Promise<DriveVideoPage> {
@@ -1048,6 +1053,116 @@ export interface BulkWdbsResult {
 // Mode in the Library/Portal grid.
 export async function bulkUpdateVideoWdbs(videoIds: string[], wdbs: string): Promise<BulkWdbsResult> {
     return await invoke("bulk_update_wdbs", { videoIds, wdbs });
+}
+
+// ─── Manage Drive ────────────────────────────────────────────────────────────
+// The Manage Drive window (components/drive-manager): every Drive, empty ones included, and changing the
+// Drive's shape. See src-tauri/src/db/drive_manage.rs.
+
+/** One node of the Manage Drive tree. */
+export interface ManageNode {
+    segment: string;
+    /** Display form, ":CS-DSA". */
+    display: string;
+    /** Storage form, "θψCS_DSA" (what the Library's Drive filter and the alias/marker setters take). */
+    path: string;
+    alias: string | null;
+    icon: string | null;
+    color: string | null;
+    shape: string | null;
+    /** Videos whose home is exactly this Drive. */
+    filed: number;
+    /** "Also in" links to exactly this Drive. */
+    linked: number;
+    /** Distinct videos here or beneath. */
+    total: number;
+    /** Videos in this Drive's own sequence. */
+    sequence: number;
+    /** Glossary entries filed under it (top-level Drives only). */
+    terms: number;
+    children: ManageNode[];
+}
+
+export async function getDriveManageTree(): Promise<ManageNode[]> {
+    return await invoke("get_drive_manage_tree");
+}
+
+export interface SequenceSummary {
+    /** Display form. */
+    drive: string;
+    count: number;
+    /** Entries whose video has left the Drive. */
+    stale: number;
+    /** The video first in the sequence right now (what a sequence link opens), and its title. */
+    firstVideoId: string | null;
+    firstTitle: string | null;
+}
+
+export async function listDriveSequences(): Promise<SequenceSummary[]> {
+    return await invoke("list_drive_sequences");
+}
+
+/** One Drive's sequence (display path), or null when it has none. */
+export async function getSequenceSummary(drive: string): Promise<SequenceSummary | null> {
+    return await invoke("get_sequence_summary", { drive });
+}
+
+/** A video's thumbnail, from its id alone (the same address the backend gives saved videos). It's 4:3, with black bars
+ *  above and below a 16:9 video: a box that isn't 16:9 trims them with TRIMMED_THUMB_IMG (components/SequenceCard.tsx). */
+export function videoThumbnail(videoId: string): string {
+    return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+}
+
+/** A video filed at a Drive: one row per home or "Also in" link. */
+export interface DriveMember {
+    videoId: string;
+    title: string;
+    author: string | null;
+    handle: string | null;
+    /** Where this row files it (display form). */
+    at: string;
+    viaLink: boolean;
+    /** The video's home (display form), for a linked row. */
+    home: string | null;
+}
+
+export async function listDriveMembers(drive: string, includeSub: boolean): Promise<DriveMember[]> {
+    return await invoke("list_drive_members", { drive, includeSub });
+}
+
+/** Adds a Drive under `parent` (display form), or at the top level. Returns its display path. */
+export async function createDrive(parent: string | null, name: string): Promise<string> {
+    return await invoke("create_drive", { parent, name });
+}
+
+/** What a rename/move/merge did, or (dry run) would do. */
+export interface RelocateReport {
+    from: string;
+    to: string;
+    merged: boolean;
+    drives: number;
+    videos: number;
+    links: number;
+    sequences: number;
+    terms: number;
+    termsMovedTo: string | null;
+    texts: number;
+}
+
+/** Renames, moves or merges a Drive (display paths). `dryRun` reports without changing anything. */
+export async function relocateDrive(from: string, to: string, dryRun: boolean): Promise<RelocateReport> {
+    return await invoke("relocate_drive", { from, to, dryRun });
+}
+
+export interface DeleteDriveReport {
+    drive: string;
+    drives: number;
+    texts: number;
+}
+
+/** Deletes an empty Drive and everything beneath it. Rejects, saying what's left, when it isn't empty. */
+export async function deleteDrive(drive: string, dryRun: boolean): Promise<DeleteDriveReport> {
+    return await invoke("delete_drive", { drive, dryRun });
 }
 
 export interface PixabayImage {

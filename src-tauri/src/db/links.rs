@@ -21,6 +21,9 @@ pub enum LinkKind {
     Bio,
     Video,
     Drive,
+    /// A Drive's playlist (its sequence, in the code), keyed by the Drive's display path (":CS-DSA"). Opening one opens whatever video is first in
+    /// the sequence at the time, so reordering it never breaks the link.
+    Playlist,
 }
 
 impl LinkKind {
@@ -30,6 +33,7 @@ impl LinkKind {
             LinkKind::Bio => "bio",
             LinkKind::Video => "video",
             LinkKind::Drive => "drive",
+            LinkKind::Playlist => "playlist",
         }
     }
 
@@ -39,6 +43,7 @@ impl LinkKind {
             "bio" => Some(LinkKind::Bio),
             "video" => Some(LinkKind::Video),
             "drive" => Some(LinkKind::Drive),
+            "playlist" => Some(LinkKind::Playlist),
             _ => None,
         }
     }
@@ -66,7 +71,7 @@ pub fn build_link(text: &str, kind: LinkKind, key: &str) -> String {
 fn link_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\[([^\[\]]*)\]\(kinesis://(glossary|bio|video|drive)/([A-Za-z0-9\-._~%]+)\)").unwrap()
+        Regex::new(r"\[([^\[\]]*)\]\(kinesis://(glossary|bio|video|drive|playlist)/([A-Za-z0-9\-._~%]+)\)").unwrap()
     })
 }
 
@@ -243,6 +248,31 @@ pub fn apply_link_edits_recorded(db_path: &str, edits: &[LinkEdit]) -> Result<Ve
         tx.commit()?;
     }
     Ok(changed)
+}
+
+/// How many stored texts hold at least one link to any of `keys` (all of one `kind`): what a rename or
+/// delete of those targets would rewrite, counted up front for its confirmation.
+pub fn count_texts_linking(db_path: &str, kind: LinkKind, keys: &[String]) -> Result<usize> {
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    let conn = Connection::open(db_path)?;
+    let mut count = 0;
+    for (table, column) in TEXT_COLUMNS {
+        if !table_exists(&conn, table)? {
+            continue;
+        }
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {column} FROM {table} WHERE {column} IS NOT NULL AND INSTR({column}, ?1) > 0"
+        ))?;
+        let texts = stmt.query_map(params![SCHEME], |r| r.get::<_, String>(0))?;
+        for text in texts.filter_map(|r| r.ok()) {
+            if find_links(&text).iter().any(|l| l.kind == kind && keys.iter().any(|k| same_key(kind, k, &l.key))) {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
 }
 
 #[cfg(test)]

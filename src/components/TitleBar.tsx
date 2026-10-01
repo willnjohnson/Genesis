@@ -25,6 +25,11 @@ interface Props {
     toolbar?: ReactNode;
 }
 
+/** A loss of focus this soon after the bar is pressed is the window manager taking the pointer to move the window (Linux). */
+const MOVE_GRAB_MS = 400;
+/** Page mouse events this soon after that loss of focus are the grab starting, not the move ending. */
+const SETTLE_MS = 250;
+
 const barButton = 'flex items-center justify-center w-[22px] h-[22px] rounded text-gray-400 hover:text-white hover:bg-[#272727] transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-gray-400';
 /** A thin line between groups of buttons. */
 export function TitleBarDivider() {
@@ -107,39 +112,45 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
     // Dimmed while the window isn't the one with focus (clicked off to another app, say), the way a native title bar
     // goes muted: it's still all there and usable, just less insistent about it.
     // Moving the window by the bar doesn't count: on Linux the window manager takes the pointer and keyboard for the
-    // move, and the window is told it lost focus though it's still the one in front. So a loss of focus that comes while
-    // the bar is held is set aside, and the window is asked again once the pointer is back with the page (the move over).
+    // move, and the window is told it lost focus though it's still the one in front. So a loss of focus that comes just
+    // after the bar was pressed is set aside as that move, and the window is asked again once the move is over.
+    // Timed, not tracked by the page's own mouse events: when the window manager takes the pointer, WebKitGTK can hand
+    // the page a stray mouseup/mousemove right then, which made the move look over (and the window unfocused) at once.
     const [focused, setFocused] = useState(true);
-    const holdingBar = useRef(false);
+    const barPressedAt = useRef(-Infinity);
     useEffect(() => {
         let stop: (() => void) | undefined;
-        let recheck: (() => void) | undefined;
+        let recheck: ((e: Event) => void) | undefined;
+        const stopRecheck = () => {
+            if (!recheck) return;
+            document.removeEventListener('mousemove', recheck);
+            document.removeEventListener('mouseup', recheck);
+            recheck = undefined;
+        };
         try {
             const appWindow = getCurrentWindow();
             appWindow.isFocused().then(setFocused).catch(() => {});
-            const settle = () => {
-                holdingBar.current = false;
-                document.removeEventListener('mousemove', settle);
-                document.removeEventListener('mouseup', settle);
-                appWindow.isFocused().then(setFocused).catch(() => {});
-            };
-            recheck = settle;
             appWindow.onFocusChanged(({ payload }) => {
-                if (!payload && holdingBar.current) {
-                    document.addEventListener('mousemove', settle);
-                    document.addEventListener('mouseup', settle);
+                stopRecheck();
+                if (payload || performance.now() - barPressedAt.current > MOVE_GRAB_MS) {
+                    setFocused(payload);
                     return;
                 }
-                holdingBar.current = false;
-                setFocused(payload);
+                // The move's grab. The pointer only comes back to the page once the move is over; anything the page
+                // gets before SETTLE_MS is the stray event from the grab starting, so it's ignored.
+                const lostAt = performance.now();
+                recheck = () => {
+                    if (performance.now() - lostAt < SETTLE_MS) return;
+                    stopRecheck();
+                    appWindow.isFocused().then(setFocused).catch(() => {});
+                };
+                document.addEventListener('mousemove', recheck);
+                document.addEventListener('mouseup', recheck);
             }).then(unlisten => { stop = unlisten; }).catch(() => {});
         } catch { /* not in the app window (a plain browser) */ }
         return () => {
             stop?.();
-            if (recheck) {
-                document.removeEventListener('mousemove', recheck);
-                document.removeEventListener('mouseup', recheck);
-            }
+            stopRecheck();
         };
     }, []);
     // Applied to most of the bar's content while unfocused (not the window controls: they get their own opacity below, on
@@ -186,9 +197,7 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
             onContextMenu={openWindowMenu}
             onMouseDown={e => {
                 if (e.button !== 0 || (e.target as Element).closest('button')) return;
-                // Let go without a move (a plain click, or the start of a double-click), the page does see the release.
-                holdingBar.current = true;
-                document.addEventListener('mouseup', () => { holdingBar.current = false; }, { once: true });
+                barPressedAt.current = performance.now();
             }}
             // Above the dimming layers of dialogs and the sidebar, so the window can still be moved and closed.
             className="relative z-[300] shrink-0 grid grid-cols-[1fr_auto_1fr] items-stretch h-[var(--k-titlebar-height)] bg-[#0f0f0f] border-b border-[#272727] select-none"

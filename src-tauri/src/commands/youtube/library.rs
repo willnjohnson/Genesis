@@ -354,6 +354,14 @@ pub async fn get_video_by_id(app: tauri::AppHandle, video_id: String) -> Result<
     db::get_video_by_id(&db_path, &video_id, true).map_err(|e| e.to_string())
 }
 
+/// One saved video as its card shows it (title, thumbnail, channel, views, dates, and whether it has a transcript or
+/// summary), without the transcript itself: for the hover preview of a video's name. None when it isn't in this library.
+#[command]
+pub async fn get_video_card(app: tauri::AppHandle, video_id: String) -> Result<Option<crate::Video>, String> {
+    let db_path = get_db_path(&app);
+    db::get_video_by_id(&db_path, &video_id, false).map_err(|e| e.to_string())
+}
+
 #[command]
 pub async fn check_video_exists(app: tauri::AppHandle, video_id: String) -> Result<bool, String> {
     let db_path = get_db_path(&app);

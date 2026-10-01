@@ -2,6 +2,9 @@ use tauri::command;
 use crate::{get_db_path, db};
 use crate::youtube::{self, YouTubeClient, ClientType};
 
+/// When YouTube is limiting this network (its "confirm you're not a bot" check, or such a page instead of a transcript).
+const BOT_CHECK: &str = "YouTube is limiting transcript requests from this network (it asked to confirm you're not a bot).";
+
 /// Fetches a video's transcript from YouTube, with no API key: it comes from the video's own caption
 /// tracks, which YouTube serves to anyone. It asks as the Android app first and, if that gets nowhere,
 /// as the iOS app, retrying a transient failure once, and rejects bot-detection/rate-limit pages that
@@ -11,6 +14,8 @@ pub(crate) async fn fetch_transcript_with_retries(video_id: &str) -> Result<Stri
     let mut saw_captionless_video = false;
     let mut unplayable: Option<String> = None;
     let mut blocked: Option<String> = None;
+    // Once YouTube has asked to confirm we're not a bot, that's the cause worth reporting, whatever fails after it.
+    let mut bot_checked = false;
 
     for client_type in [ClientType::Android, ClientType::Ios] {
         let client = YouTubeClient::new(client_type);
@@ -18,11 +23,17 @@ pub(crate) async fn fetch_transcript_with_retries(video_id: &str) -> Result<Stri
             let player = match client.player(video_id).await {
                 Ok(p) => p,
                 Err(e) => {
-                    blocked = Some(e);
+                    blocked = Some(format!("Couldn't reach YouTube ({}).", e.trim_end_matches('.')));
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     continue;
                 }
             };
+            // "Sign in to confirm you're not a bot" is YouTube limiting this network, not the video: try the next
+            // client rather than calling the video unplayable.
+            if youtube::is_bot_check(&player) {
+                bot_checked = true;
+                break;
+            }
             // A video YouTube won't play won't hand out captions either; asking again changes nothing.
             if let Some(reason) = youtube::playability_problem(&player) {
                 unplayable = Some(reason);
@@ -32,7 +43,7 @@ pub(crate) async fn fetch_transcript_with_retries(video_id: &str) -> Result<Stri
                 Ok(Some(t)) if !t.trim().is_empty() => {
                     // Bot-detection / rate-limit text can arrive as if it were a transcript.
                     if youtube::contains_bot_detection_text(&t.to_lowercase()) {
-                        blocked = Some("YouTube returned a bot-detection page instead of a transcript.".to_string());
+                        bot_checked = true;
                         break;
                     }
                     return Ok(t);
@@ -42,7 +53,7 @@ pub(crate) async fn fetch_transcript_with_retries(video_id: &str) -> Result<Stri
                     break;
                 }
                 Ok(_) => {}
-                Err(e) => blocked = Some(e),
+                Err(e) => blocked = Some(format!("Couldn't read the transcript from YouTube ({}).", e.trim_end_matches('.'))),
             }
             if attempt < 2 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -50,14 +61,18 @@ pub(crate) async fn fetch_transcript_with_retries(video_id: &str) -> Result<Stri
         }
     }
 
+    // Short, since the app puts "Failed to load transcript:" in front, and the Sidebar lists the likely causes (and the
+    // VPN fix) under any of these but the first.
     Err(if saw_captionless_video {
         "This video has no captions, so there's no transcript to get.".to_string()
+    } else if bot_checked {
+        BOT_CHECK.to_string()
     } else if let Some(reason) = unplayable {
-        format!("YouTube won't provide this video's transcript: {reason}.")
+        format!("YouTube won't play this video here ({}).", reason.trim_end_matches('.'))
     } else if let Some(problem) = blocked {
-        format!("Couldn't get the transcript right now. {problem}")
+        problem
     } else {
-        "Cannot fetch transcript for this video.".to_string()
+        "YouTube didn't hand over this video's transcript.".to_string()
     })
 }
 

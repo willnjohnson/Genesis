@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../../lib/remark-highlight';
+import { remarkEmbeds } from '../../lib/remark-embeds';
 import { remarkSourceLines } from '../../lib/preview-sync';
 import { markdownUrlTransform } from '../../lib/internal-links';
 import { MarkdownLink } from '../MarkdownLink';
@@ -43,7 +44,7 @@ export function TranscriptText({ text, onImageClick, sourceLines }: Props) {
         // ones into a paragraph); prose gives headings, lists and paragraphs their spacing.
         <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none whitespace-pre-line">
             <ReactMarkdown
-                remarkPlugins={sourceLines ? [remarkGfm, remarkHighlight, remarkSourceLines] : [remarkGfm, remarkHighlight]}
+                remarkPlugins={sourceLines ? [remarkGfm, remarkHighlight, remarkEmbeds, remarkSourceLines] : [remarkGfm, remarkHighlight, remarkEmbeds]}
                 urlTransform={markdownUrlTransform}
                 components={{
                     a: MarkdownLink,

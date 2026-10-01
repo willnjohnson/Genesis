@@ -578,6 +578,38 @@ pub fn update_video_wdbs(db_path: &str, video_id: &str, encoded_wdbs: &str) -> R
     Ok(())
 }
 
+/// Assigns a batch of videos to one Drive in a single update transaction, then prunes stale
+/// sequence memberships in groups rather than reopening the database and renumbering per video.
+pub fn bulk_update_video_wdbs(db_path: &str, video_ids: &[String], encoded_wdbs: &str) -> Result<()> {
+    let mut conn = Connection::open(db_path)?;
+    let tx = conn.transaction()?;
+    tx.execute_batch("CREATE TEMP TABLE _bulk_wdbs_video_ids (video_id TEXT PRIMARY KEY)")?;
+    {
+        let mut insert = tx.prepare_cached("INSERT OR IGNORE INTO _bulk_wdbs_video_ids (video_id) VALUES (?1)")?;
+        for video_id in video_ids {
+            let video_id = video_id.trim();
+            if !video_id.is_empty() {
+                insert.execute(params![video_id])?;
+            }
+        }
+    }
+    tx.execute(
+        "UPDATE Videos SET WDBS = ?1
+         WHERE video_id IN (SELECT video_id FROM _bulk_wdbs_video_ids)",
+        params![encoded_wdbs],
+    )?;
+    if encoded_wdbs == ":" {
+        tx.execute(
+            "DELETE FROM VideoWDBSLinks
+             WHERE video_id IN (SELECT video_id FROM _bulk_wdbs_video_ids)",
+            [],
+        )?;
+    }
+    super::sequences::prune_video_memberships_batch(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn get_unique_handles(db_path: &str) -> Result<Vec<String>> {
     let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare("SELECT DISTINCT handle FROM Videos WHERE handle IS NOT NULL AND handle != '' ORDER BY handle")?;

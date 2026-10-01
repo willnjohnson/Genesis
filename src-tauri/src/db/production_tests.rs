@@ -113,6 +113,40 @@ fn kinesis_works_end_to_end_on_the_production_schema() {
 }
 
 #[test]
+fn drives_can_be_renamed_merged_and_deleted_on_the_production_schema() {
+    // The production triggers refuse a video pointing at an unregistered node, turn an update of
+    // tblWDBS.WDBS into a merge, and guard deletes: the Manage Drive operations have to get past all three.
+    use super::drive_manage::{create_drive, delete_drive, get_drive_manage_tree, relocate_drive};
+    let path = production_db("drive_manage");
+    schema::init_db(&path).unwrap();
+    for (id, drive) in [("a", ":UAP-GERB-VVV"), ("b", ":UAP-GERB"), ("c", ":FIN")] {
+        // A channel each: the production insert trigger guesses a "<prefix>_PND" Drive for a channel's next video.
+        videos::save_video(&path, id, id, "Author", 60, "words", 1, "2024-05-01", &format!("@creator_{id}"), None).unwrap();
+        wdbs::ensure_wdbs_path_exists(&path, drive).unwrap();
+        videos::update_video_wdbs(&path, id, &super::drive_manage::display_to_storage(drive)).unwrap();
+    }
+    wdbs::add_video_wdbs_link(&path, "c", "θψUAP_GERB").unwrap();
+    wdbs::set_wdbs_alias(&path, "θψUAP_GERB", "Gerb Alias").unwrap();
+
+    relocate_drive(&path, ":UAP-GERB", ":UAP-GERBER", false).unwrap_or_else(|e| panic!("rename: {e}"));
+    assert_eq!(wdbs::get_video_wdbs_primary(&path, "a").unwrap().as_deref(), Some("θψUAP_GERBER_VVV"));
+    assert_eq!(wdbs::get_video_wdbs_links(&path, "c").unwrap(), vec!["θψUAP_GERBER".to_string()]);
+
+    relocate_drive(&path, ":UAP-GERBER", ":FIN", false).unwrap_or_else(|e| panic!("merge: {e}"));
+    assert_eq!(wdbs::get_video_wdbs_primary(&path, "b").unwrap().as_deref(), Some("θψFIN"));
+    assert!(wdbs::get_video_wdbs_links(&path, "c").unwrap().is_empty(), "c's link now equals its home");
+
+    create_drive(&path, Some(":UAP"), "SPARE").unwrap();
+    delete_drive(&path, ":UAP", false).unwrap_or_else(|e| panic!("delete: {e}"));
+    let conn = Connection::open(&path).unwrap();
+    let left: Vec<String> = conn.prepare("SELECT WDBS FROM tblWDBS ORDER BY WDBS").unwrap()
+        .query_map([], |r| r.get(0)).unwrap().filter_map(|r| r.ok()).collect();
+    assert_eq!(left, vec![":", ":FIN", ":FIN-VVV"]);
+    assert!(get_drive_manage_tree(&path).unwrap().iter().all(|n| n.display != ":UAP"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn a_biography_without_a_channel_id_is_accepted_by_the_production_schema() {
     // The pack (or sync item) leaves channel_id out; production declares it NOT NULL with no default.
     let path = production_db("bio_no_channel");

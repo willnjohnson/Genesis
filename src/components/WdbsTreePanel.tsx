@@ -84,7 +84,7 @@ function NodeContextMenu({ x, y, onEditAlias, onEditIcon, onEditColor, onClose }
         return () => document.removeEventListener('mousedown', handler);
     }, [onClose]);
 
-    const MENU_WIDTH = 160;
+    const MENU_WIDTH = 184;
     const left = Math.min(x, window.innerWidth - MENU_WIDTH - 12);
     const top = Math.min(y, window.innerHeight - 96);
 
@@ -99,10 +99,10 @@ function NodeContextMenu({ x, y, onEditAlias, onEditIcon, onEditColor, onClose }
                 Edit Alias
             </button>
             <button onClick={onEditIcon} className="w-full text-left px-3 py-2 text-xs text-gray-200 hover:bg-[#272727] cursor-pointer">
-                Edit Icon
+                Edit Category Marker
             </button>
             <button onClick={onEditColor} className="w-full text-left px-3 py-2 text-xs text-gray-200 hover:bg-[#272727] cursor-pointer">
-                Edit Color Decoration
+                Edit Decoration Marker
             </button>
         </div>
     );

@@ -1,7 +1,7 @@
 use crate::Video;
 use rusqlite::{named_params, params, Connection, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use super::search::{video_columns_sql, video_row, library_order_by, filter_kind_where, build_fts_query, parse_search_facets, glossary_tag_clause, untagged_clause};
 use super::schema::table_exists;
 
@@ -743,22 +743,32 @@ mod unsorted_tests {
 }
 
 /// Every distinct Warp Drive path currently assigned to at least one video (canonical or
-/// symlinked), for autocomplete when assigning a video to an existing category — see
-/// components/Sidebar.tsx's Warp Drive editor.
+/// symlinked), plus every leaf registered in tblWDBS with nothing filed yet (one made in the Manage
+/// Drive window), in storage form — for autocomplete when assigning a video to an existing category
+/// (see components/Sidebar.tsx's Warp Drive editor). Only registered *leaves* are added: every level
+/// above an assigned path is registered too, and listing those would bury the real choices.
 pub fn list_all_wdbs_paths(db_path: &str) -> Result<Vec<String>> {
     let conn = Connection::open(db_path)?;
-    let mut stmt = conn.prepare(
-        "SELECT WDBS FROM Videos WHERE WDBS IS NOT NULL AND WDBS != ''
-         UNION
-         SELECT wdbs FROM VideoWDBSLinks
-         ORDER BY 1",
-    )?;
-    let paths = stmt
-        .query_map([], |row| row.get::<_, String>(0))?
-        .filter_map(|r| r.ok())
-        .filter(|wdbs| !is_unassigned_sentinel(wdbs))
-        .collect();
-    Ok(paths)
+    let mut paths: BTreeSet<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT WDBS FROM Videos WHERE WDBS IS NOT NULL AND WDBS != ''
+             UNION
+             SELECT wdbs FROM VideoWDBSLinks",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.filter_map(|r| r.ok()).filter(|wdbs| !is_unassigned_sentinel(wdbs)).collect()
+    };
+    if table_exists(&conn, "tblWDBS")? {
+        let mut stmt = conn.prepare("SELECT WDBS FROM tblWDBS WHERE WDBS != ':'")?;
+        let registered: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(0))?.filter_map(|r| r.ok()).collect();
+        for display in &registered {
+            let is_leaf = !registered.iter().any(|other| other.len() > display.len() && other.starts_with(display.as_str()) && other[display.len()..].starts_with('-'));
+            if is_leaf {
+                paths.insert(super::drive_manage::display_to_storage(display));
+            }
+        }
+    }
+    Ok(paths.into_iter().collect())
 }
 
 /// A video's current canonical Warp Drive, if any (i.e. `videos.WDBS`) — used before adding a

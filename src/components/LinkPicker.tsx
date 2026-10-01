@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ElementType } from 'react';
-import { BookOpen, FileText, HardDrive, Search, Video as VideoIcon, X } from 'lucide-react';
+import { BookOpen, FileText, HardDrive, ListOrdered, Search, Video as VideoIcon, X } from 'lucide-react';
 import {
-    decodeWdbs, getBiographies, getGlossaryTerms, getSavedVideos, getWdbsTree, searchLibrary,
+    decodeWdbs, encodeWdbs, getBiographies, getGlossaryTerms, getSavedVideos, getWdbsAliases, getWdbsTree, listDriveSequences, searchLibrary,
     type WdbsNode,
 } from '../api';
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { linkKindLabel } from '../lib/internal-links';
 import { driveSegmentLabel } from '../lib/utils';
+import { PlaylistThumb, sequenceName } from './SequenceCard';
 import {
     buildLink, LINK_PICKER_EVENT, type LinkKind, type LinkPickerRequest,
 } from '../lib/internal-links';
@@ -18,6 +19,8 @@ interface Choice {
     label: string;
     sub?: string;
     thumb?: string;
+    /** A sequence, drawn as a playlist: its first video's thumbnail with the video count on it. */
+    playlist?: { videoId: string | null; count: number };
 }
 
 // Tab names come from linkKindLabel (the workspace's aliases).
@@ -26,6 +29,7 @@ const TABS: { kind: LinkKind; Icon: ElementType }[] = [
     { kind: 'bio', Icon: FileText },
     { kind: 'video', Icon: VideoIcon },
     { kind: 'drive', Icon: HardDrive },
+    { kind: 'playlist', Icon: ListOrdered },
 ];
 
 const MAX_SHOWN = 200;
@@ -65,8 +69,9 @@ export function LinkPicker() {
         if (t.kind === 'glossary') return flags.showGlossary;
         if (t.kind === 'bio') return flags.showBiography;
         if (t.kind === 'drive') return flags.showDrive;
+        if (t.kind === 'playlist') return flags.showDrive && flags.showSequences;
         return true;
-    }), [flags.showGlossary, flags.showBiography, flags.showDrive]);
+    }), [flags.showGlossary, flags.showBiography, flags.showDrive, flags.showSequences]);
 
     useEffect(() => {
         const onRequest = (e: Event) => {
@@ -131,6 +136,20 @@ export function LinkPicker() {
                             sub: `${display} · ${n.count} video${n.count === 1 ? '' : 's'}`,
                         }));
                 }
+                case 'playlist': {
+                    // The key is the Drive's display path: the link opens whatever is first in its playlist at the time.
+                    const sequences = await listDriveSequences();
+                    const aliases = await getWdbsAliases(sequences.map(s => encodeWdbs(s.drive))).catch(() => ({} as Record<string, string>));
+                    return sequences
+                        .map(s => ({ s, alias: aliases[encodeWdbs(s.drive)] ?? null }))
+                        .filter(({ s, alias }) => matches(query, s.drive, alias, s.firstTitle))
+                        .map(({ s, alias }) => ({
+                            key: s.drive,
+                            label: sequenceName(s.drive, alias, labels.aliasSequence),
+                            sub: `${s.drive} · ${s.count} video${s.count === 1 ? '' : 's'}`,
+                            playlist: { videoId: s.firstVideoId, count: s.count },
+                        }));
+                }
             }
         };
         const timer = setTimeout(() => {
@@ -155,7 +174,15 @@ export function LinkPicker() {
         const { textarea, start, end } = request;
         const selected = textarea.value.substring(start, end);
         const text = selected.trim() ? selected : choice.label;
-        const link = buildLink(text, tab, choice.key);
+        let link = buildLink(text, tab, choice.key);
+        // A video or playlist with no text selected goes on a line of its own, where it shows as a card
+        // (lib/remark-embeds.ts). Selected text is linked where it is, inline.
+        if (!selected.trim() && (tab === 'video' || tab === 'playlist')) {
+            const before = textarea.value.substring(0, start);
+            const after = textarea.value.substring(end);
+            if (before !== '' && !before.endsWith('\n')) link = '\n' + link;
+            if (after !== '' && !after.startsWith('\n')) link = link + '\n';
+        }
         setRequest(null);
         textarea.focus();
         textarea.setSelectionRange(start, end);
@@ -227,6 +254,7 @@ export function LinkPicker() {
                                         {choice.thumb && (
                                             <img src={choice.thumb} alt="" loading="lazy" className="w-16 h-10 object-cover rounded-md shrink-0 bg-[#272727]" />
                                         )}
+                                        {choice.playlist && <PlaylistThumb videoId={choice.playlist.videoId} count={choice.playlist.count} className="w-20 aspect-video rounded-md" />}
                                         <span className="min-w-0 flex flex-col">
                                             <span className="text-sm text-white truncate">{choice.label}</span>
                                             {choice.sub && <span className="text-[11px] text-[#777777] truncate">{choice.sub}</span>}

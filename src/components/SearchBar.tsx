@@ -19,6 +19,8 @@ interface Props {
     viewMode?: 'search' | 'library' | 'glossary' | 'biography';
     initialFacets?: Facet[];
     initialQuery?: string;
+    /** The bar's outer spacing, in place of the page header's `mb-2 px-4` (Manage Drive's Unsorted list sits it in a pane). */
+    className?: string;
 }
 
 /**
@@ -42,7 +44,7 @@ export type SearchFacet = 'handle' | 'channel_name' | 'playlist' | 'video' | 'ti
  * `^` a glossary term search, and `!#` filters to videos with no tags at all (any text typed right
  * after it, like `!#foo`, stays a normal search on top of that filter, not a tag-name search).
  */
-export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search', initialFacets = [], initialQuery = '', placeholder }: Props) {
+export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search', initialFacets = [], initialQuery = '', placeholder, className = 'mb-2 px-4' }: Props) {
     const [query, setQuery] = useState(initialQuery);
     const [facets, setFacets] = useState<Facet[]>(initialFacets);
     const [showHistory, setShowHistory] = useState(false);
@@ -590,7 +592,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
     }, [facetMenuIndex]);
 
     return (
-        <form onSubmit={handleSubmit} className="w-full mb-2 px-4 relative z-50">
+        <form onSubmit={handleSubmit} className={`w-full relative z-50 ${className}`}>
             {/* data-search-bar: the command palette (CommandPalette.tsx) lines itself up with this row. */}
             <div data-search-bar className={`flex items-stretch justify-center transition-all ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
                 <div ref={containerRef} className="relative flex-1">

@@ -4,6 +4,7 @@ import { useState, useMemo, useRef, useEffect, useLayoutEffect, useCallback, typ
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { format } from 'date-fns';
 import { saveImageAs } from '../lib/save-image-as';
+import { formatDate, formatViewCount, parseViewCount } from '../lib/video-format';
 import { useFlags } from '../hooks/useFlags';
 import { BottomBar } from './BottomBar';
 import { TrashChip } from './TrashChip';
@@ -66,6 +67,9 @@ interface Props {
     loading?: boolean;
     emptyTitle?: string;
     emptyMessage?: string;
+    /** A link under the empty message that does something about it: "Clear filter", say. Muted and underlined, turning
+     *  the accent color on hover (like Manage Drive's "File them."). */
+    emptyAction?: { label: string; onClick: () => void };
     // Search only: a failed fetch (e.g. "Failed to fetch. Check your connection or the URL/
     // handle.") — shown in the same content-section slot as emptyTitle, in its place, since
     // there's nothing else to show there anyway. Muted red rather than a separate alert box: a
@@ -132,7 +136,7 @@ export function VideoList({
     sortField: sortFieldProp, onSortFieldChange, sortOrder: sortOrderProp, onToggleSortOrder,
     filterKind: filterProp, onFilterKindChange,
     onLoadMore, loadingMore = false, hasMore = false,
-    loading = false, emptyTitle, emptyMessage, error, onOpenApiKeySettings,
+    loading = false, emptyTitle, emptyMessage, emptyAction, error, onOpenApiKeySettings,
     driveLabel, driveLabelPrefix = 'Drive', driveLabelPrefixTooltip, onOpenTrash, idle = false, scrollContainerRef,
     bulkAssignMode = false, bulkSelectedIds, onToggleBulkSelect, onBulkSelectRange, onBulkContextMenu,
 }: Props) {
@@ -678,6 +682,11 @@ export function VideoList({
                             ) : (error || emptyTitle || (isLibrary ? "No results" : "No search results"))}
                         </p>
                         {!error && emptyMessage && <p className="text-sm">{emptyMessage}</p>}
+                        {!error && emptyAction && (
+                            <button onClick={emptyAction.onClick} className="mt-3 text-sm text-gray-500 underline underline-offset-2 hover:text-[var(--k-accent)] transition-colors cursor-pointer">
+                                {emptyAction.label}
+                            </button>
+                        )}
                     </div>
                 )
             ) : (
@@ -937,36 +946,3 @@ function usableText(text: string | null | undefined): string | null {
     return t === '' || t === '.' || t.toUpperCase() === 'NA' || t.toUpperCase() === 'N/A' ? null : t;
 }
 
-function formatDate(dateStr: string) {
-    if (!dateStr) return 'Unknown';
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) {
-        return dateStr;
-    }
-    return format(d, 'MMM dd, yyyy');
-}
-
-function parseViewCount(count: string): number {
-    if (!count || count === "Saved") return 0;
-    const clean = count.toLowerCase().replace(/,/g, '').trim();
-    let multiplier = 1;
-    if (clean.includes('k')) multiplier = 1000;
-    else if (clean.includes('m')) multiplier = 1000000;
-    else if (clean.includes('b')) multiplier = 1000000000;
-    const num = parseFloat(clean.replace(/[^0-9.]/g, ''));
-    if (isNaN(num)) return 0;
-    return Math.floor(num * multiplier);
-}
-
-function formatViewCount(count: string): string {
-    if (count === "Saved") return 'Saved';
-    if (!count) return '0';
-    if (count.toLowerCase().includes('view')) {
-        return count.split(' ')[0];
-    }
-    const n = parseViewCount(count);
-    if (n >= 1000000000) return (n / 1000000000).toFixed(1) + 'B';
-    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-    return n.toLocaleString();
-}

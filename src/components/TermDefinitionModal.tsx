@@ -3,6 +3,7 @@ import { X, FileText, Hash, Search } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../lib/remark-highlight';
+import { remarkEmbeds } from '../lib/remark-embeds';
 import { markdownUrlTransform } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
 import { useFlags } from '../hooks/useFlags';
@@ -120,7 +121,7 @@ export function TermDefinitionModal({ term, onClose, onSearch, onOpenVideo }: Pr
                         // panel, both of which moved off prose-lg for reading oversized next to them.
                         <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
                             <ReactMarkdown
-                                remarkPlugins={[remarkGfm, remarkHighlight]}
+                                remarkPlugins={[remarkGfm, remarkHighlight, remarkEmbeds]}
      urlTransform={markdownUrlTransform}
                                 components={{
                                     a: MarkdownLink,

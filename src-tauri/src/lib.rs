@@ -5,7 +5,7 @@ mod http_server;
 
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.4.9";
+const VERSION: &str = "0.5.0";
 
 /// The smallest the window can be dragged to (logical pixels). 800 is also the smallest size
 /// offered under Settings > Display, so every choice there still fits; below this the header
@@ -58,6 +58,7 @@ mod global_settings;
 mod window_state;
 mod trash;
 mod tray;
+mod exit_guard;
 
 pub use types::{Video, ChannelInfo, VideoResponse, DisplaySettings, DbDetails};
 pub use types::{parse_view_count, extract_handle_from_url};
@@ -192,8 +193,16 @@ pub fn run() {
             commands::remove_from_drive_sequence,
             commands::set_drive_sequence_order,
             commands::clear_drive_sequence,
+            commands::get_drive_manage_tree,
+            commands::list_drive_sequences,
+            commands::get_sequence_summary,
+            commands::list_drive_members,
+            commands::create_drive,
+            commands::relocate_drive,
+            commands::delete_drive,
             commands::delete_video,
             commands::check_video_exists,
+            commands::get_video_card,
             commands::bulk_save_videos,
             commands::search_videos,
             commands::update_wdbs,
@@ -278,6 +287,9 @@ pub fn run() {
             commands::hide_quick_add,
             commands::show_main_window,
             commands::show_system_menu,
+            exit_guard::exit_hold,
+            exit_guard::exit_allow,
+            exit_guard::exit_cancel,
             commands::get_wdbs_aliases,
             commands::get_video_by_id,
             commands::get_video_attachments,
@@ -383,6 +395,14 @@ pub fn run() {
                 // window coordinated over IPC.
                 .background_color(tauri::webview::Color(0x0f, 0x0f, 0x0f, 0xff))
                 .build()?;
+            // Linux desktop session managers can restore a window's previous maximize state when it maps,
+            // after the builder's `.maximized(false)` request. Start it unmaximized explicitly; later maximize
+            // changes are still user-controlled through the custom title bar. Fullscreen is a separate saved
+            // display preference; don't disturb it with an unmaximize request.
+            #[cfg(target_os = "linux")]
+            if !fullscreen {
+                let _ = window.unmaximize();
+            }
             if let Some((x, y)) = plan.position {
                 let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
             }
@@ -395,6 +415,9 @@ pub fn run() {
                 }
                 tray::keep_in_tray(app_handle, &window);
             }
+            // Elsewhere, closing the window still goes through the unsaved-edit check (see exit_guard.rs).
+            #[cfg(not(windows))]
+            exit_guard::guard_close(app_handle, &window);
             let _ = window.show();
 
             Ok(())

@@ -55,10 +55,6 @@ function ancestorsOf(path: string): string[] {
 
 const GROUP_TITLES: Record<Group, string> = { home: 'Primary Drive', also: 'Also In', parent: 'Parent Drives' };
 
-// The position label's width: room for "999999 of 999999" (16 characters), far more than any real
-// sequence needs, so the label's box never changes size.
-const SEQUENCE_LABEL_WIDTH = '16ch';
-
 // The bar's content width (px) the navigation row needs at each label level: the count and the
 // Previous / Next pair, with their gap. Below the second, only chevrons are shown.
 const NAV_FULL_MIN_WIDTH = 400;  // "Previous Video", "Next Video"
@@ -74,6 +70,9 @@ export function SequenceDock({
     activeDrive, setActiveDrive, onOpenVideo, onSelectDrive, driveEditor,
 }: Props) {
     const { labels } = useWorkspace();
+    const sequence = labels.aliasSequence;
+    const sequenceLower = sequence.toLowerCase();
+    const sequences = `${sequence}s`;
     const [menuOpen, setMenuOpen] = useState(false);
     const [editorOpen, setEditorOpen] = useState(false);
     // The sequence list, opened on the list itself or straight on the picker (to create one).
@@ -163,7 +162,7 @@ export function SequenceDock({
     // sequence yet (click to start one), "No Sequence" when the Drive has one this video isn't part of.
     const nav = current?.position != null ? current : null;
     const positionLabel = (s: DriveSequenceState) =>
-        s.position != null ? `${s.position} of ${s.total}` : s.total === 0 ? (canAddVideos ? 'Create Sequence' : 'None') : 'No Sequence';
+        s.position != null ? `${s.position} of ${s.total}` : s.total === 0 ? (canAddVideos ? `Create ${sequence}` : 'None') : `No ${sequence}`;
     // The Drive has no sequence at all yet.
     const noSequence = !!current && current.total === 0;
     const currentEntry = entries.find(e => e.drive === currentDrive);
@@ -222,7 +221,7 @@ export function SequenceDock({
                                                     >
                                                         <span className="truncate text-[11px] font-mono text-white">{entry.drive}</span>
                                                         <span className="shrink-0 text-[10px] text-[#888888]">
-                                                            {showSequences && st && (st.total === 0 ? 'No Sequence' : positionLabel(st))}
+                                                            {showSequences && st && (st.total === 0 ? `No ${sequence}` : positionLabel(st))}
                                                         </span>
                                                     </button>
                                                     {onSelectDrive && (
@@ -299,25 +298,23 @@ export function SequenceDock({
                             onClick={() => setListOpen(noSequence ? 'add' : 'list')}
                             disabled={!current || (noSequence && !canAddVideos)}
                             title={!currentDrive
-                                ? 'Sequences belong to a Drive. File this video under one to use them.'
+                                ? `${sequences} belong to a Drive. File this video under one to use them.`
                                 : !current
                                     ? undefined
                                     : noSequence
-                                        ? `Start a sequence for ${nameOf(currentEntry)}`
+                                        ? `Start a ${sequenceLower} for ${nameOf(currentEntry)}`
                                         : current.position != null
-                                            ? 'Show this sequence (jump to any video, including the first)'
-                                            : `Not in the ${nameOf(currentEntry)} sequence (${current.total} ${current.total === 1 ? 'video' : 'videos'}). Click to view it or add this video.`}
+                                            ? `Show this ${sequenceLower} (jump to any video, including the first)`
+                                            : `Not in the ${nameOf(currentEntry)} ${sequenceLower} (${current.total} ${current.total === 1 ? 'video' : 'videos'}). Click to view it or add this video.`}
                             // hover:bg-[#333], not [#222]: [#222] is the *resting* shade other buttons on this bar
                             // use (e.g. Previous/Next), so starting from transparent and hovering to it barely
                             // reads as a highlight at all — [#333] is the same jump those buttons make on hover.
                             className="flex items-center gap-1.5 shrink min-w-0 px-2 py-1 rounded-md text-[11px] font-bold text-[#aaaaaa] hover:text-white hover:bg-[#333] transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default disabled:hover:text-[#aaaaaa] disabled:hover:bg-transparent"
                         >
                             <ListOrdered className="w-3.5 h-3.5 shrink-0" />
-                            {/* A set width, wide enough for "999999 of 999999", so the row doesn't shift as this
-                                changes between "Create Sequence" and a position. It only gives way on a very narrow pane. */}
-                            <span className="truncate text-center tabular-nums" style={{ width: SEQUENCE_LABEL_WIDTH }}>
-                                {current ? positionLabel(current) : currentDrive ? '' : 'Create Sequence'}
-                            </span>
+                            <span className="shrink-0">{sequence}</span>
+                            {current && <span className="shrink-0 tabular-nums">({positionLabel(current)})</span>}
+                            {!current && !currentDrive && <span className="truncate">Create {sequence}</span>}
                         </button>
                     </div>
 

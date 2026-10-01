@@ -57,7 +57,6 @@ pub async fn update_wdbs(app: tauri::AppHandle, video_id: String, wdbs: String) 
     let trimmed = trimmed.as_str();
     let encoded = encode_wdbs_display(trimmed, &drive_label)?;
     let is_clearing = encoded.is_none();
-
     let value = match encoded {
         Some(v) => {
             db::ensure_wdbs_path_exists(&db_path, trimmed).map_err(|e| e.to_string())?;
@@ -297,13 +296,9 @@ pub struct BulkWdbsResult {
     pub failed: Vec<(String, String)>,
 }
 
-/// Assigns a whole batch of videos to one Warp Drive category (or clears them all back to
-/// unassigned, given an empty `wdbs`) in a single round trip — the multi-select "Bulk Assign
-/// Mode" in the Library/Portal grid (see App.tsx). Validates and registers the target category
-/// (or the ":" clear sentinel) exactly once up front, the same way update_wdbs does for a single
-/// video, then applies it to every video_id individually so one bad id can't abort the whole
-/// batch — callers get back which ids succeeded and which failed (with why), rather than an
-/// all-or-nothing result.
+/// Assigns a batch of videos to one Warp Drive category (or clears them all back to unassigned,
+/// given an empty `wdbs`) in one database transaction — the multi-select "Bulk Assign Mode" in the
+/// Library/Portal grid (see App.tsx). The target category is validated and registered once up front.
 #[command]
 pub async fn bulk_update_wdbs(app: tauri::AppHandle, video_ids: Vec<String>, wdbs: String) -> Result<BulkWdbsResult, String> {
     let db_path = get_db_path(&app);
@@ -311,7 +306,6 @@ pub async fn bulk_update_wdbs(app: tauri::AppHandle, video_ids: Vec<String>, wdb
     let trimmed = wdbs.trim().to_uppercase();
     let trimmed = trimmed.as_str();
     let encoded = encode_wdbs_display(trimmed, &drive_label)?;
-    let is_clearing = encoded.is_none();
 
     let value = match encoded {
         Some(v) => {
@@ -324,30 +318,15 @@ pub async fn bulk_update_wdbs(app: tauri::AppHandle, video_ids: Vec<String>, wdb
         }
     };
 
-    let mut succeeded = Vec::new();
-    let mut failed = Vec::new();
-    for video_id in video_ids {
-        match db::update_video_wdbs(&db_path, &video_id, &value) {
-            Ok(()) => {
-                if is_clearing {
-                    // Best-effort, same as update_wdbs's single-video clear path — the canonical
-                    // clear already succeeded, so a symlink-cleanup failure here shouldn't turn
-                    // an otherwise-successful assignment into a reported failure.
-                    let _ = db::clear_video_wdbs_links(&db_path, &video_id);
-                }
-                succeeded.push(video_id);
-            }
-            Err(e) => failed.push((
-                video_id,
-                format!(
-                    "That {} designator wasn't accepted ({}). Double-check it against the {} taxonomy and try again.",
-                    drive_label, e, drive_label
-                ),
-            )),
-        }
-    }
+    db::bulk_update_video_wdbs(&db_path, &video_ids, &value).map_err(|e| {
+        format!(
+            "That {} designator wasn't accepted ({}). Double-check it against the {} taxonomy and try again.",
+            drive_label, e, drive_label
+        )
+    })?;
 
-    Ok(BulkWdbsResult { succeeded, failed })
+    let succeeded = video_ids.into_iter().map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect();
+    Ok(BulkWdbsResult { succeeded, failed: Vec::new() })
 }
 
 /// Every Drive a channel's saved videos are filed under (for the Biography's "Related Drives").

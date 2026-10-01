@@ -254,7 +254,7 @@ fn write_pack(
         (opts.taxonomy, Kind::Wdbs, "Exporting taxonomy…"),
         (opts.videos, Kind::Video, "Exporting videos…"),
         (opts.videos, Kind::VideoLink, ""),
-        (opts.sequences, Kind::DriveSequence, "Exporting sequences…"),
+        (opts.sequences, Kind::DriveSequence, "Exporting playlists…"),
         (opts.glossary, Kind::Glossary, "Exporting glossary…"),
         (opts.biographies, Kind::Biography, "Exporting biographies…"),
         (opts.prompts, Kind::CustomPrompt, "Exporting custom prompts…"),

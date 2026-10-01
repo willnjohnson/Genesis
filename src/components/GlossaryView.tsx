@@ -4,11 +4,13 @@ import { Plus, X, Pencil, Check, ChevronDown } from 'lucide-react';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Modal } from './Modal';
+import { AddQuickTagModal } from './AddQuickTagModal';
 import { AlphabetJumpNav } from './AlphabetJumpNav';
 import { TrashChip } from './TrashChip';
 import type { NotificationContent } from './Notification';
 import { useEntryPreview } from './GlossaryPreview';
 import { TermDefinitionModal } from './TermDefinitionModal';
+import { useCloseOnNavigate } from '../lib/navigation';
 import { normalizeText } from '../lib/utils';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu, handlePlainContextMenu } from '../lib/markdown-editor';
 import { useFlags } from '../hooks/useFlags';
@@ -135,10 +137,13 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
     const [terms, setTerms] = useState<GlossaryTerm[]>([]);
     const [loading, setLoading] = useState(true);
     const [showAddModal, setShowAddModal] = useState(false);
+    const [showAddQuickTagModal, setShowAddQuickTagModal] = useState(false);
     const [newTerm, setNewTerm] = useState("");
     const [newDefinition, setNewDefinition] = useState("");
     const [newDrives, setNewDrives] = useState<string[]>([]);
     const [selectedTerm, setSelectedTerm] = useState<GlossaryTerm | null>(null);
+    // Closes when the app goes somewhere else (lib/navigation.ts).
+    useCloseOnNavigate(selectedTerm !== null, () => setSelectedTerm(null));
     const [termToDelete, setTermToDelete] = useState<GlossaryTerm | null>(null);
     // originalTerm/originalDrives: the entry being edited; its row is replaced on save.
     const [termToEdit, setTermToEdit] = useState<{ originalTerm: string, originalDrives: string[], term: string, definition: string, drives: string[] } | null>(null);
@@ -193,6 +198,10 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
     };
 
     const openAddModal = () => {
+        if (!showGlossaryTags) {
+            setShowAddQuickTagModal(true);
+            return;
+        }
         setSaveError(null);
         // Adding while looking at one drive files the new tag there by default.
         setNewDrives(showGlossaryTags && driveFilter ? [driveFilter] : []);
@@ -427,7 +436,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
             />
 
             {/* Add Modal */}
-            {showAddModal && (
+            {showAddModal && showGlossaryTags && (
                 <Modal
                     onClose={() => setShowAddModal(false)}
                     icon={Plus}
@@ -487,6 +496,17 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                         <div className="text-xs text-red-400 bg-red-900/20 border border-red-500/30 rounded-lg px-3 py-2">{saveError}</div>
                     )}
                 </Modal>
+            )}
+
+            {showAddQuickTagModal && (
+                <AddQuickTagModal
+                    onClose={() => setShowAddQuickTagModal(false)}
+                    onCreated={() => {
+                        setShowAddQuickTagModal(false);
+                        loadTerms();
+                        onChange?.();
+                    }}
+                />
             )}
 
             {/* Edit Modal */}

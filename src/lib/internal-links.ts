@@ -9,7 +9,9 @@ import type { WorkspaceLabels } from './workspace';
  * Obsidian export (src-tauri/src/db/links.rs, which reads the same format).
  */
 
-export type LinkKind = 'glossary' | 'bio' | 'video' | 'drive';
+/** 'playlist' is a Drive's playlist (its sequence, in the code), keyed by the Drive's display path (":CS-DSA"): it opens whatever video is first in it
+ *  at the time, so reordering never breaks the link. */
+export type LinkKind = 'glossary' | 'bio' | 'video' | 'drive' | 'playlist';
 
 export const LINK_SCHEME = 'kinesis://';
 
@@ -19,6 +21,7 @@ export function linkKindLabel(kind: LinkKind, labels: WorkspaceLabels): string {
         case 'glossary': return labels.aliasGlossary;
         case 'bio': return labels.aliasBiography;
         case 'drive': return labels.aliasDriveName;
+        case 'playlist': return labels.aliasSequence;
         default: return 'Video';
     }
 }
@@ -39,7 +42,7 @@ export function buildLink(text: string, kind: LinkKind, key: string): string {
 }
 
 export function parseInternalHref(href: string | undefined | null): { kind: LinkKind; key: string } | null {
-    const m = /^kinesis:\/\/(glossary|bio|video|drive)\/(.+)$/.exec(href ?? '');
+    const m = /^kinesis:\/\/(glossary|bio|video|drive|playlist)\/(.+)$/.exec(href ?? '');
     if (!m) return null;
     try {
         return { kind: m[1] as LinkKind, key: decodeURIComponent(m[2]) };

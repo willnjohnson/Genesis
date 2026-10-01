@@ -84,10 +84,8 @@ mod windows {
             .show_menu_on_left_click(false)
             .on_menu_event(|app, event| match event.id.as_ref() {
                 "open" => show_main(app),
-                "quit" => {
-                    destroy_popup(app);
-                    app.exit(0);
-                }
+                // Through the exit guard: an unsaved edit gets its Save / Discard / Cancel first.
+                "quit" => crate::exit_guard::request_exit(app),
                 _ => {}
             })
             .on_tray_icon_event(|tray, event| match event {
@@ -118,8 +116,10 @@ mod windows {
                     api.prevent_close();
                     let _ = main.hide();
                 } else {
-                    // The window really is closing, and with it the app.
-                    destroy_popup(&handle);
+                    // Closing the window closes the app: through the exit guard, so an unsaved edit gets its
+                    // Save / Discard / Cancel first (it exits the app itself once the page says so).
+                    api.prevent_close();
+                    crate::exit_guard::request_exit(&handle);
                 }
             }
             WindowEvent::Destroyed => handle.exit(0),

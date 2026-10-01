@@ -25,7 +25,7 @@ const optionLabels = (labels: WorkspaceLabels): { key: ToggleKey; label: string;
     { key: "glossary", label: labels.aliasGlossary },
     { key: "biographies", label: labels.aliasBiography },
     { key: "prompts", label: "Custom summary prompts", more: true },
-    { key: "sequences", label: "Sequences", hint: "Which order videos play in, per Drive.", more: true },
+    { key: "sequences", label: `${labels.aliasSequence}s`, hint: `Which order videos play in, per ${labels.aliasDriveName}.`, more: true },
     { key: "notes", label: "Video notes", more: true },
     { key: "attachments", label: "Attachments", hint: "Files attached to videos. They make the file as large as they are; there's no limit.", more: true },
     { key: "history", label: `${labels.aliasSearch} history`, more: true },
@@ -160,7 +160,7 @@ export function KinpakExport() {
                 <div className="mt-4 p-3 bg-green-900/10 border border-green-500/30 rounded-lg text-green-400 text-xs leading-relaxed break-words">
                     Exported {(summary.counts.video ?? 0).toLocaleString()} videos, {(summary.counts.wdbs ?? 0).toLocaleString()} categories,{" "}
                     {(summary.counts.glossary ?? 0).toLocaleString()} glossary terms, {(summary.counts.biography ?? 0).toLocaleString()} bios,{" "}
-                    {(summary.counts.drive_sequence ?? 0).toLocaleString()} sequence entries, {(summary.counts.attachment ?? 0).toLocaleString()} attachments and{" "}
+                    {(summary.counts.drive_sequence ?? 0).toLocaleString()} {labels.aliasSequence.toLowerCase()} entries, {(summary.counts.attachment ?? 0).toLocaleString()} attachments and{" "}
                     {summary.settings} settings ({formatBytes(summary.bytes)}) to {summary.path}.
                 </div>
             )}

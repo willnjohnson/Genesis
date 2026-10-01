@@ -6,7 +6,7 @@
 // One `{ key, default, max, ... },` per line. Keep this block simple: the Rust test parses it.
 export const LABEL_DEFS = [
     { key: 'workspaceName', default: 'New Workspace', max: 64, title: 'Workspace name', hint: 'Shown in exports and file names.' },
-    { key: 'aliasDriveName', default: 'Drive', max: 18, title: 'Drive', hint: 'The workspace drive-based structure, e.g. Directory.' },
+    { key: 'aliasDriveName', default: 'Drive', max: 18, title: 'Drive', hint: 'The workspace drive-based structure, e.g. "John\'s Drive".' },
     { key: 'aliasSearch', default: 'Search', max: 18, title: 'Search', hint: 'e.g. Lookup.' },
     { key: 'aliasLibrary', default: 'Library', max: 18, title: 'Library', hint: 'Saved videos, e.g. Lab.' },
     { key: 'aliasGlossary', default: 'Glossary', max: 18, title: 'Glossary', hint: 'e.g. Thesaurus.' },
@@ -14,6 +14,7 @@ export const LABEL_DEFS = [
     { key: 'aliasBiographyItem', default: 'Person', max: 18, title: 'Biography entry', hint: 'One entry, e.g. Creator.' },
     { key: 'aliasDriveLink', default: 'Link', max: 18, title: 'Drive link', hint: 'A video also filed elsewhere, e.g. Main Ref.' },
     { key: 'aliasDriveSymlink', default: 'Symlink', max: 18, title: 'Drive symlink', hint: 'e.g. Alt Ref.' },
+    { key: 'aliasSequence', default: 'Sequence', max: 18, title: 'Sequence', hint: 'e.g. Playlist.' },
 ] as const;
 
 export type LabelKey = typeof LABEL_DEFS[number]['key'];

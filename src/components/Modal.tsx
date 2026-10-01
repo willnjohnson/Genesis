@@ -43,12 +43,15 @@ interface Props {
     className?: string;
     /** Extra classes for the scrolling body; it has `p-6` unless this says otherwise. */
     bodyClassName?: string;
+    /** Going back or forward (Alt+Left/Right, the mouse's side buttons) closes this dialog and then goes, rather than
+     *  being blocked by it as it is by other dialogs (see App.tsx). For a window that's a place of its own, not a step. */
+    closeOnNavigate?: boolean;
     children: ReactNode;
 }
 
 export function Modal({
     onClose, title, subtitle, icon: Icon, headerExtra, size = 'sm', layer = 'base',
-    onSubmit, footer, className = '', bodyClassName = 'p-6', children,
+    onSubmit, footer, className = '', bodyClassName = 'p-6', closeOnNavigate = false, children,
 }: Props) {
     const panelClass = `bg-[#0f0f0f] border border-[#303030] rounded-2xl w-full ${WIDTHS[size]} max-h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 ${className}`;
     const inner = (
@@ -74,6 +77,7 @@ export function Modal({
     );
     return createPortal(
         <div
+            {...(closeOnNavigate ? { 'data-nav-closes': '' } : {})}
             className={`fixed inset-0 ${layer === 'top' ? 'z-[200]' : 'z-[100]'} flex items-center justify-center bg-black/80 p-4 animate-in fade-in duration-200`}
             // Stops here, so clicking outside closes only this dialog, not one it was opened from.
             onClick={(e) => { e.stopPropagation(); onClose(); }}
