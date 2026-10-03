@@ -1,5 +1,6 @@
 import { defaultUrlTransform } from 'react-markdown';
 import type { WorkspaceLabels } from './workspace';
+import { formatClock, parseClock } from './remark-timestamps';
 
 /**
  * In-app links inside markdown, like `[Halving](kinesis://glossary/Halving)`. The address carries
@@ -41,11 +42,23 @@ export function buildLink(text: string, kind: LinkKind, key: string): string {
     return `[${cleanLinkText(text)}](${LINK_SCHEME}${kind}/${encodeLinkKey(key)})`;
 }
 
-export function parseInternalHref(href: string | undefined | null): { kind: LinkKind; key: string } | null {
-    const m = /^kinesis:\/\/(glossary|bio|video|drive|playlist)\/(.+)$/.exec(href ?? '');
+/** An in-app link's kind and key. A video link can also carry where to start (`?t=1:23`, `?t=83`), as `at` in seconds:
+ *  it isn't part of the key, so it's still a link to that video (db/links.rs reads it the same way). */
+/** A link to a video, starting at `at` seconds when it's given and past the start (`?t=1:23`, see parseInternalHref). */
+export function buildVideoLink(text: string, videoId: string, at?: number): string {
+    const link = buildLink(text, 'video', videoId);
+    return at && at >= 1 ? `${link.slice(0, -1)}?t=${formatClock(Math.floor(at))})` : link;
+}
+
+export function parseInternalHref(href: string | undefined | null): { kind: LinkKind; key: string; at?: number } | null {
+    const m = /^kinesis:\/\/(glossary|bio|video|drive|playlist)\/(.+?)(?:\?t=([0-9:]+))?$/.exec(href ?? '');
     if (!m) return null;
+    const at = m[3] !== undefined ? parseClock(m[3]) : null;
+    // Only a video starts somewhere (anything else with a time isn't a link, as in db/links.rs). On a video, a time
+    // that isn't a real one ("1:99") is ignored: the link still opens the video, from wherever it would.
+    if (m[3] !== undefined && m[1] !== 'video') return null;
     try {
-        return { kind: m[1] as LinkKind, key: decodeURIComponent(m[2]) };
+        return { kind: m[1] as LinkKind, key: decodeURIComponent(m[2]), ...(at !== null ? { at } : {}) };
     } catch {
         return null;
     }
@@ -80,7 +93,19 @@ export function markdownUrlTransform(url: string): string {
 
 // ── Opening links ────────────────────────────────────────────────────────────
 
-type LinkHandler = (kind: LinkKind, key: string) => void;
+/** The shortcut for a timed video link, a [1:23] timestamp straight after the link, as it's written in text: the
+ *  link's address, its closing parenthesis, and the time. Never one that already has a time. */
+const VIDEO_LINK_THEN_TIME = /(\]\(kinesis:\/\/video\/[A-Za-z0-9\-._~%]+)\)\[((?:\d{1,2}:[0-5]\d|\d{1,3}):[0-5]\d)\]/g;
+
+/** Folds that shortcut into the link: `[Talk](kinesis://video/ID)[1:23]` becomes `[Talk](kinesis://video/ID?t=1:23)`, the
+ *  one form the rest of the app reads. Run on what's saved (the Sidebar's transcript and summary). */
+export function foldVideoLinkTimes(text: string): string {
+    if (!text.includes('kinesis://video/')) return text;
+    return text.replace(VIDEO_LINK_THEN_TIME, (whole, link: string, time: string) => (parseClock(time) === null ? whole : `${link}?t=${time})`));
+}
+
+/** `at`: where a video link starts, in seconds (see parseInternalHref). */
+type LinkHandler = (kind: LinkKind, key: string, at?: number) => void;
 let handler: LinkHandler | null = null;
 
 /** App registers what a click on an in-app link does. Returns a function that unregisters it. */
@@ -89,8 +114,8 @@ export function setInternalLinkHandler(fn: LinkHandler | null): () => void {
     return () => { if (handler === fn) handler = null; };
 }
 
-export function openInternalLink(kind: LinkKind, key: string) {
-    handler?.(kind, key);
+export function openInternalLink(kind: LinkKind, key: string, at?: number) {
+    handler?.(kind, key, at);
 }
 
 // ── Asking for the picker ────────────────────────────────────────────────────

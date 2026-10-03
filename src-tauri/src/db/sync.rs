@@ -832,13 +832,13 @@ mod tests {
         // Video listed BEFORE the taxonomy node it points at.
         let items = [
             item("video", "vidA", json!({"title": "A", "wdbs": "θψUAP_GERB"})),
-            item("wdbs", ":UAP-GERB", json!({"lev": 2, "wdid": "GERB", "info": "Gerb Alias", "icon": "star"})),
+            item("wdbs", ":UAP-GERB", json!({"lev": 2, "wdid": "GERB", "info": "Gerb Alias", "icon": "news"})),
         ];
         let stats = apply_page(&mut conn, &items, &[], false).unwrap();
         assert_eq!(stats.upserted, 2, "{:?}", stats.errors);
         assert_eq!(text(&conn, "SELECT WDBS FROM Videos WHERE video_id='vidA'").as_deref(), Some("θψUAP_GERB"));
         assert_eq!(text(&conn, "SELECT WDInfo FROM tblWDBS WHERE WDBS=':UAP-GERB'").as_deref(), Some("Gerb Alias"));
-        assert_eq!(text(&conn, "SELECT WDIcon FROM tblWDBS WHERE WDBS=':UAP-GERB'").as_deref(), Some("star"));
+        assert_eq!(text(&conn, "SELECT WDIcon FROM tblWDBS WHERE WDBS=':UAP-GERB'").as_deref(), Some("news"));
         // The parent level was created too.
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM tblWDBS WHERE WDBS=':UAP'"), 1);
         let _ = std::fs::remove_file(&db_path);

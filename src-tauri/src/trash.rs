@@ -156,13 +156,27 @@ fn capture_video(db_path: &str, video_id: &str) -> rusqlite::Result<Option<(Payl
     }
     let title_at = video.columns.iter().position(|c| c.eq_ignore_ascii_case("title"));
     let author_at = video.columns.iter().position(|c| c.eq_ignore_ascii_case("author"));
+    let handle_at = video.columns.iter().position(|c| c.eq_ignore_ascii_case("handle"));
     let text_at = |i: Option<usize>| match i.and_then(|i| video.rows[0].get(i)) {
         Some(Value::Text(s)) => s.clone(),
         _ => String::new(),
     };
-    let (title, author) = (text_at(title_at), text_at(author_at));
+    let (title, author, handle) = (text_at(title_at), text_at(author_at), text_at(handle_at));
 
-    let mut tables = vec![video];
+    let mut tables = Vec::new();
+    if !handle.trim().is_empty() {
+        // Production purges a biography when its creator's last video is deleted, and refuses a video
+        // whose handle has no biography. Kept with every video, not only the last one: the creator's
+        // videos can be restored in any order, and any one of them may be the only item left in the Trash.
+        if let Some(biography) = snapshot(&conn, "Biographies", "lower(handle) = lower(?1)", &[&handle], &[], true)? {
+            if !biography.rows.is_empty() {
+                tables.push(biography);
+            }
+        }
+    }
+    // Restore a captured biography before the video, so production's INSERT trigger can find and
+    // canonicalize the handle. Existing rows are conflict-ignored, never overwritten.
+    tables.push(video);
     for (table, omit, ignore) in [("VideoWDBSLinks", &[][..], true), ("DriveSequence", &[][..], true), ("VideoNotes", &[][..], true)] {
         if let Some(rows) = snapshot(&conn, table, "video_id = ?1", &id, omit, ignore)? {
             if !rows.rows.is_empty() {
@@ -271,7 +285,8 @@ pub fn list(trash: &Mutex<TrashStore>, db_path: &str, kind: TrashKind) -> Vec<Tr
 fn restore_video(db_path: &str, tables: &[TableRows]) -> Result<(), String> {
     let mut conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     let video_id = tables
-        .first()
+        .iter()
+        .find(|t| t.table == "Videos")
         .and_then(|t| t.columns.iter().position(|c| c.eq_ignore_ascii_case("video_id")).and_then(|i| t.rows.first().map(|r| r[i].clone())));
     if let Some(Value::Text(id)) = &video_id {
         let exists: i64 = conn.query_row("SELECT COUNT(*) FROM Videos WHERE video_id = ?1", params![id], |r| r.get(0)).map_err(|e| e.to_string())?;
@@ -394,6 +409,87 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM DriveSequence WHERE video_id = 'v1'"), 1);
         assert_eq!(text(&db, "SELECT summary FROM Videos WHERE video_id = 'v2'"), "See [first](kinesis://video/v1) now", "the link is back");
         assert!(list(&trash, &db, TrashKind::Video).is_empty(), "restored items leave the Trash");
+    }
+
+    #[test]
+    fn restoring_the_last_video_restores_its_purged_biography() {
+        let db = temp_db("video_biography");
+        let trash = store();
+        crate::db::upsert_biography_from_video(&db, "@chan", "Channel Name", Some("UC123"), 42).unwrap();
+        crate::db::update_biography_details(&db, "@chan", "Carefully written bio", "wiki", "site", "x", "ig", "fb", "threads", "yt", "tt", "twitch", "reddit", "discord").unwrap();
+        save(&db, "v1", "Only video");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER test_purge_orphan_biography AFTER DELETE ON Videos BEGIN
+                    DELETE FROM Biographies
+                    WHERE lower(handle) = lower(OLD.handle)
+                      AND NOT EXISTS (SELECT 1 FROM Videos WHERE lower(handle) = lower(OLD.handle));
+                 END;",
+            ).unwrap();
+        }
+
+        delete_video(&trash, &db, "v1").unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM Biographies WHERE lower(handle) = lower('@chan')"), 0);
+        let item = list(&trash, &db, TrashKind::Video)[0].id;
+        restore(&trash, &db, item).unwrap();
+
+        assert_eq!(text(&db, "SELECT bio FROM Biographies WHERE lower(handle) = lower('@chan')"), "Carefully written bio");
+        assert_eq!(text(&db, "SELECT handle FROM Videos WHERE video_id = 'v1'"), "@chan");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn a_creators_videos_restore_in_any_order_once_its_biography_is_purged() {
+        let db = temp_db("video_biography_order");
+        let trash = store();
+        crate::db::upsert_biography_from_video(&db, "@chan", "Channel Name", Some("UC123"), 42).unwrap();
+        crate::db::update_biography_details(&db, "@chan", "Carefully written bio", "", "", "", "", "", "", "", "", "", "", "").unwrap();
+        save(&db, "v1", "First");
+        save(&db, "v2", "Second");
+        {
+            // Stand-ins for production's purge trigger and its stricter INSERT check.
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER test_purge_orphan_biography AFTER DELETE ON Videos BEGIN
+                    DELETE FROM Biographies
+                    WHERE lower(handle) = lower(OLD.handle)
+                      AND NOT EXISTS (SELECT 1 FROM Videos WHERE lower(handle) = lower(OLD.handle));
+                 END;
+                 CREATE TRIGGER test_require_biography BEFORE INSERT ON Videos BEGIN
+                    SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM Biographies WHERE lower(handle) = lower(NEW.handle))
+                        THEN RAISE(ABORT, 'Referential integrity violation: handle not found in Biographies') END;
+                 END;",
+            ).unwrap();
+        }
+
+        delete_video(&trash, &db, "v1").unwrap();
+        delete_video(&trash, &db, "v2").unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM Biographies"), 0);
+        let first_deleted = list(&trash, &db, TrashKind::Video).into_iter().find(|e| e.key == "v1").unwrap().id;
+        let last_deleted = list(&trash, &db, TrashKind::Video).into_iter().find(|e| e.key == "v2").unwrap().id;
+        // The last-deleted video's copy goes for good; the other must still come back with its creator.
+        discard(&trash, &db, last_deleted);
+        restore(&trash, &db, first_deleted).unwrap();
+
+        assert_eq!(text(&db, "SELECT bio FROM Biographies WHERE lower(handle) = lower('@chan')"), "Carefully written bio");
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM Videos WHERE video_id = 'v1'"), 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn a_video_saved_again_is_not_restored_over_even_with_its_biography_kept() {
+        let db = temp_db("video_biography_again");
+        let trash = store();
+        crate::db::upsert_biography_from_video(&db, "@chan", "Channel Name", None, -1).unwrap();
+        save(&db, "v1", "Old");
+        delete_video(&trash, &db, "v1").unwrap();
+        save(&db, "v1", "New");
+
+        let item = list(&trash, &db, TrashKind::Video)[0].id;
+        assert!(restore(&trash, &db, item).unwrap_err().contains("saved again"));
+        assert_eq!(text(&db, "SELECT title FROM Videos WHERE video_id = 'v1'"), "New");
+        let _ = std::fs::remove_file(&db);
     }
 
     #[test]

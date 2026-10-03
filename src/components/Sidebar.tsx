@@ -1,4 +1,4 @@
-import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, ClipboardPaste, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, BookA, ListVideo, Paperclip, Monitor, Cloud } from 'lucide-react';
+import { X, Trash2, Save, Sparkles, ArrowLeft, RotateCcw, ClipboardPaste, Check, ExternalLink, Pencil, Search, Terminal, Lightbulb, Eye, EyeOff, Plus, Tags, BookA, ListVideo, Paperclip, Monitor, Cloud, Link2 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, forwardRef, useImperativeHandle } from 'react';
 import { flushSync } from 'react-dom';
 import { LifeLoader } from './LifeLoader';
@@ -22,15 +22,19 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../lib/remark-highlight';
 import { remarkEmbeds } from '../lib/remark-embeds';
+import { remarkTimestamps, SEEK_ATTR } from '../lib/remark-timestamps';
 import { remarkSourceLines, lineAt, indexOfLine, caretY, scrollPreviewToLine, topVisibleLine } from '../lib/preview-sync';
-import { markdownUrlTransform, findGlossaryTerms } from '../lib/internal-links';
+import { markdownUrlTransform, findGlossaryTerms, foldVideoLinkTimes, buildVideoLink } from '../lib/internal-links';
+import { formatClock, parseClock } from '../lib/remark-timestamps';
+import { BacklinksList } from './BacklinksList';
+import { useCreatorMenu } from './CreatorMenu';
 import { MarkdownLink } from './MarkdownLink';
 import { TermDefinitionModal } from './TermDefinitionModal';
 import { useCloseOnNavigate } from '../lib/navigation';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { useFlags } from '../hooks/useFlags';
 
-type LeftTab = 'terms' | 'tags' | 'similar' | 'attachments';
+type LeftTab = 'terms' | 'tags' | 'similar' | 'attachments' | 'linked';
 
 // Persisted in the generic `Settings` table (see api.ts's getSetting/setSetting) so the
 // video/transcript split ratio survives closing and reopening the sidebar, and relaunching
@@ -121,6 +125,12 @@ interface Props {
     // Swaps the Sidebar to show a different video in place (used by the Similar Videos tab) —
     // same callback App.tsx already passes to VideoList/BiographyModal for this purpose.
     onVideoSelect?: (video: Video) => void;
+    /** Where the player starts, in seconds, when this video was opened from a timed link (`?t=`, see
+     *  lib/internal-links.ts). Otherwise the player starts wherever YouTube starts it. */
+    startAt?: number;
+    /** The tag dropdown's "Manage tags in <Glossary>": called once the sidebar has closed (asking first about an unsaved
+     *  edit), to show the Glossary's tags. Absent when there's no Glossary or Quick Tags to go to. */
+    onManageTags?: () => void;
 }
 
 /**
@@ -144,9 +154,11 @@ export interface SidebarHandle {
     /** Makes the sequence bar under the video follow this Drive's sequence (display path), as when a video is opened
      *  from it: what a sequence link does after opening its first video. */
     followSequence: (drive: string) => void;
+    /** Jumps the open video's player to `seconds`, as a [1:23] timestamp does: a timed link to the video already open. */
+    seekTo: (seconds: number) => void;
 }
 
-export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, onRestored, onTranscriptChange, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSummarizeOllama = true, showSummarizeVenice = true, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onTagsChanged, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, driveContext, onVideoSelect }: Props, ref) {
+export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpen, onClose, transcript, loading, title, videoId, handle, onSave, onDelete, onRefetch, onRestored, onTranscriptChange, pluginSummarizeEnabled, pluginPhotosynthesisEnabled, showSummarizeOllama = true, showSummarizeVenice = true, showSynthesizeVenice = true, showSynthesizePixabay = true, showSynthesizeUpload = true, onSummaryGenerated, cachedSummaries, onCacheSummary, allowDeletion = true, isLibrary = false, videoTags = [], onHandleClick, onAddTag, onRemoveTag, onTagsChanged, onSearchInLibrary, initialTab, showBiography = true, allowEditTranscriptOnNA = true, wdbs, allowEditWDBS = false, onWdbsUpdated, onWdbsChanged, onSelectDrive, driveContext, onVideoSelect, startAt, onManageTags }: Props, ref) {
     const [copied, setCopied] = useState(false);
     const [summaryCopied, setSummaryCopied] = useState(false);
     const [existsInDb, setExistsInDb] = useState(false);
@@ -206,6 +218,71 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
     const [imageToSaveLocally, setImageToSaveLocally] = useState("");
     const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
     const [embedPort, setEmbedPort] = useState<number | null>(null);
+    // The player, for the [1:23] timestamps in the summary and transcript (lib/remark-timestamps.ts): a click on one
+    // asks the embed page (src-tauri/src/http_server.rs) to seek, and brings the player into view. With the player
+    // hidden, the video opens on YouTube at that moment instead.
+    const playerRef = useRef<HTMLIFrameElement>(null);
+    // The @handle under the title: right-click for Visit YouTube Channel / Open Biography, the latter the way a click opens it.
+    const creatorMenu = useCreatorMenu(handle, handle && onHandleClick ? () => onHandleClick(handle.startsWith('@') ? handle : `@${handle}`) : undefined);
+    const seekPlayer = (seconds: number) => {
+        const player = playerRef.current;
+        if (player?.contentWindow && embedPort) {
+            player.contentWindow.postMessage({ type: 'kinesis-seek', seconds }, `http://localhost:${embedPort}`);
+            player.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        } else if (videoId) {
+            void openExternalUrl(`https://www.youtube.com/watch?v=${videoId}&t=${seconds}s`);
+        }
+    };
+    // Where the player is now, in seconds, asked of the embed page (it follows the player's own reports); null when it
+    // hasn't said (still loading, or no answer in time).
+    const askPlayerTime = () => new Promise<number | null>(resolve => {
+        const player = playerRef.current?.contentWindow;
+        if (!player || !embedPort) { resolve(null); return; }
+        const id = Math.random().toString(36).slice(2);
+        const done = (seconds: number | null) => {
+            window.removeEventListener('message', onAnswer);
+            window.clearTimeout(timer);
+            resolve(seconds);
+        };
+        const onAnswer = (e: MessageEvent) => {
+            if (e.source !== player || e.data?.type !== 'kinesis-time' || e.data.id !== id) return;
+            done(typeof e.data.seconds === 'number' && Number.isFinite(e.data.seconds) ? e.data.seconds : null);
+        };
+        const timer = window.setTimeout(() => done(null), 1000);
+        window.addEventListener('message', onAnswer);
+        player.postMessage({ type: 'kinesis-time', id }, `http://localhost:${embedPort}`);
+    });
+    // "Copy link at time": a link to this video starting where the player is, ready to paste into any text (a timed
+    // link, lib/internal-links.ts). At the very start, or with no time to go on, it's the plain link, and says so.
+    const [timedLinkCopied, setTimedLinkCopied] = useState<string | null>(null);
+    const copyTimedLink = async () => {
+        if (!videoId) return;
+        const seconds = await askPlayerTime();
+        const at = seconds !== null && seconds >= 1 ? Math.floor(seconds) : undefined;
+        try {
+            await navigator.clipboard.writeText(buildVideoLink(title || videoId, videoId, at));
+            setTimedLinkCopied(at !== undefined ? `Copied at ${formatClock(at)}` : seconds === null ? 'Copied (no time yet)' : 'Copied from the start');
+        } catch {
+            setTimedLinkCopied("Couldn't copy");
+        }
+        window.setTimeout(() => setTimedLinkCopied(null), 2000);
+    };
+    // Listened for on the document: the Summary and Transcript sit in their own parts of the panel, apart from the
+    // player's, so no one element of the panel holds every chip. Only this panel renders them.
+    const seekRef = useRef(seekPlayer);
+    seekRef.current = seekPlayer;
+    useEffect(() => {
+        const onClick = (e: MouseEvent) => {
+            const chip = (e.target as Element | null)?.closest?.(`[${SEEK_ATTR}]`);
+            if (!chip) return;
+            e.preventDefault();
+            const seconds = Number(chip.getAttribute(SEEK_ATTR));
+            if (Number.isFinite(seconds)) seekRef.current(seconds);
+        };
+        // Capture phase: ahead of any handler on the way down that stops the click from going further.
+        document.addEventListener('click', onClick, true);
+        return () => document.removeEventListener('click', onClick, true);
+    }, []);
     const [isEditingWdbs, setIsEditingWdbs] = useState(false);
     const [wdbsInput, setWdbsInput] = useState('');
     const [wdbsError, setWdbsError] = useState<string | null>(null);
@@ -235,8 +312,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
     // tabs; showVideoTags turns both on, and showQuickTags off also drops Tags.
     const showTermsTab = flags.showVideoTags;
     const showTagsTab = flags.showVideoTags && flags.showQuickTags;
-    const availableLeftTabs = ([showTermsTab && 'terms', showTagsTab && 'tags', flags.showSimilarVideos && 'similar', flags.showAttachments && 'attachments'].filter(Boolean)) as LeftTab[];
-    const activeLeftTab = availableLeftTabs.includes(leftTab) ? leftTab : availableLeftTabs[0];
+    const availableLeftTabs = ([showTermsTab && 'terms', showTagsTab && 'tags', flags.showSimilarVideos && 'similar', flags.showAttachments && 'attachments', 'linked'].filter(Boolean)) as LeftTab[];    const activeLeftTab = availableLeftTabs.includes(leftTab) ? leftTab : availableLeftTabs[0];
     const [similarVideos, setSimilarVideos] = useState<Video[]>([]);
     const [loadingSimilar, setLoadingSimilar] = useState(false);
     const fetchedSimilarForRef = useRef<string | null>(null);
@@ -559,16 +635,18 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
     const handleSaveTranscript = async () => {
         if (!videoId) return;
         setIsSaving(true);
+        // A [1:23] typed straight after a video link becomes that link's ?t= (lib/internal-links.ts), here and in the summary.
+        const text = foldVideoLinkTimes(editedTranscript);
         try {
             if (existsInDb) {
-                await saveTranscript(videoId, editedTranscript);
+                await saveTranscript(videoId, text);
                 setIsEditingTranscript(false);
                 if (onRefetch) onRefetch();
             } else {
                 // Not in the library yet, so there's nothing to update there: the text becomes this video's
                 // transcript in the app (re-fetching would just fetch from YouTube again and lose it), and
                 // Save then puts it in the library like any fetched transcript.
-                onTranscriptChange?.(editedTranscript);
+                onTranscriptChange?.(text);
                 setIsEditingTranscript(false);
             }
         } catch (e: any) {
@@ -581,13 +659,14 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
     const handleSaveEditedSummary = async () => {
         if (!videoId) return;
         setIsSaving(true);
+        const text = foldVideoLinkTimes(editedSummary);
         try {
-            const newTags = await saveSummary(videoId, editedSummary);
+            const newTags = await saveSummary(videoId, text);
             onTagsChanged?.(newTags);
             // save_summary appends a "Channel Info:" footer server-side; re-fetch so what's
             // displayed/cached matches what's actually persisted.
             const saved = await getSummary(videoId);
-            const displaySummary = saved || editedSummary;
+            const displaySummary = saved || text;
             setSummary(displaySummary);
             if (onCacheSummary) onCacheSummary(videoId, displaySummary);
             // getSummary() filters out footer-only/empty summaries, so a null `saved` here means
@@ -641,7 +720,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
         else if (isEditingSummary) await handleSaveEditedSummary();
         proceed?.();
     };
-    useImperativeHandle(ref, () => ({ hasUnsavedChanges: () => hasUnsavedChanges, requestLeave, followSequence: setActiveSeqDrive }), [hasUnsavedChanges, requestLeave]);
+    useImperativeHandle(ref, () => ({ hasUnsavedChanges: () => hasUnsavedChanges, requestLeave, followSequence: setActiveSeqDrive, seekTo: (seconds: number) => seekRef.current(seconds) }), [hasUnsavedChanges, requestLeave]);
 
     useEffect(() => {
         if (isOpen) {
@@ -1341,12 +1420,14 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                 {handle && (
                                     <button
                                         onClick={showBiography ? () => onHandleClick?.(handle.startsWith('@') ? handle : `@${handle}`) : undefined}
+                                        onContextMenu={creatorMenu.onContextMenu}
                                         className={`text-xs text-[#aaaaaa] ${showBiography ? 'hover:text-red-400 cursor-pointer' : ''} text-left`}
                                         title={showBiography ? `View ${labels.aliasBiographyItem}` : undefined}
                                     >
                                         {handle.startsWith('@') ? handle : `@${handle}`}
                                     </button>
                                 )}
+                                {creatorMenu.menu}
                             </div>
                         </div>
                         <button onClick={() => requestLeave(onClose)} className="text-[#aaaaaa] hover:text-white transition-colors cursor-pointer p-1 flex-shrink-0">
@@ -1421,19 +1502,31 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                             {flags.showVideoPlayer && (
                                             <div data-panel-anchor className={`aspect-video w-full bg-black rounded-lg overflow-hidden border border-gray-800 relative group ${isResizing ? 'pointer-events-none' : ''}`}>
                                                  <iframe
+                                                     ref={playerRef}
                                                      width="100%"
                                                      height="100%"
-                                                     src={videoId && embedPort ? `http://localhost:${embedPort}/youtube_embed?v=${videoId}` : undefined}
+                                                     src={videoId && embedPort ? `http://localhost:${embedPort}/youtube_embed?v=${videoId}${startAt ? `&t=${Math.floor(startAt)}` : ''}` : undefined}
                                                      title="YouTube video player"
                                                      frameBorder="0"
                                                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                                                      referrerPolicy="strict-origin-when-cross-origin"
                                                      allowFullScreen
                                                  />
+                                                {/* Bottom left, across from Open in YouTube. Stays shown while it reports the copy. */}
+                                                <div className={`absolute bottom-2 left-2 transition-opacity ${timedLinkCopied ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                                                    <button
+                                                        onClick={() => void copyTimedLink()}
+                                                        className="bg-black/80 hover:bg-black text-white px-3 py-1.5 rounded-md text-[10px] font-bold flex items-center gap-1.5 border border-white/10 cursor-pointer"
+                                                        title="Copy a link to this video that starts where it's playing now, to paste into any text"
+                                                    >
+                                                        {timedLinkCopied ? <Check className="w-3 h-3" /> : <Link2 className="w-3 h-3" />}
+                                                        {timedLinkCopied ?? 'Copy Link at Time'}
+                                                    </button>
+                                                </div>
                                                 {flags.showOpenInYouTube && (
                                                 <div className="absolute bottom-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                                     <button
-                                                        onClick={() => openExternalUrl(`https://www.youtube.com/watch?v=${videoId}`)}
+                                                        onClick={() => void openExternalUrl(`https://www.youtube.com/watch?v=${videoId}`)}
                                                         className="bg-black/80 hover:bg-black text-white px-3 py-1.5 rounded-md text-[10px] font-bold flex items-center gap-1.5 border border-white/10 cursor-pointer"
                                                     >
                                                         <ExternalLink className="w-3 h-3" />
@@ -1446,7 +1539,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                             {/* With the player hidden the overlay button has nothing to sit on. */}
                                             {!flags.showVideoPlayer && flags.showOpenInYouTube && (
                                                 <button
-                                                    onClick={() => openExternalUrl(`https://www.youtube.com/watch?v=${videoId}`)}
+                                                    onClick={() => void openExternalUrl(`https://www.youtube.com/watch?v=${videoId}`)}
                                                     className="self-start bg-[#272727] hover:bg-[#3f3f3f] text-white px-3 py-1.5 rounded-md text-[10px] font-bold flex items-center gap-1.5 border border-white/10 cursor-pointer"
                                                 >
                                                     <ExternalLink className="w-3 h-3" />
@@ -1490,7 +1583,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                             className={`flex items-center gap-1.5 min-w-0 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'similar' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                         >
                                                             <ListVideo className="w-3.5 h-3.5 shrink-0" />
-                                                            <span className="truncate">Similar Videos</span>
+                                                            <span className="truncate">Similar</span>
                                                             {activeLeftTab === 'similar' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                         </button>
                                                         )}
@@ -1501,7 +1594,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                             className={`flex items-center gap-1.5 min-w-0 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'attachments' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
                                                         >
                                                             <Paperclip className="w-3.5 h-3.5 shrink-0" />
-                                                            <span className="truncate">Attachments</span>
+                                                            <span className="truncate">Attached</span>
                                                             {attachmentCount > 0 && (
                                                                 <span className="shrink-0 inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-[#3f3f3f] text-white text-[9px] font-bold leading-none normal-case tracking-normal">
                                                                     {attachmentCount}
@@ -1510,6 +1603,15 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                             {activeLeftTab === 'attachments' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
                                                         </button>
                                                         )}
+                                                        <button
+                                                            onClick={() => setLeftTab('linked')}
+                                                            title="Backlinks"
+                                                            className={`flex items-center gap-1.5 min-w-0 pb-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer relative ${activeLeftTab === 'linked' ? 'text-white' : 'text-[#666666] hover:text-[#aaaaaa]'}`}
+                                                        >
+                                                            <Link2 className="w-3.5 h-3.5 shrink-0" />
+                                                            <span className="truncate">Backlinks</span>
+                                                            {activeLeftTab === 'linked' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600" />}
+                                                        </button>
                                                     </div>
                                                     {activeLeftTab === 'terms' || activeLeftTab === 'tags' ? (
                                                         <VideoTagsPanel
@@ -1526,6 +1628,15 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                             onGlossaryChanged={() => getGlossaryTerms().then(setGlossaryTerms).catch(console.error)}
                                                             onSelectTerm={setSelectedTerm}
                                                             onJumpToTerm={handleJumpToTerm}
+                                                            onManageTags={onManageTags ? () => requestLeave(() => { onClose(); onManageTags(); }) : undefined}
+                                                        />
+                                                    ) : activeLeftTab === 'linked' ? (
+                                                        // The times are moments in this video, so they jump its player.
+                                                        <BacklinksList
+                                                            key={videoId}
+                                                            kind="video"
+                                                            targetKey={videoId}
+                                                            onTime={time => { const s = parseClock(time); if (s !== null) seekPlayer(s); }}
                                                         />
                                                     ) : activeLeftTab === 'attachments' ? (
                                                         <AttachmentsPanel
@@ -1697,7 +1808,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                         // With "clear the transcript after summarizing" on, time spent editing it is
                                                         // lost once a summary exists: say so first, so nobody sinks an hour into it.
                                                         onClick={() => (flags.setTranscriptAfterSummarizeToNA && flags.confirmBeforeEditingTranscript ? setConfirmEditTranscript(true) : startEditingTranscript())}
-                                                        className="shrink-0 p-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors cursor-pointer"
+                                                        className="shrink-0 self-stretch px-2 min-h-6 flex items-center justify-center bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors cursor-pointer"
                                                         title="Edit Transcript"
                                                     >
                                                         <Pencil className="w-3 h-3" />
@@ -1710,7 +1821,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                             setIsEditingTranscript(false);
                                                             setEditedSummary(summary);
                                                         }}
-                                                        className="p-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors cursor-pointer"
+                                                        className="shrink-0 self-stretch px-2 min-h-6 flex items-center justify-center bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors cursor-pointer"
                                                         title="Edit AI Summary"
                                                     >
                                                         <Pencil className="w-3 h-3" />
@@ -1779,7 +1890,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                              <div ref={previewScrollRef} className="absolute inset-0 p-3 overflow-y-auto custom-scrollbar whitespace-normal">
                                                                  <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none">
 <ReactMarkdown
-                                                                     remarkPlugins={[remarkGfm, remarkHighlight, remarkEmbeds, remarkSourceLines]}
+                                                                     remarkPlugins={[remarkGfm, remarkHighlight, remarkTimestamps, remarkEmbeds, remarkSourceLines]}
  urlTransform={markdownUrlTransform}
                                                                      components={{
                                                                          a: MarkdownLink,
@@ -1856,7 +1967,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                         there's one copy control per view, not two disagreeing ones. */}
                                                     <div data-find-scope className="leading-relaxed prose dark:prose-invert prose-sm max-w-none">
                                                         <ReactMarkdown
-                                                            remarkPlugins={[remarkGfm, remarkHighlight, remarkEmbeds]}
+                                                            remarkPlugins={[remarkGfm, remarkHighlight, remarkTimestamps, remarkEmbeds]}
  urlTransform={markdownUrlTransform}
                                                             components={{
                                                                 a: MarkdownLink,
@@ -2061,7 +2172,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar({ isOpe
                                                         className="flex items-center gap-1.5 px-3 py-1.5 bg-[#272727] text-[#aaaaaa] rounded-lg hover:text-white hover:bg-[#3f3f3f] transition-colors text-[10px] font-bold uppercase tracking-wider cursor-pointer"
                                                     >
                                                         <ClipboardPaste className="w-3 h-3" />
-                                                        Paste Transcript
+                                                        Paste Your Own Transcript
                                                     </button>
                                                 )}
                                             </div>

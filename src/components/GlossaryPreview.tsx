@@ -7,6 +7,7 @@ import { getBiography, type GlossaryTerm } from '../api';
 import { glossaryPreview } from '../lib/glossary-preview';
 import { inlineMarkdown } from '../lib/preview-markdown';
 import { remarkHighlight } from '../lib/remark-highlight';
+import { remarkTimestamps } from '../lib/remark-timestamps';
 import { FloatingCard, type Side } from './FloatingCard';
 
 const HOVER_MS = 350;
@@ -20,7 +21,7 @@ const LEAVE_MS = 250;
 function PreviewMarkdown({ children }: { children: string }) {
     return (
         <ReactMarkdown
-            remarkPlugins={[remarkGfm, remarkHighlight]}
+            remarkPlugins={[remarkGfm, remarkHighlight, [remarkTimestamps, { chips: false }]]}
             urlTransform={markdownUrlTransform}
             components={{
                 p: ({ children }) => <>{children}</>,

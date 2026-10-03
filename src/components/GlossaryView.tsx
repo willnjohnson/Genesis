@@ -13,10 +13,15 @@ import { TermDefinitionModal } from './TermDefinitionModal';
 import { useCloseOnNavigate } from '../lib/navigation';
 import { normalizeText } from '../lib/utils';
 import { handleMarkdownKeyDown, handleMarkdownContextMenu, handlePlainContextMenu } from '../lib/markdown-editor';
+import { foldVideoLinkTimes } from '../lib/internal-links';
+import { isBuiltInTag } from '../lib/glossary';
+import { builtInTagIcon, builtInTagRank } from '../lib/built-in-tags';
 import { useFlags } from '../hooks/useFlags';
 
 // The dropdown's value for "all Quick Tags" (drive roots look like ":CRYPTO", so this can't clash).
 const QUICK_VIEW = '__quick__';
+// The heading of the built-in tags' section, listed first (a word, so it can't clash with a letter or "#").
+const ESSENTIAL = 'Essentials';
 
 const nameOfRoot = (roots: WdbsRoot[], path: string) => roots.find(r => r.path === path)?.segment ?? path.replace(/^:/, '');
 
@@ -131,7 +136,7 @@ function GlossaryNameButton({ entry, onOpen, badge }: { entry: GlossaryTerm; onO
     );
 }
 
-export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allowModification = true, onChange, onNotify, onOpenTrash, reloadSignal, scrollContainerRef }: { onNotify?: (n: NotificationContent) => void, onOpenTrash?: () => void, reloadSignal?: number, searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'term' | 'library') => void, onOpenVideo?: (video: Video) => void, allowModification?: boolean, onChange?: () => void, scrollContainerRef: RefObject<HTMLDivElement | null> }) {
+export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allowModification = true, onChange, onNotify, onOpenTrash, reloadSignal, scrollContainerRef, startInTags = false }: { onNotify?: (n: NotificationContent) => void, onOpenTrash?: () => void, reloadSignal?: number, /** Open on the tags list (the sidebar's "Manage tags in ..."), not the terms. */ startInTags?: boolean, searchQuery: string, onSearchInLibrary: (term: string, mode: 'tag' | 'term' | 'library') => void, onOpenVideo?: (video: Video) => void, allowModification?: boolean, onChange?: () => void, scrollContainerRef: RefObject<HTMLDivElement | null> }) {
     const { labels } = useWorkspace();
     const glossaryLower = labels.aliasGlossary.toLowerCase();
     const [terms, setTerms] = useState<GlossaryTerm[]>([]);
@@ -151,7 +156,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
     const [roots, setRoots] = useState<WdbsRoot[]>([]);
     // The one dropdown picks what's shown: '' = all Standard Glossary Tags, QUICK_VIEW = all Quick
     // Tags, or a drive root's path (":CRYPTO") = the Standard tags filed under that drive.
-    const [view, setView] = useState('');
+    const [view, setView] = useState(startInTags ? QUICK_VIEW : '');
     // A DB owner can hide Quick Tags, the drive filter and the drive picker (see lib/flags.ts).
     const { flags } = useFlags();
     // If the view on screen has just been hidden, go back to all Standard tags.
@@ -212,7 +217,8 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
         e.preventDefault();
         if (!newTerm.trim() || (showGlossaryTags && !newDefinition.trim())) return;
         try {
-            await saveGlossaryTerm(null, newTerm.trim(), newDefinition.trim(), showGlossaryTags ? newDrives : []);
+            // A [5:50] typed straight after a video link becomes that link's ?t= (lib/internal-links.ts), here and below.
+            await saveGlossaryTerm(null, newTerm.trim(), foldVideoLinkTimes(newDefinition.trim()), showGlossaryTags ? newDrives : []);
         } catch (err) {
             setSaveError(String(err));
             return;
@@ -266,7 +272,7 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
         // One atomic save: a rename or a change of drives replaces the entry's old rows.
         const drives = showGlossaryTags ? termToEdit.drives : [];
         try {
-            await saveGlossaryTerm({ term: termToEdit.originalTerm, drives: termToEdit.originalDrives }, termToEdit.term.trim(), termToEdit.definition.trim(), drives);
+            await saveGlossaryTerm({ term: termToEdit.originalTerm, drives: termToEdit.originalDrives }, termToEdit.term.trim(), foldVideoLinkTimes(termToEdit.definition.trim()), drives);
         } catch (err) {
             setSaveError(String(err));
             return;
@@ -309,14 +315,19 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
         const groups: Record<string, GlossaryTerm[]> = {};
         for (const t of filteredTerms) {
             const firstChar = t.term.charAt(0).toUpperCase();
-            const groupKey = /[A-Z]/.test(firstChar) ? firstChar : '#';
+            // The built-in tags (Watch Later, Favorite, ...) have their own section, ahead of the letters.
+            const groupKey = isBuiltInTag(t) ? ESSENTIAL : /[A-Z]/.test(firstChar) ? firstChar : '#';
             if (!groups[groupKey]) groups[groupKey] = [];
             groups[groupKey].push(t);
         }
+        // In their own order, not alphabetical: the order BUILT_IN_TAGS gives them.
+        groups[ESSENTIAL]?.sort((a, b) => builtInTagRank(a.term) - builtInTagRank(b.term));
         return groups;
     }, [filteredTerms]);
 
     const groupKeys = Object.keys(groupedTerms).sort((a, b) => {
+        if (a === ESSENTIAL) return -1;
+        if (b === ESSENTIAL) return 1;
         if (a === '#') return -1;
         if (b === '#') return 1;
         return a.localeCompare(b);
@@ -391,13 +402,22 @@ export function GlossaryView({ searchQuery, onSearchInLibrary, onOpenVideo, allo
                                 <ul className="space-y-1.5 pl-2">
                                     {groupedTerms[char].map(t => (
                                         <li key={`${t.term}|${t.drives.join(',')}`} className="text-gray-300 flex items-center group">
-                                            <div className="w-1.5 h-1.5 rounded-full bg-[#444] mr-3 shrink-0 group-hover:bg-[var(--k-accent)] transition-colors"></div>
+                                            {/* A built-in tag has its own icon in place of the bullet. Centred where the
+                                                bullet would be (-ml-[3px]), so the names still line up with the rest. */}
+                                            {(() => {
+                                                const BuiltInIcon = isBuiltInTag(t) ? builtInTagIcon(t.term) : undefined;
+                                                return BuiltInIcon
+                                                    // Up a pixel to meet the letters, which sit above their line's middle.
+                                                    ? <BuiltInIcon className="w-3 h-3 -ml-[3px] mr-[9px] shrink-0 -translate-y-px text-[#777777] group-hover:text-[var(--k-accent)] transition-colors" />
+                                                    : <div className="w-1.5 h-1.5 rounded-full bg-[#444] mr-3 shrink-0 group-hover:bg-[var(--k-accent)] transition-colors"></div>;
+                                            })()}
                                             <GlossaryNameButton
                                                 entry={t}
                                                 onOpen={() => setSelectedTerm(t)}
                                                 badge={multiRowTerms.has(t.term) ? <span className="ml-2 text-[11px] font-semibold text-gray-500 no-underline">{driveBadge(roots, t.drives)}</span> : undefined}
                                             />
-                                            {allowModification && (
+                                            {/* A built-in tag can't be edited or deleted (the backend refuses too). */}
+                                            {allowModification && !isBuiltInTag(t) && (
                                                 <>
                                                     <button
                                                         onClick={(e) => {

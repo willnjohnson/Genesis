@@ -5,7 +5,7 @@ mod http_server;
 
 const APP_NAME: &str = "Kinesis";
 
-const VERSION: &str = "0.5.0";
+const VERSION: &str = "0.5.1";
 
 /// The smallest the window can be dragged to (logical pixels). 800 is also the smallest size
 /// offered under Settings > Display, so every choice there still fits; below this the header
@@ -306,6 +306,8 @@ pub fn run() {
             // Biography
             commands::get_biographies,
             commands::get_biography,
+            commands::get_backlinks,
+            commands::link_channel_info_footers,
             commands::update_biography,
             // Export
             commands::export_to_obsidian,

@@ -6,12 +6,15 @@ import { SiWikipedia } from 'react-icons/si';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../lib/remark-highlight';
+import { remarkTimestamps } from '../lib/remark-timestamps';
 import { remarkEmbeds } from '../lib/remark-embeds';
-import { markdownUrlTransform } from '../lib/internal-links';
+import { foldVideoLinkTimes, markdownUrlTransform } from '../lib/internal-links';
 import { MarkdownLink } from './MarkdownLink';
+import { BacklinksList } from './BacklinksList';
 import { useBioPreview } from './GlossaryPreview';
 import { AlphabetJumpNav } from './AlphabetJumpNav';
-import { getBiographies, updateBiography, type BiographyEntry, fetchChannelVideosV3, openExternalUrl, getHandleDrives, type HandleDrive, type Video } from '../api';
+import { getBiographies, updateBiography, type BiographyEntry, fetchChannelVideosV3, getHandleDrives, type HandleDrive, type Video } from '../api';
+import { openExternalUrlGuarded } from '../lib/external-links';
 import { useFlags } from '../hooks/useFlags';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { normalizeText, driveSegmentLabel } from '../lib/utils';
@@ -257,7 +260,8 @@ export function BiographyView({ searchQuery, onChange, onVideoSelect, onViewMore
 
     const commitSave = async (entry: BiographyEntry) => {
         // Normalize social fields: convert handles to full URLs where needed
-        const normalized = { ...entry };
+        // A [5:50] typed straight after a video link becomes that link's ?t= (lib/internal-links.ts).
+        const normalized = { ...entry, bio: foldVideoLinkTimes(entry.bio) };
         (socialTabs as SocialTab[]).forEach((key) => {
             const val = entry[key];
             if (val && val.trim()) {
@@ -500,6 +504,8 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
     const title = biography.displayName.trim() || biography.handle;
     const [videos, setVideos] = useState<Video[]>([]);
     const [loadingVideos, setLoadingVideos] = useState(true);
+    // How many texts link to this person, once its Backlinks list has looked.
+    const [backlinkCount, setBacklinkCount] = useState<number | null>(null);
     const [drives, setDrives] = useState<HandleDrive[]>([]);
     const { flags } = useFlags();
     const { labels } = useWorkspace();
@@ -586,7 +592,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                                oversized next to it. */}
                            <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none prose-pre:bg-black/50 prose-code:text-red-400">
                                <ReactMarkdown
-                                   remarkPlugins={[remarkGfm, remarkHighlight, remarkEmbeds]}
+                                   remarkPlugins={[remarkGfm, remarkHighlight, [remarkTimestamps, { chips: false }], remarkEmbeds]}
  urlTransform={markdownUrlTransform}
                                    components={{
                                        a: MarkdownLink,
@@ -601,6 +607,9 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                                    {biography.bio?.trim() || '_No biography yet._'}
                                </ReactMarkdown>
                            </div>
+                           {/* What else mentions this person with a link (components/BacklinksList.tsx). */}
+                           <h3 className="text-sm font-bold text-white mt-8 mb-2">Backlinks{backlinkCount ? ` (${backlinkCount})` : ''}</h3>
+                           <BacklinksList key={biography.handle} kind="bio" targetKey={biography.handle} onCount={setBacklinkCount} />
                       </div>
 
                        {/* Sidebar Content: Latest Videos — kept narrower than the About panel gets wide
@@ -701,7 +710,7 @@ export function BiographyModal({ biography, onClose, onVideoSelect, onEdit, onVi
                                 return (
                                      <button
                                          key={key}
-                                         onClick={() => openExternalUrl(rawValue)}
+                                          onClick={() => openExternalUrlGuarded(rawValue, config.label)}
                                          title={config.label}
                                          className="flex items-center justify-center w-7 h-7 rounded-md bg-[#1b1b1b] border border-[#333] text-gray-400 hover:text-white hover:bg-[#262626] hover:border-blue-600/50 transition-all cursor-pointer"
                                      >

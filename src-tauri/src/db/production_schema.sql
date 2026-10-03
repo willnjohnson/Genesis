@@ -83,6 +83,7 @@ CREATE TABLE Videos (
 	tags TEXT DEFAULT (''),
 	tokens TEXT DEFAULT (''),
 	CONSTRAINT VIDEOS_PK PRIMARY KEY (video_id),
+	FOREIGN KEY (handle) REFERENCES Biographies(handle) ON DELETE RESTRICT ON UPDATE CASCADE,
 	FOREIGN KEY (fkWDBS) REFERENCES tblWDBS(WDBS) ON DELETE RESTRICT
 ) STRICT;
 
@@ -142,7 +143,14 @@ CREATE TABLE VideoAttachments (
     name TEXT NOT NULL,
     ext TEXT NOT NULL,
     hash TEXT NOT NULL,
-    added_at TEXT NOT NULL
+    added_at TEXT NOT NULL,
+    position INTEGER
+) STRICT;
+
+CREATE TABLE VideoLinkedTerms (
+    video_id TEXT NOT NULL,
+    term TEXT NOT NULL,
+    PRIMARY KEY (video_id, term)
 ) STRICT;
 
 CREATE TABLE WorkspaceLabels (
@@ -200,6 +208,7 @@ CREATE INDEX idxVideosHandle ON Videos(handle);
 CREATE INDEX idxVideoAttachmentsVideoID ON VideoAttachments(video_id);
 CREATE INDEX idxVideosTags ON Videos(tags);
 CREATE INDEX idxVideosWDBS ON Videos(WDBS);
+CREATE INDEX idxVideoAttachmentsOrder ON VideoAttachments(video_id, position);
 CREATE INDEX idxDriveSequenceOrder ON DriveSequence(drive, position);
 CREATE INDEX idxDriveSequenceVideo ON DriveSequence(video_id);
 CREATE UNIQUE INDEX idxBiographiesHandleLower ON Biographies(LOWER(handle));
@@ -285,81 +294,41 @@ END;
 CREATE TRIGGER trgVideosBeforeINS_Videos_SyncBioHandle
 BEFORE INSERT ON Videos
 BEGIN
-    -- Check if there's a matching handle in biographies
+    -- Enforce FK invariant with a clear message (case-insensitive lookup, FK is BINARY)
+    SELECT CASE
+        WHEN NEW.handle IS NULL OR NEW.handle = ''
+            THEN RAISE(ABORT, 'Referential integrity violation: handle is required')
+        WHEN NOT EXISTS (SELECT 1 FROM Biographies WHERE LOWER(Biographies.handle) = LOWER(NEW.handle))
+            THEN RAISE(ABORT, 'Referential integrity violation: handle not found in Biographies')
+    END;
+
+    -- Inline WDBS validation (recursive_triggers OFF prevents ValidateWDBS
+    -- from firing on this trigger-program INSERT, so validate it here)
+    SELECT CASE
+        WHEN NEW.WDBS IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM tblWDBS WHERE WDBS = REPLACE(REPLACE(NEW.WDBS, 'θψ', ':'), '_', '-'))
+            THEN RAISE(ABORT, 'Referential integrity violation: WDBS value not found in Warp Drive')
+    END;
+
+    -- Canonicalize handle to the exact form stored in Biographies, then insert
     INSERT INTO Videos(handle, video_id, title, author, length_seconds, transcript, summary, WDBS, view_count, published_at, date_added, tags, tokens)
     SELECT
-        (SELECT handle FROM Biographies
-         WHERE lower(Biographies.handle) = lower(NEW.handle)
-         LIMIT 1),
+        (SELECT handle FROM Biographies WHERE LOWER(Biographies.handle) = LOWER(NEW.handle) LIMIT 1),
         NEW.video_id,
         NEW.title,
         NEW.author,
         NEW.length_seconds,
         NEW.transcript,
         NEW.summary,
-        CASE
-            WHEN NEW.WDBS IS NOT NULL AND NEW.WDBS != '' AND NEW.WDBS != 'θψ' THEN NEW.WDBS
-            WHEN (
-                SELECT COUNT(DISTINCT SUBSTR(WDBS, 1, INSTR(WDBS, '_') + INSTR(SUBSTR(WDBS, INSTR(WDBS, '_') + 1), '_') - 1) || '_PND')
-                FROM Videos
-                WHERE handle = (SELECT handle FROM Biographies WHERE lower(Biographies.handle) = lower(NEW.handle) LIMIT 1)
-                AND WDBS GLOB '*_*_*'
-            ) = 1 THEN (
-                SELECT DISTINCT SUBSTR(WDBS, 1, INSTR(WDBS, '_') + INSTR(SUBSTR(WDBS, INSTR(WDBS, '_') + 1), '_') - 1) || '_PND'
-                FROM Videos
-                WHERE handle = (SELECT handle FROM Biographies WHERE lower(Biographies.handle) = lower(NEW.handle) LIMIT 1)
-                AND WDBS GLOB '*_*_*'
-                LIMIT 1
-            )
-            ELSE 'θψ'
-        END,
+        NEW.WDBS,
         NEW.view_count,
         NEW.published_at,
         NEW.date_added,
         NEW.tags,
         NEW.tokens
-    WHERE EXISTS (
-        SELECT 1 FROM Biographies
-        WHERE lower(Biographies.handle) = lower(NEW.handle)
-    );
+    WHERE EXISTS (SELECT 1 FROM Biographies WHERE LOWER(Biographies.handle) = LOWER(NEW.handle));
 
-    -- If no match exists, use the original handle
-    INSERT INTO Videos(handle, video_id, title, author, length_seconds, transcript, summary, WDBS, view_count, published_at, date_added, tags, tokens)
-    SELECT
-        NEW.handle,
-        NEW.video_id,
-        NEW.title,
-        NEW.author,
-        NEW.length_seconds,
-        NEW.transcript,
-        NEW.summary,
-        CASE
-            WHEN NEW.WDBS IS NOT NULL AND NEW.WDBS != '' AND NEW.WDBS != 'θψ' THEN NEW.WDBS
-            WHEN (
-                SELECT COUNT(DISTINCT SUBSTR(WDBS, 1, INSTR(WDBS, '_') + INSTR(SUBSTR(WDBS, INSTR(WDBS, '_') + 1), '_') - 1) || '_PND')
-                FROM Videos
-                WHERE handle = NEW.handle
-                AND WDBS GLOB '*_*_*'
-            ) = 1 THEN (
-                SELECT DISTINCT SUBSTR(WDBS, 1, INSTR(WDBS, '_') + INSTR(SUBSTR(WDBS, INSTR(WDBS, '_') + 1), '_') - 1) || '_PND'
-                FROM Videos
-                WHERE handle = NEW.handle
-                AND WDBS GLOB '*_*_*'
-                LIMIT 1
-            )
-            ELSE 'θψ'
-        END,
-        NEW.view_count,
-        NEW.published_at,
-        NEW.date_added,
-        NEW.tags,
-        NEW.tokens
-    WHERE NOT EXISTS (
-        SELECT 1 FROM Biographies
-        WHERE lower(Biographies.handle) = lower(NEW.handle)
-    );
-
-    -- Cancel the original INSERT
+    -- Cancel the original INSERT (replaced by the canonicalized insert above)
     SELECT RAISE(IGNORE);
 END;
 
@@ -476,6 +445,12 @@ CREATE TRIGGER trgVideosAfterDEL_Attachments_CascadeDelete
             DELETE FROM VideoNotes WHERE video_id = OLD.video_id;
             DELETE FROM VideoAttachments WHERE video_id = OLD.video_id;
             DELETE FROM AttachmentBlobs WHERE hash NOT IN (SELECT hash FROM VideoAttachments);
+END;
+
+CREATE TRIGGER trgVideosAfterDEL_VideoLinkedTerms_CascadeDelete
+        AFTER DELETE ON Videos
+        BEGIN
+            DELETE FROM VideoLinkedTerms WHERE video_id = OLD.video_id;
 END;
 
 CREATE TRIGGER trgVideosAfterDEL_DriveSequence_CascadeDelete

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import type { LinkKind } from "./lib/internal-links";
 
 export interface Video {
     id: string;
@@ -784,6 +785,35 @@ const mapBiography = (entry: RawBiographyEntry): BiographyEntry => ({
 export async function getBiographies(): Promise<BiographyEntry[]> {
     const rows = await invoke("get_biographies") as RawBiographyEntry[];
     return rows.map(mapBiography);
+}
+
+/** One text that links to something: a row of its Backlinks list (see src-tauri/src/db/links.rs's find_backlinks). */
+export interface Backlink {
+    /** Which text: a video's "summary", "transcript" or "note", a person's "bio", a term's "definition". */
+    source: 'summary' | 'transcript' | 'note' | 'bio' | 'definition';
+    /** The video the text belongs to (summary, transcript, note). */
+    videoId: string | null;
+    /** The person's handle (bio) or the term (definition). */
+    key: string | null;
+    /** The video's title, the person's name, or the term. */
+    title: string;
+    /** The moments its links start at (timed video links), as written ("5:50"), each once. */
+    times: string[];
+    /** How many links in it point at the target. */
+    links: number;
+    /** The words around its first link to the target. */
+    excerpt: string;
+}
+
+/** Every text that links to a video, person or other target. Scans the texts, so it takes a moment on a big library. */
+export async function getBacklinks(kind: LinkKind, key: string): Promise<Backlink[]> {
+    return await invoke("get_backlinks", { kind, key });
+}
+
+/** Links the creator's name in every older summary's "Channel Info:" footer to their biography (What's New, v0.5.1).
+ *  Resolves to how many summaries changed. */
+export async function linkChannelInfoFooters(): Promise<number> {
+    return await invoke("link_channel_info_footers");
 }
 
 export async function getBiography(handle: string): Promise<BiographyEntry | null> {

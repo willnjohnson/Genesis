@@ -70,7 +70,7 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
     {
         let m = Connection::open(&master).unwrap();
         m.execute("INSERT OR IGNORE INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon, WDDefault) VALUES (':UAP', 1, 'UAP', 'UAP', '', 0)", []).unwrap();
-        m.execute("INSERT OR IGNORE INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon, WDDefault) VALUES (':UAP-GERB', 2, 'GERB', 'Gerb Alias', 'star', 0)", []).unwrap();
+        m.execute("INSERT OR IGNORE INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon, WDDefault) VALUES (':UAP-GERB', 2, 'GERB', 'Gerb Alias', 'news', 0)", []).unwrap();
         for i in 1..=4 {
             m.execute(
                 "INSERT INTO Videos (video_id, title, author, handle, length_seconds, transcript, view_count, published_at, tags, WDBS)
@@ -112,7 +112,7 @@ async fn a_client_syncs_a_real_kinesis_master_through_the_reference_server() {
     assert_eq!(q(&client, "SELECT transcript FROM Videos WHERE video_id='vid3'").as_deref(), Some("transcript number 3 about saucers"));
     assert_eq!(q(&client, "SELECT WDBS FROM Videos WHERE video_id='vid2'").as_deref(), Some("θψUAP_GERB"));
     assert_eq!(q(&client, "SELECT WDInfo FROM tblWDBS WHERE WDBS=':UAP-GERB'").as_deref(), Some("Gerb Alias"));
-    assert_eq!(q(&client, "SELECT WDIcon FROM tblWDBS WHERE WDBS=':UAP-GERB'").as_deref(), Some("star"));
+    assert_eq!(q(&client, "SELECT WDIcon FROM tblWDBS WHERE WDBS=':UAP-GERB'").as_deref(), Some("news"));
     assert_eq!(n(&client, "SELECT COUNT(*) FROM VideoWDBSLinks WHERE video_id='vid1'"), 1);
     assert_eq!(q(&client, "SELECT definition FROM Glossary WHERE term='saucer'").as_deref(), Some("a flying disc"));
     // The term's top-level drive assignment came with it.

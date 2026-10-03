@@ -610,7 +610,7 @@ export function SearchBar({ onSearch, onLiveFilter, loading, viewMode = 'search'
                                 <button
                                     type="button"
                                     onClick={() => removeFacet(i)}
-                                    className="hover:text-red-500 transition-colors ml-1"
+                                    className="hover:text-red-500 transition-colors ml-1 cursor-pointer"
                                 >
                                     <X className="w-3 h-3" />
                                 </button>

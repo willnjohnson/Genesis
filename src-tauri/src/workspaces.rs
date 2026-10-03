@@ -718,6 +718,10 @@ pub(crate) fn activate(app: &tauri::AppHandle, ws_dir: &Path) -> Result<Workspac
     let lock = acquire_lock(&data)?;
     let db_str = db_file.to_string_lossy().into_owned();
     db::init_db(&db_str).map_err(|e| format!("Couldn't open the database at {}: {e}", db_str))?;
+    // The tags every workspace has (Watch Later, Favorite, ...). Not a reason to refuse opening it.
+    if let Err(e) = db::glossary::ensure_built_in_tags(&db_str) {
+        log::warn!("Couldn't add the built-in tags to {db_str}: {e}");
+    }
     touch(ws_dir);
     *lock_state(&app.state::<crate::DbPathState>().0) = Some(db_str);
     *active = Some(ActiveWorkspace { ws_dir: ws_dir.to_path_buf(), _lock: lock });

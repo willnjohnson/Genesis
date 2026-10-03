@@ -40,16 +40,20 @@ fn handle_youtube_embed(request: Request) -> Result<(), Box<dyn std::error::Erro
     let url = request.url();
     let query_start = url.find('?');
     let mut video_id = String::new();
+    // Where to start, in whole seconds (a timed video link, see src/lib/internal-links.ts): passed on as YouTube's own
+    // `start`. Only digits are taken, so like the id it can't break out of the address it goes into.
+    let mut start_at: Option<u32> = None;
     if let Some(start) = query_start {
         let query = &url[start + 1..];
-        let params: Vec<&str> = query.split('&').collect();
-        for param in params {
-            if param.starts_with("v=") {
-                video_id = param[2..].to_string();
-                break;
+        for param in query.split('&') {
+            if let Some(v) = param.strip_prefix("v=") {
+                video_id = v.to_string();
+            } else if let Some(t) = param.strip_prefix("t=") {
+                start_at = t.parse().ok();
             }
         }
     }
+    let start_param = start_at.filter(|&t| t > 0).map(|t| format!("&start={t}")).unwrap_or_default();
     let video_id = urlencoding::decode(&video_id).map(|c| c.into_owned()).unwrap_or(video_id);
 
     if !is_valid_video_id(&video_id) {
@@ -69,13 +73,50 @@ fn handle_youtube_embed(request: Request) -> Result<(), Box<dyn std::error::Erro
 </head>
 <body>
 <iframe
-  src="https://www.youtube.com/embed/{}"
+  id="player"
+  src="https://www.youtube.com/embed/{}?enablejsapi=1{}"
   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
   allowfullscreen>
 </iframe>
+<script>
+  // Between the app (Sidebar.tsx) and YouTube's player, through its iframe API (enablejsapi above):
+  //  - kinesis-seek: jump to a moment (the app's [1:23] timestamps and timed links).
+  //  - kinesis-time: where the video is now (the app's "Copy link at time"), answered to whoever asked.
+  // Only well-formed requests from the window holding this page are acted on.
+  var player = document.getElementById('player');
+  var current = null;
+  var send = function (func, args) {{
+    player.contentWindow.postMessage(JSON.stringify({{ event: 'command', func: func, args: args }}), 'https://www.youtube.com');
+  }};
+  // Asking to listen makes the player report on itself (its time among it) from then on.
+  player.addEventListener('load', function () {{
+    player.contentWindow.postMessage(JSON.stringify({{ event: 'listening', id: 'kinesis', channel: 'widget' }}), 'https://www.youtube.com');
+  }});
+  window.addEventListener('message', function (e) {{
+    if (e.source === player.contentWindow) {{
+      if (e.origin !== 'https://www.youtube.com' || typeof e.data !== 'string') return;
+      try {{
+        var info = JSON.parse(e.data).info;
+        if (info && typeof info.currentTime === 'number') current = info.currentTime;
+      }} catch (_) {{}}
+      return;
+    }}
+    var d = e.data;
+    if (e.source !== window.parent || !d) return;
+    if (d.type === 'kinesis-time') {{
+      e.source.postMessage({{ type: 'kinesis-time', id: d.id, seconds: current }}, e.origin);
+      return;
+    }}
+    if (d.type !== 'kinesis-seek') return;
+    var s = d.seconds;
+    if (typeof s !== 'number' || !isFinite(s) || s < 0) return;
+    send('seekTo', [s, true]);
+    send('playVideo', []);
+  }});
+</script>
 </body>
 </html>"#,
-        video_id
+        video_id, start_param
     );
 
     let response = Response::from_string(html)

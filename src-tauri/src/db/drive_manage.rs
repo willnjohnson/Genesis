@@ -450,7 +450,7 @@ pub fn relocate_drive(db_path: &str, from: &str, to: &str, dry_run: bool) -> Res
     let old_storage: Vec<String> = moving.iter().map(|p| display_to_storage(p)).collect();
     // Counted before any write, on this connection, so it reads the database as it stands. Links to the Drives
     // (storage form) and to their sequences (display form) both follow the move.
-    let texts = (count_texts_linking(db_path, LinkKind::Drive, &old_storage)? + count_texts_linking(db_path, LinkKind::Playlist, &moving)?) as i64;
+    let texts = count_texts_linking(db_path, &[(LinkKind::Drive, &old_storage), (LinkKind::Playlist, &moving)])? as i64;
 
     let mut report = RelocateReport { from: from.clone(), to: to.clone(), merged, texts, ..Default::default() };
     let tx = conn.transaction()?;
@@ -699,7 +699,7 @@ pub fn delete_drive(db_path: &str, display: &str, dry_run: bool) -> Result<Delet
     }
 
     let old_storage: Vec<String> = removing.iter().map(|p| display_to_storage(p)).collect();
-    let texts = (count_texts_linking(db_path, LinkKind::Drive, &old_storage)? + count_texts_linking(db_path, LinkKind::Playlist, &removing)?) as i64;
+    let texts = count_texts_linking(db_path, &[(LinkKind::Drive, &old_storage), (LinkKind::Playlist, &removing)])? as i64;
     let report = DeleteReport { drive: display.clone(), drives: removing.len() as i64, texts };
     if dry_run {
         return Ok(report);

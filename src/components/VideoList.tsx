@@ -10,6 +10,7 @@ import { BottomBar } from './BottomBar';
 import { TrashChip } from './TrashChip';
 import { LifeLoader } from './LifeLoader';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
+import { youtubeChannelUrl } from './CreatorMenu';
 
 // Mirrors the Tailwind breakpoints used by the grid className below (sm/md/lg/xl/2xl at
 // Tailwind's default 640/768/1024/1280/1536px) so the virtualizer knows how many cards land in
@@ -778,7 +779,9 @@ function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowD
     const copy = (text: string) => { navigator.clipboard?.writeText(text).catch(() => {}); };
     const citation = apaCitation(video, url);
     const menuItems: ContextMenuItem[] = [
-        { label: 'Open', icon: PanelRightOpen, onClick: () => onSelect(video) },
+        // Just "Open" when there's no transcript or summary to open it on (a search result not saved yet, say); otherwise the
+        // two below say which, and a plain Open would only repeat one of them.
+        ...(onSelectWithTab && (video.hasTranscript || video.hasSummary) ? [] : [{ label: 'Open', icon: PanelRightOpen, onClick: () => onSelect(video) }]),
         // Resting the pointer on these shows the start of the text beside the menu.
         ...(onSelectWithTab && video.hasTranscript ? [{
             label: 'Open Transcript', icon: FileText, onClick: () => onSelectWithTab(video, 'transcript'),
@@ -788,7 +791,9 @@ function VideoCard({ video, compact, onSelect, onSelectWithTab, onDelete, allowD
             label: 'Open Summary', icon: Sparkles, onClick: () => onSelectWithTab(video, 'summary'),
             peek: { title: 'Summary', load: async () => usableText(await getSummary(video.id)) },
         }] : []),
-        ...(flags.showOpenInYouTube ? [{ label: 'Open in YouTube', icon: ExternalLink, onClick: () => { void openExternalUrl(url); } }] : []),
+        ...(flags.showOpenInYouTube ? [{ label: 'Open Video in YouTube', icon: ExternalLink, onClick: () => { void openExternalUrl(url); } }] : []),
+        // The creator's channel, when the card knows their handle (a search result may only have their name).
+        ...(flags.showOpenInYouTube && video.handle?.trim() ? [{ label: 'Visit YouTube Channel', icon: ExternalLink, onClick: () => { void openExternalUrl(youtubeChannelUrl(video.handle!)); } }] : []),
         { label: 'Copy link', icon: Link2, onClick: () => copy(url), divider: true },
         { label: 'Copy citation', icon: Quote, onClick: () => copy(citation) },
         { label: 'Copy as Markdown link', icon: Link2, onClick: () => copy(`[${video.title.replace(/[[\]]/g, '')}](${url})`) },

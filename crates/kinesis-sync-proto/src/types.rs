@@ -19,16 +19,16 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// Order in which kinds must be applied: taxonomy before videos (the production schema
-    /// validates `videos.WDBS`), links and sequence memberships after both (each needs its video
-    /// to already exist).
+    /// Order in which kinds must be applied: taxonomy and biographies before videos (the production
+    /// schema validates `videos.WDBS`, and refuses a video whose handle has no biography), links and
+    /// sequence memberships after both (each needs its video to already exist).
     pub const APPLY_ORDER: [Kind; 7] = [
         Kind::Wdbs,
+        Kind::Biography,
         Kind::Video,
         Kind::VideoLink,
         Kind::DriveSequence,
         Kind::Glossary,
-        Kind::Biography,
         Kind::CustomPrompt,
     ];
 

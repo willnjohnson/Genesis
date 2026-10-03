@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { remarkHighlight } from '../../lib/remark-highlight';
 import { remarkEmbeds } from '../../lib/remark-embeds';
 import { remarkSourceLines } from '../../lib/preview-sync';
+import { remarkTimestamps, splitTimestamps, SEEK_ATTR, TIMESTAMP_CLASS } from '../../lib/remark-timestamps';
 import { markdownUrlTransform } from '../../lib/internal-links';
 import { MarkdownLink } from '../MarkdownLink';
 
@@ -38,13 +39,24 @@ interface Props {
  *  and bold from the editor show up), otherwise the plain text it always was. */
 export function TranscriptText({ text, onImageClick, sourceLines }: Props) {
     const markdown = useMemo(() => text.length <= MAX_MARKDOWN_CHARS && looksLikeMarkdown(text), [text]);
-    if (!markdown) return <>{text}</>;
+    // Plain captions stay plain text, apart from their [1:23] timestamps, which become the same chips the markdown
+    // ones do (lib/remark-timestamps.ts) without the rest of the text being read as markdown.
+    const plain = useMemo(() => (markdown ? null : splitTimestamps(text)), [markdown, text]);
+    if (plain) {
+        return (
+            <>
+                {plain.map((piece, i) => 'text' in piece
+                    ? piece.text
+                    : <button key={i} type="button" className={TIMESTAMP_CLASS} {...{ [SEEK_ATTR]: piece.seconds }} title={`Jump to ${piece.label}`}>{piece.label}</button>)}
+            </>
+        );
+    }
     return (
         // whitespace-pre-line keeps every line break the transcript has (markdown would merge single
         // ones into a paragraph); prose gives headings, lists and paragraphs their spacing.
         <div className="leading-relaxed prose dark:prose-invert prose-sm max-w-none whitespace-pre-line">
             <ReactMarkdown
-                remarkPlugins={sourceLines ? [remarkGfm, remarkHighlight, remarkEmbeds, remarkSourceLines] : [remarkGfm, remarkHighlight, remarkEmbeds]}
+                remarkPlugins={sourceLines ? [remarkGfm, remarkHighlight, remarkTimestamps, remarkEmbeds, remarkSourceLines] : [remarkGfm, remarkHighlight, remarkTimestamps, remarkEmbeds]}
                 urlTransform={markdownUrlTransform}
                 components={{
                     a: MarkdownLink,

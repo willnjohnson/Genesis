@@ -252,11 +252,11 @@ fn write_pack(
     // Which sync kinds to write, in the order an importer must apply them (taxonomy first).
     let kinds: [(bool, Kind, &str); 7] = [
         (opts.taxonomy, Kind::Wdbs, "Exporting taxonomy…"),
+        (opts.biographies, Kind::Biography, "Exporting biographies…"),
         (opts.videos, Kind::Video, "Exporting videos…"),
         (opts.videos, Kind::VideoLink, ""),
         (opts.sequences, Kind::DriveSequence, "Exporting playlists…"),
         (opts.glossary, Kind::Glossary, "Exporting glossary…"),
-        (opts.biographies, Kind::Biography, "Exporting biographies…"),
         (opts.prompts, Kind::CustomPrompt, "Exporting custom prompts…"),
     ];
 
@@ -953,7 +953,7 @@ mod tests {
 
     fn seed(db_path: &str) {
         let conn = Connection::open(db_path).unwrap();
-        conn.execute("INSERT OR IGNORE INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon, WDDefault) VALUES (':UAP', 1, 'UAP', 'Aliased', 'star', 0)", []).unwrap();
+        conn.execute("INSERT OR IGNORE INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon, WDDefault) VALUES (':UAP', 1, 'UAP', 'Aliased', 'news', 0)", []).unwrap();
         conn.execute(
             "INSERT INTO Videos (video_id, title, author, handle, length_seconds, transcript, summary, view_count, published_at, tags, WDBS, date_added)
              VALUES ('vid1', 'Title', 'Author', '@auth', 90, 'some transcript words here', 'A summary', 1234, '2024-01-02', 'a,b', 'θψUAP', '2021-03-04 05:06:07')",
@@ -1380,7 +1380,7 @@ mod tests {
     fn a_pack_round_trips_between_production_schema_databases() {
         let src = production_db("rt_src");
         let conn = Connection::open(&src).unwrap();
-        conn.execute("INSERT INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon) VALUES (':UAP', 1, 'UAP', 'Aliased', 'star')", []).unwrap();
+        conn.execute("INSERT INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon) VALUES (':UAP', 1, 'UAP', 'Aliased', 'news')", []).unwrap();
         conn.execute("INSERT INTO tblWDBS (WDBS, lev, WDID, WDInfo, WDIcon) VALUES (':FIN', 1, 'FIN', 'Finance', '')", []).unwrap();
         drop(conn);
         db::biography::upsert_biography_from_video(&src, "@auth", "Author", Some("UCabc"), 500).unwrap();

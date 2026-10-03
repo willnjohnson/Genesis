@@ -7,7 +7,7 @@ import { BRAND } from '../branding';
 import { BrandLogo } from './BrandLogo';
 import { UpdateButton } from './UpdateButton';
 import { WhatsNewModal } from './WhatsNewModal';
-import { afterDialogs } from '../lib/dialogs';
+import { useHasOpenDialog } from '../lib/dialogs';
 import { hasUnreadWhatsNew, markWhatsNewRead } from '../lib/whats-new';
 
 interface Props {
@@ -21,9 +21,23 @@ interface Props {
     leftTools?: ReactNode;
     /** The open workspace's name, shown after the left buttons while there is room for it. */
     workspaceName?: string;
-    /** The title bar layout's navigation icons (Search, Library, Glossary, Biography). */
+    /** Before What's New on the right: the title bar layout's layout toggle and Settings. */
     toolbar?: ReactNode;
+    /** The title bar layout's sections (Search, Library, Glossary, Biography), as binder tabs after the workspace. With
+     *  them, the bar runs left to right (arrows, logo and name, workspace, tabs) instead of centering the title. */
+    tabs?: TitleBarTab[];
 }
+
+export interface TitleBarTab {
+    key: string;
+    label: string;
+    icon: ReactNode;
+    active: boolean;
+    onClick: () => void;
+}
+
+/** How much the tabbed bar has given up to fit: the tabs' names first, then the workspace's, then the app's. */
+type Squeeze = 0 | 1 | 2 | 3;
 
 /** A loss of focus this soon after the bar is pressed is the window manager taking the pointer to move the window (Linux). */
 const MOVE_GRAB_MS = 400;
@@ -44,6 +58,26 @@ const controlButton = `${controlBase} hover:text-white hover:bg-[#272727]`;
 // theme's regular text color, which flips dark on a light theme and would read muted/wrong against the accent fill.
 const closeButton = `${controlBase} hover:text-[var(--k-text-on-accent)] hover:bg-[var(--k-accent)]`;
 
+/** One binder tab. Bottom-aligned with a rounded top; the open one is the page's own color, covers the bar's bottom line
+ *  (it's drawn above it, see TitleBar) and carries an accent strip along its bottom. */
+function BinderTab({ tab, compact, locked = false }: { tab: TitleBarTab; compact: boolean; locked?: boolean }) {
+    return (
+        <button
+            onClick={tab.onClick}
+            disabled={locked}
+            title={locked ? `${tab.label} (close the open window first)` : tab.label}
+            aria-label={tab.label}
+            aria-current={tab.active ? 'page' : undefined}
+            className={`relative flex items-center justify-center gap-1 shrink-0 rounded-t-md border border-b-0 text-[11px] leading-none whitespace-nowrap transition-colors cursor-pointer disabled:cursor-default ${compact ? 'w-8' : 'px-2.5'} ${tab.active
+                ? 'z-10 h-[calc(100%-4px)] bg-[#0f0f0f] border-[#404040] text-white font-semibold shadow-[inset_0_-2px_0_var(--k-accent)]'
+                : 'h-[calc(100%-5px)] mb-px bg-[#1a1a1a] border-[#303030] text-gray-400 hover:text-white hover:bg-[#272727] disabled:opacity-40 disabled:hover:text-gray-400 disabled:hover:bg-[#1a1a1a]'}`}
+        >
+            {tab.icon}
+            {!compact && <span>{tab.label}</span>}
+        </button>
+    );
+}
+
 /**
  * The window's own title bar (the window has no native one). Slim, and draggable: from left, the back and forward
  * arrows (Alt + Left / Alt + Right), the title bar layout's workspace button, the logo and name; from right, the
@@ -53,9 +87,14 @@ const closeButton = `${controlBase} hover:text-[var(--k-text-on-accent)] hover:b
  * Dragging and double-clicking to maximize come from `data-tauri-drag-region`: it works on the element that carries
  * it, so everything that isn't a button either has it or ignores the pointer.
  */
-export function TitleBar({ history, workspaceButton, leftTools, workspaceName, toolbar }: Props) {
+export function TitleBar({ history, workspaceButton, leftTools, workspaceName, toolbar, tabs }: Props) {
     const [maximized, setMaximized] = useState(false);
     const [showWhatsNew, setShowWhatsNew] = useState(false);
+    // The bar sits above the dialogs so the window can still be moved, minimized and closed, not so the page under an
+    // open one can be changed or another opened over it: while one is open, Back/Forward, the tabs, the layout toggle,
+    // Settings and What's New wait, as they do in the other layouts, where the dialog covers them. The window controls don't.
+    const locked = useHasOpenDialog();
+    const lockedTitle = (title: string) => (locked ? `${title} (close the open window first)` : title);
     // A dot beside the megaphone while the current notes haven't been opened.
     const [unread, setUnread] = useState(hasUnreadWhatsNew);
     // The window menu a native title bar shows on a right-click. The frameless window has none: on Windows and Linux the
@@ -79,7 +118,7 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
     const title = `${BRAND.name}${version ? ` v${version}` : ''}`;
     useLayoutEffect(() => {
         const bar = barRef.current;
-        if (!bar) return;
+        if (!bar || tabs) return;
         const measure = () => {
             // The left buttons, then the name with the title bar layout's switcher: it is the bare 22px button (and its 2px
             // margin) plus the name and 8 more. Nothing here is read from what is currently shown, so showing or hiding
@@ -96,7 +135,34 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
         const observer = new ResizeObserver(measure);
         [bar, leftRef.current, rightRef.current, titleRef.current, nameRef.current].forEach(el => el && observer.observe(el));
         return () => observer.disconnect();
-    }, [workspaceName, version, hasSwitcher]);
+    }, [workspaceName, version, hasSwitcher, !!tabs]);
+
+    // The tabbed bar gives way in steps (see Squeeze), each taken only once everything before it no longer fits. Every
+    // width comes from what never changes with the step (the left buttons, the right side, and off-screen copies of the
+    // title, the name and both forms of the tabs), so taking a step can't change the answer and flip it back.
+    const tabsFullRef = useRef<HTMLDivElement>(null);
+    const tabsIconRef = useRef<HTMLDivElement>(null);
+    const [squeeze, setSqueeze] = useState<Squeeze>(0);
+    const tabKeys = tabs?.map(t => `${t.key}:${t.label}`).join('|') ?? '';
+    useLayoutEffect(() => {
+        const bar = barRef.current;
+        if (!bar || !tabs) return;
+        const measure = () => {
+            const w = (el: HTMLElement | null) => el?.offsetWidth ?? 0;
+            // The bar's own left padding (8), the three gaps between groups (12 each), the logo (14) and a little air (16).
+            const base = 8 + 36 + 14 + 16 + w(leftRef.current) + w(rightRef.current);
+            const title = 8 + w(titleRef.current);
+            // The switcher: the bare 22px button, or the name in it (8 left, 4 gap, 14 chevrons, 4 right).
+            const named = workspaceName ? w(nameRef.current) + 30 : 22;
+            const fits = (step: Squeeze) =>
+                base + (step < 3 ? title : 0) + (step < 2 ? named : 22) + (step < 1 ? w(tabsFullRef.current) : w(tabsIconRef.current)) <= bar.clientWidth;
+            setSqueeze(fits(0) ? 0 : fits(1) ? 1 : fits(2) ? 2 : 3);
+        };
+        measure();
+        const observer = new ResizeObserver(measure);
+        [bar, leftRef.current, rightRef.current, titleRef.current, nameRef.current, tabsFullRef.current, tabsIconRef.current].forEach(el => el && observer.observe(el));
+        return () => observer.disconnect();
+    }, [workspaceName, version, tabKeys]); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => {
         let stop: (() => void) | undefined;
@@ -186,10 +252,33 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
         try { void run(getCurrentWindow()); } catch { /* not in the app window */ }
     };
 
+    const backForward = history && (
+        <div className="flex items-center gap-1">
+            <button onClick={history.back} disabled={!history.canBack || locked} className={barButton} title={lockedTitle('Back (Alt + Left)')} aria-label="Back">
+                <ArrowLeft className="w-3.5 h-3.5" />
+            </button>
+            <button onClick={history.forward} disabled={!history.canForward || locked} className={barButton} title={lockedTitle('Forward (Alt + Right)')} aria-label="Forward">
+                <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+        </div>
+    );
+    const brand = (showTitle: boolean) => (
+        <div data-tauri-drag-region className="flex items-center gap-2">
+            <BrandLogo className="w-3.5 h-3.5" dragRegion />
+            {/* The text ignores the pointer so a press on it lands on the parent, which is what makes it drag the window. */}
+            {showTitle && (
+                <div data-tauri-drag-region className="flex items-center">
+                    <span className="pointer-events-none whitespace-nowrap text-[13px] text-gray-400 leading-none">{title}</span>
+                </div>
+            )}
+        </div>
+    );
+
     return (
-        // Three columns: the two outer ones share the leftover width equally, so the title in the middle sits exactly
-        // at the window's center while both sides fit. When a side needs more room than its share (a narrow window),
-        // its column grows and the title slides toward the other side instead of disappearing or overlapping.
+        // Without tabs, three columns: the two outer ones share the leftover width equally, so the title in the middle
+        // sits exactly at the window's center while both sides fit. When a side needs more room than its share (a narrow
+        // window), its column grows and the title slides toward the other side instead of disappearing or overlapping.
+        // With tabs (the title bar layout), one row from the left, and the right side after the room that's left.
         <div
             ref={barRef}
             data-app-titlebar
@@ -200,20 +289,28 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
                 barPressedAt.current = performance.now();
             }}
             // Above the dimming layers of dialogs and the sidebar, so the window can still be moved and closed.
-            className="relative z-[300] shrink-0 grid grid-cols-[1fr_auto_1fr] items-stretch h-[var(--k-titlebar-height)] bg-[#0f0f0f] border-b border-[#272727] select-none"
+            className={`relative z-[300] shrink-0 items-stretch h-[var(--k-titlebar-height)] bg-[#0f0f0f] select-none ${tabs ? 'flex' : 'grid grid-cols-[1fr_auto_1fr] border-b border-[#272727]'}`}
         >
+          {tabs ? (
+            <>
+                {/* The bar's bottom line. Drawn rather than a border, so the open tab (above it) can cover it. */}
+                <div aria-hidden className="pointer-events-none absolute left-0 right-0 bottom-0 h-px bg-[#272727]" />
+                <div data-tauri-drag-region className={`flex items-center pl-2 shrink-0 ${dim}`}>
+                    <div ref={leftRef} className="flex items-center w-max">{backForward}</div>
+                </div>
+                <div data-tauri-drag-region className={`flex items-center ml-3 shrink-0 ${dim}`}>{brand(squeeze < 3)}</div>
+                {workspaceButton && <span data-workspace-switch className={`flex items-center ml-3 shrink-0 ${dim}`}>{workspaceButton(!!workspaceName && squeeze < 2)}</span>}
+                {/* The tabs, then the rest of the row, which still drags the window. Above the bottom line (z-10), so
+                    the open tab covers it; the others stop a pixel short and leave it showing under them. */}
+                <nav data-tauri-drag-region aria-label="Sections" className={`relative z-10 flex items-end gap-0.5 ml-3 flex-1 min-w-0 overflow-hidden ${dim}`}>
+                    {tabs.map(tab => <BinderTab key={tab.key} tab={tab} compact={squeeze >= 1} locked={locked} />)}
+                </nav>
+            </>
+          ) : (
+            <>
             <div data-tauri-drag-region className={`flex items-center pl-2 min-w-0 ${dim}`}>
               <div ref={leftRef} className="flex items-center w-max">
-                {history && (
-                    <div className="flex items-center gap-1">
-                        <button onClick={history.back} disabled={!history.canBack} className={barButton} title="Back (Alt + Left)" aria-label="Back">
-                            <ArrowLeft className="w-3.5 h-3.5" />
-                        </button>
-                        <button onClick={history.forward} disabled={!history.canForward} className={barButton} title="Forward (Alt + Right)" aria-label="Forward">
-                            <ArrowRight className="w-3.5 h-3.5" />
-                        </button>
-                    </div>
-                )}
+                {backForward}
                 {leftTools && (
                     <>
                         {history && divider}
@@ -233,25 +330,29 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
             <div data-tauri-drag-region className={`flex items-center justify-center px-3 ${dim}`}>
                 {/* The logo beside the title, in every layout (including the ones that keep the logo and name in the page
                     header): the pair sits at the window's center. */}
-                <div data-tauri-drag-region className="flex items-center gap-2">
-                    <BrandLogo className="w-3.5 h-3.5" dragRegion />
-                    {/* The text ignores the pointer so a press on it lands on the parent, which is what makes it drag the window. */}
-                    <div data-tauri-drag-region className="flex items-center">
-                        <span className="pointer-events-none whitespace-nowrap text-[13px] text-gray-400 leading-none">{title}</span>
-                    </div>
-                </div>
+                {brand(true)}
             </div>
+            </>
+          )}
 
-            <div data-tauri-drag-region className="flex items-stretch justify-end min-w-0">
+            <div data-tauri-drag-region className={`flex items-stretch justify-end min-w-0 ${tabs ? 'shrink-0' : ''}`}>
               <div ref={rightRef} className="flex items-stretch w-max">
-                {toolbar && <div className={`flex items-center ${dim}`}>{toolbar}{divider}</div>}
+                {toolbar && (
+                    <div className={`flex items-center ${dim}`} title={locked ? 'Close the open window first' : undefined}>
+                        {/* Its buttons are App's: while locked they're greyed and made inert as a group (no pointer, no focus). */}
+                        <div className={`flex items-center transition-opacity ${locked ? 'opacity-40' : ''}`} inert={locked}>{toolbar}</div>
+                        {divider}
+                    </div>
+                )}
                 {/* Updates and announcements, together. */}
                 <div className={`flex items-center gap-0.5 pr-1 ${dim}`}>
                     <UpdateButton />
                     <button
-                        onClick={showWhatsNew ? () => setShowWhatsNew(false) : afterDialogs(() => { setShowWhatsNew(true); markWhatsNewRead(); setUnread(false); })}
+                        // Waits while another window is open, like the rest; with its own notes open, it still closes them.
+                        onClick={showWhatsNew ? () => setShowWhatsNew(false) : () => { setShowWhatsNew(true); markWhatsNewRead(); setUnread(false); }}
+                        disabled={locked && !showWhatsNew}
                         className={unread ? barButton.replace('w-[22px]', 'min-w-[22px] px-1.5 gap-1.5') : barButton}
-                        title={unread ? "What's New (unread)" : "What's New"}
+                        title={showWhatsNew ? "What's New" : lockedTitle(unread ? "What's New (unread)" : "What's New")}
                         aria-label={unread ? "What's New, unread" : "What's New"}
                     >
                         {unread && <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-[var(--k-accent)] shrink-0" />}
@@ -275,11 +376,21 @@ export function TitleBar({ history, workspaceButton, leftTools, workspaceName, t
               </div>
             </div>
 
-            {/* Off screen: the title's and the name's widths, for the fit check above. */}
+            {/* Off screen: the title's and the name's widths (and the tabs', both ways), for the fit checks above. */}
             <span aria-hidden className="pointer-events-none invisible absolute top-0 left-0 whitespace-nowrap text-[13px] leading-none">
                 <span ref={titleRef} className="inline-block">{title}</span>
                 {workspaceName && <span ref={nameRef} className="inline-block">{workspaceName}</span>}
             </span>
+            {tabs && (
+                <div aria-hidden className="pointer-events-none invisible absolute top-0 left-0 h-full">
+                    <div ref={tabsFullRef} className="absolute top-0 left-0 h-full flex items-end gap-0.5 w-max">
+                        {tabs.map(tab => <BinderTab key={tab.key} tab={tab} compact={false} />)}
+                    </div>
+                    <div ref={tabsIconRef} className="absolute top-0 left-0 h-full flex items-end gap-0.5 w-max">
+                        {tabs.map(tab => <BinderTab key={tab.key} tab={tab} compact />)}
+                    </div>
+                </div>
+            )}
 
             {menuAt && createPortal(
                 <div

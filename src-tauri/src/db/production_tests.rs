@@ -121,6 +121,7 @@ fn drives_can_be_renamed_merged_and_deleted_on_the_production_schema() {
     schema::init_db(&path).unwrap();
     for (id, drive) in [("a", ":UAP-GERB-VVV"), ("b", ":UAP-GERB"), ("c", ":FIN")] {
         // A channel each: the production insert trigger guesses a "<prefix>_PND" Drive for a channel's next video.
+        biography::upsert_biography_from_video(&path, &format!("@creator_{id}"), "Author", None, -1).unwrap();
         videos::save_video(&path, id, id, "Author", 60, "words", 1, "2024-05-01", &format!("@creator_{id}"), None).unwrap();
         wdbs::ensure_wdbs_path_exists(&path, drive).unwrap();
         videos::update_video_wdbs(&path, id, &super::drive_manage::display_to_storage(drive)).unwrap();

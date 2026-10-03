@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Bookmark, FileText, Sparkles } from 'lucide-react';
 import { encodeWdbs, getSequenceSummary, getVideoCard, getWdbsAliases, videoThumbnail, type SequenceSummary, type Video } from '../api';
 import { openInternalLink } from '../lib/internal-links';
+import { formatClock } from '../lib/remark-timestamps';
 import { formatDate, formatViewCount } from '../lib/video-format';
 import { PlaylistThumb, sequenceName, TRIMMED_THUMB_IMG } from './SequenceCard';
 import { useWorkspace } from '../hooks/useWorkspace';
@@ -38,17 +39,22 @@ function Placeholder() {
     return <div className={`${cardClass} pointer-events-none`} aria-hidden><div className={thumbClass} /></div>;
 }
 
-export function VideoEmbed({ videoId, fallback }: { videoId: string; fallback: ReactNode }) {
+/** `at`: where the link starts the video, in seconds (a `?t=` link, see lib/internal-links.ts). */
+export function VideoEmbed({ videoId, at, fallback }: { videoId: string; at?: number; fallback: ReactNode }) {
     const video = useLoaded<Video>(() => getVideoCard(videoId), videoId);
     if (video === undefined) return <Placeholder />;
     if (video === null) return <>{fallback}</>;
     const hasTranscript = video.hasTranscript ?? !!video.transcript;
     const hasSummary = video.hasSummary ?? !!video.summary;
     return (
-        <button type="button" onClick={() => openInternalLink('video', videoId)} className={cardClass} title="Open this video">
+        <button type="button" onClick={() => openInternalLink('video', videoId, at)} className={cardClass} title={at !== undefined ? `Open this video at ${formatClock(at)}` : 'Open this video'}>
             <div className={thumbClass}>
                 {/* Zoomed so its black bars fall outside the box: the picture fills the height, the sides are cropped. */}
                 <img src={videoThumbnail(videoId)} alt="" loading="lazy" className={TRIMMED_THUMB_IMG} />
+                {/* Where it starts, over the thumbnail like YouTube's own time badge. */}
+                {at !== undefined && (
+                    <span className="absolute bottom-1.5 right-1.5 px-1 rounded bg-black/80 text-white font-mono text-[11px] leading-snug">Start at {formatClock(at)}</span>
+                )}
             </div>
             <div className={textClass}>
                 <span className="text-sm font-bold text-white leading-tight line-clamp-2 [overflow-wrap:anywhere]">{video.title}</span>

@@ -16,28 +16,89 @@ pub fn has_real_summary(summary: &str) -> bool {
     !content.trim().is_empty()
 }
 
+/// What starts a summary's channel footer (see append_channel_info_footer).
+pub(crate) const CHANNEL_INFO: &str = "Channel Info:";
+
+/// A video's "Channel Info: ..." footer line, or None when there's no name to give. The name is the channel's
+/// biography display_name, falling back to the video's own `author` (the biography row is only made lazily, so it can
+/// be missing). When the biography exists, the name links to it (`[Name](kinesis://bio/handle)`, the handle without
+/// its "@", as the Link to picker writes it); without one there's nothing to open, so it stays plain.
+fn channel_info_footer(conn: &Connection, video_id: &str) -> Result<Option<String>> {
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT b.handle, NULLIF(TRIM(b.display_name), ''), v.author
+             FROM Videos v LEFT JOIN Biographies b ON b.handle = v.handle
+             WHERE v.video_id = ?1",
+            params![video_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((bio_handle, display_name, author)) = row else { return Ok(None) };
+    let name = display_name.or(author).map(|n| n.trim().to_string()).unwrap_or_default();
+    if name.is_empty() || name == "Unknown" {
+        return Ok(None);
+    }
+    let footer = match bio_handle.as_deref().map(|h| h.trim().trim_start_matches('@')).filter(|h| !h.is_empty()) {
+        // Square brackets in a name would end the link's text early.
+        Some(handle) => format!("{CHANNEL_INFO} {}", super::links::build_link(&name.replace(['[', ']'], ""), super::links::LinkKind::Bio, handle)),
+        None => format!("{CHANNEL_INFO} {name}"),
+    };
+    Ok(Some(footer))
+}
+
 // Appends a "Channel Info: ..." footer to a video's summary (feeding the ftsVideos.summary
-// FTS5 column), always at the very bottom. Guarded so repeated saves/refetches/re-summarizes
-// of the same video don't duplicate it. Prefers the channel's biography display_name, but
-// falls back to the video's own `author` field so this doesn't depend on a biographies row
-// having been created yet (that row is only upserted lazily, e.g. from the video-save flow,
-// and can be missing entirely for videos saved before that ran or via other paths).
+// FTS5 column, so a channel's name finds its videos), always at the very bottom. Guarded so
+// repeated saves/refetches/re-summarizes of the same video don't duplicate it. See
+// channel_info_footer for what it says.
 pub(crate) fn append_channel_info_footer(conn: &Connection, video_id: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE Videos AS a
-         SET summary = IFNULL(a.summary, '') || (char(10) || char(10) || 'Channel Info: ' || src.name)
-         FROM (
-             SELECT v.video_id AS vid, COALESCE(NULLIF(TRIM(b.display_name), ''), v.author) AS name
-             FROM Videos v
-             LEFT JOIN Biographies b ON b.handle = v.handle
-             WHERE v.video_id = ?1
-         ) AS src
-         WHERE a.video_id = src.vid
-           AND src.name IS NOT NULL AND src.name NOT IN ('', 'Unknown')
-           AND (a.summary IS NULL OR a.summary NOT LIKE '%Channel Info:%')",
-        params![video_id],
-    )?;
+    let summary: Option<String> = conn
+        .query_row("SELECT summary FROM Videos WHERE video_id = ?1", params![video_id], |r| r.get(0))
+        .optional()?
+        .flatten();
+    if summary.as_deref().is_some_and(|s| s.contains(CHANNEL_INFO)) {
+        return Ok(());
+    }
+    if let Some(footer) = channel_info_footer(conn, video_id)? {
+        conn.execute(
+            "UPDATE Videos SET summary = ?1 WHERE video_id = ?2",
+            params![format!("{}\n\n{footer}", summary.unwrap_or_default()), video_id],
+        )?;
+    }
     Ok(())
+}
+
+/// Rewrites every summary's footer from what it says now: the one-off for summaries saved before the creator's name
+/// linked to their biography (What's New, v0.5.1). Only the footer changes; returns how many summaries did.
+/// `progress` hears (looked at, out of) as it goes, every few summaries and once at the end.
+pub fn relink_channel_info_footers(db_path: &str, mut progress: impl FnMut(usize, usize)) -> Result<usize> {
+    let mut conn = Connection::open(db_path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    let tx = conn.transaction()?;
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(&format!("SELECT video_id, summary FROM Videos WHERE INSTR(summary, '{CHANNEL_INFO}') > 0"))?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|r| r.ok()).collect();
+        rows
+    };
+    let total = rows.len();
+    progress(0, total);
+    let mut changed = 0;
+    for (i, (video_id, summary)) in rows.into_iter().enumerate() {
+        if i > 0 && i % 25 == 0 {
+            progress(i, total);
+        }
+        let Some(footer) = channel_info_footer(&tx, &video_id)? else { continue };
+        // Everything before the footer stays exactly as it is (save_summary cuts it off the same way).
+        let at = summary.find(CHANNEL_INFO).unwrap_or(summary.len());
+        let body = summary[..at].trim_end();
+        let updated = if body.is_empty() { footer } else { format!("{body}\n\n{footer}") };
+        if updated != summary {
+            tx.execute("UPDATE Videos SET summary = ?1 WHERE video_id = ?2", params![updated, video_id])?;
+            changed += 1;
+        }
+    }
+    tx.commit()?;
+    progress(total, total);
+    Ok(changed)
 }
 
 pub fn save_summary(db_path: &str, video_id: &str, summary: &str) -> Result<()> {
@@ -547,5 +608,56 @@ mod term_sync_tests {
         backfill_terms_from_summaries(&conn).unwrap();
         assert_eq!(tags_of(&conn), vec!["Fresh".to_string()]);
         let _ = std::fs::remove_file(&db_path);
+    }
+}
+
+#[cfg(test)]
+mod channel_info_tests {
+    use super::*;
+    use crate::db::{init_db, save_video, upsert_biography_from_video};
+
+    fn temp_db(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("kinesis_channel_info_{name}_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let p = path.to_string_lossy().to_string();
+        init_db(&p).unwrap();
+        p
+    }
+
+    fn summary_of(db: &str, id: &str) -> String {
+        Connection::open(db).unwrap().query_row("SELECT summary FROM Videos WHERE video_id = ?1", [id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn the_creator_links_to_their_biography_and_stays_plain_without_one() {
+        let db = temp_db("link");
+        upsert_biography_from_video(&db, "@RealDanBongino", "Dan Bongino", None, -1).unwrap();
+        save_video(&db, "v1", "T", "Dan Bongino", 60, "words", 1, "2026-01-01T00:00:00Z", "@RealDanBongino", Some("The summary.")).unwrap();
+        assert_eq!(summary_of(&db, "v1"), "The summary.\n\nChannel Info: [Dan Bongino](kinesis://bio/RealDanBongino)");
+        // No biography: nothing to open, so just the name.
+        save_video(&db, "v2", "T", "Someone", 60, "words", 1, "2026-01-01T00:00:00Z", "@nobio", Some("Other.")).unwrap();
+        assert_eq!(summary_of(&db, "v2"), "Other.\n\nChannel Info: Someone");
+        // Saving the summary again keeps exactly one footer.
+        save_summary(&db, "v1", &summary_of(&db, "v1")).unwrap();
+        assert_eq!(summary_of(&db, "v1").matches(CHANNEL_INFO).count(), 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn old_plain_footers_are_relinked_and_nothing_else_changes() {
+        let db = temp_db("relink");
+        upsert_biography_from_video(&db, "@RealDanBongino", "Dan Bongino", None, -1).unwrap();
+        save_video(&db, "v1", "T", "Dan Bongino", 60, "words", 1, "2026-01-01T00:00:00Z", "@RealDanBongino", None).unwrap();
+        save_video(&db, "v2", "T", "Someone", 60, "words", 1, "2026-01-01T00:00:00Z", "@nobio", None).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        // As older versions saved them: a plain name.
+        conn.execute("UPDATE Videos SET summary = 'Keep **this** [link](kinesis://glossary/X).\n\nChannel Info: Dan Bongino' WHERE video_id = 'v1'", []).unwrap();
+        conn.execute("UPDATE Videos SET summary = 'Other.\n\nChannel Info: Someone' WHERE video_id = 'v2'", []).unwrap();
+
+        assert_eq!(relink_channel_info_footers(&db, |_, _| {}).unwrap(), 1, "only the one with a biography changes");
+        assert_eq!(summary_of(&db, "v1"), "Keep **this** [link](kinesis://glossary/X).\n\nChannel Info: [Dan Bongino](kinesis://bio/RealDanBongino)");
+        assert_eq!(summary_of(&db, "v2"), "Other.\n\nChannel Info: Someone");
+        assert_eq!(relink_channel_info_footers(&db, |_, _| {}).unwrap(), 0, "running it again changes nothing");
+        let _ = std::fs::remove_file(&db);
     }
 }

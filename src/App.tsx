@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
     getTranscript, getVideoHandle, getDisplaySettings, setDisplaySettings,
     getApiKey, getKeyStatus, getSetting, openExternalUrl, bulkUpdateVideoWdbs, addToDriveSequence,
@@ -13,6 +13,7 @@ import { DriveManagerModal } from "./components/drive-manager/DriveManagerModal"
 import { driveSegmentLabel, formatBytes, parseTagList } from "./lib/utils";
 import { resolveEntry } from "./lib/glossary";
 import { setInternalLinkHandler, linkKindLabel, type LinkKind } from "./lib/internal-links";
+import { setExternalLinkGuard } from "./lib/external-links";
 import { LinkPicker } from "./components/LinkPicker";
 import { MarkdownContextMenu } from "./components/MarkdownContextMenu";
 import { TermDefinitionModal } from "./components/TermDefinitionModal";
@@ -26,7 +27,7 @@ import { WorkspaceSwitcher } from "./components/workspace/WorkspaceSwitcher";
 import { BrandLogo } from "./components/BrandLogo";
 import { afterDialogs } from "./lib/dialogs";
 import { recordRecent } from "./lib/recents";
-import { TitleBar } from "./components/TitleBar";
+import { TitleBar, type TitleBarTab } from "./components/TitleBar";
 import { ResizeEdges } from "./components/ResizeEdges";
 import { Notification, type NotificationContent } from "./components/Notification";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -85,8 +86,14 @@ function App() {
     const [bulkAssigning, setBulkAssigning] = useState(false);
     const [bulkAssignError, setBulkAssignError] = useState<string | null>(null);
     const [glossarySearchQuery, setGlossarySearchQuery] = useState("term_search:");
+    // Counts "Manage tags in <Glossary>" requests (the sidebar's tag dropdown): above 0, the Glossary opens on its tags
+    // list. Back to 0 once the app leaves the Glossary, so going there any other way opens it as usual.
+    const [glossaryTagsRequest, setGlossaryTagsRequest] = useState(0);
+    useEffect(() => { if (viewMode !== 'glossary') setGlossaryTagsRequest(0); }, [viewMode]);
     const [biographySearchQuery, setBiographySearchQuery] = useState("person_search:");
     const [notification, setNotification] = useState<NotificationContent | null>(null);
+    // External link pending confirmation: the dialog asks before leaving Kinesis.
+    const [pendingExternal, setPendingExternal] = useState<{ url: string; title: string } | null>(null);
     const [showScrollTop, setShowScrollTop] = useState(false);
     // The one scrollable region (see the `mt-4 flex-1 overflow-y-auto` div in the return below) —
     // everywhere that used to assume the whole window scrolls (this file, VideoList.tsx's
@@ -174,7 +181,7 @@ function App() {
 
     // ── Init ─────────────────────────────────────────────────────────────────
     useEffect(() => {
-        const handleLinkClick = async (e: MouseEvent) => {
+        const handleLinkClick = (e: MouseEvent) => {
             const target = e.target as HTMLElement;
             const anchor = target.closest('a');
             if (anchor && anchor.href &&
@@ -183,11 +190,22 @@ function App() {
                 anchor.getAttribute('href') !== '#' &&
                 !anchor.href.startsWith('javascript:')) {
                 e.preventDefault();
-                await openExternalUrl(anchor.href);
+                // Only Kinesis's own links get here (What's New, help links): every link in your text renders through
+                // MarkdownLink, which opens it itself (with the confirmation) and never leaves a real address to follow.
+                void openExternalUrl(anchor.href);
             }
         };
         document.addEventListener('click', handleLinkClick);
-        return () => document.removeEventListener('click', handleLinkClick);
+
+        // External link confirmation: asks before opening an external website whose address came from your content
+        // (links in your text, a biography's social and website icons). Addresses Kinesis builds itself (Open in
+        // YouTube, a timestamp with the player hidden, the API key guides) open without asking.
+        const unregisterExternalGuard = setExternalLinkGuard((url, title) => setPendingExternal({ url, title }));
+
+        return () => {
+            document.removeEventListener('click', handleLinkClick);
+            unregisterExternalGuard();
+        };
     }, []);
 
     // Disable Ctrl+J download shortcut
@@ -277,6 +295,10 @@ function App() {
             if (target instanceof HTMLImageElement) {
                 e.preventDefault();
                 e.stopPropagation();
+                // Not a video's thumbnail in the sidebar (its header, Similar Videos, a video card, the sequence bar):
+                // saving one isn't something the sidebar offers. The right-click does nothing there (preventDefault
+                // above also keeps the webview's own "Save image as" menu away). The Library's cards still offer it.
+                if (target.closest('#sidebar-container') && /(^|\.)(ytimg\.com|youtube\.com)\//.test(new URL(target.src, location.href).host + '/')) return;
                 handleSaveImageAs(target.src);
             }
         };
@@ -325,8 +347,7 @@ function App() {
     // a true `fixed` element anywhere in the tree (like AlphabetJumpNav's bottom bar) can stay clear
     // of the rail with plain CSS, without every such element needing to know navigationOrientation.
     useEffect(() => {
-        document.documentElement.style.setProperty('--k-rail-width', navigationOrientation === 'vertical' ? '3.5rem' : '0px');
-    }, [navigationOrientation]);
+        document.documentElement.style.setProperty('--k-rail-width', navigationOrientation === 'vertical' ? '3.5rem' : '0px');    }, [navigationOrientation]);
 
     // Everything a sync (or pack import) can change that App holds in memory: enforced flags, the
     // theme, the license-backed key status, and the content itself.
@@ -511,6 +532,23 @@ function App() {
         setShowDrivePanel(true);
     }, [library]);
 
+    // The selected Drive's alias as the tree has it now, so the bottom bar follows an alias edited after
+    // selecting it (Manage Drive, the tree's own menu). driveFilterAlias, captured at selection, only
+    // stands in while the Drive isn't in the tree (still loading, or nothing filed there).
+    const selectedDriveAlias = useMemo(() => {
+        const path = library.wdbsFilter;
+        if (!path) return driveFilterAlias;
+        const find = (nodes: WdbsNode[]): WdbsNode | undefined => {
+            for (const n of nodes) {
+                if (n.path === path) return n;
+                if (path.startsWith(`${n.path}_`)) return find(n.children);
+            }
+            return undefined;
+        };
+        const node = find(wdbsTree.tree);
+        return node ? node.alias : driveFilterAlias;
+    }, [library.wdbsFilter, wdbsTree.tree, driveFilterAlias]);
+
     // 'tag' searches Quick Tags (#), 'term' searches glossary terms (^), 'library' is plain text.
     const handleSearchInLibrary = (term: string, mode: 'tag' | 'term' | 'library') => {
         goToLibrarySearch(mode === 'tag' ? `tag_search:${term}` : mode === 'term' ? `term_search:${term}` : term);
@@ -527,7 +565,7 @@ function App() {
 
     // What clicking an in-app link (`[text](kinesis://glossary/...)`) does. A target that has gone
     // away, or a part of the app the DB owner has hidden, gets a message instead.
-    const handleOpenLink = useCallback(async (kind: LinkKind, key: string) => {
+    const handleOpenLink = useCallback(async (kind: LinkKind, key: string, at?: number) => {
         const say = (message: string) => setNotification({ message, type: "error" });
         const unavailable = () => say(`${linkKindLabel(kind, labels)} links aren't available here.`);
         try {
@@ -552,10 +590,17 @@ function App() {
                     return;
                 }
                 case 'video': {
+                    // A timed link (?t=) to the video already open just jumps its player there.
+                    if (at !== undefined && sidebarOpen && selectedVideo?.id === key) {
+                        sidebarRef.current?.seekTo(at);
+                        return;
+                    }
                     const video = await getVideoById(key);
                     if (!video) return say("That video is no longer in the library.");
                     setLinkedTerm(null);
                     setSelectedBiography(null);
+                    // Set before the video opens, so its player loads already at that moment rather than loading twice.
+                    setPlayerStart(at !== undefined ? { videoId: key, at } : null);
                     await handleSelectVideo(video);
                     return;
                 }
@@ -594,9 +639,13 @@ function App() {
         } catch (e) {
             say(typeof e === 'string' ? e : (e as { message?: string })?.message ?? "Couldn't open that link.");
         }
-    }, [flags.showGlossary, flags.showBiography, flags.showDrive, flags.showSequences, handleSelectVideo, goToLibraryDrive, library.wdbsFilter]);
+    }, [flags.showGlossary, flags.showBiography, flags.showDrive, flags.showSequences, handleSelectVideo, goToLibraryDrive, library.wdbsFilter, sidebarOpen, selectedVideo?.id]);
 
     useEffect(() => setInternalLinkHandler(handleOpenLink), [handleOpenLink]);
+    // Where the open video's player starts, from the timed link (?t=) that opened it. Applies only to that video, and
+    // goes when the sidebar closes, so opening the video some other way later starts it from the beginning.
+    const [playerStart, setPlayerStart] = useState<{ videoId: string; at: number } | null>(null);
+    useEffect(() => { if (!sidebarOpen) setPlayerStart(null); }, [sidebarOpen]);
     // A biography opened from anywhere (a link, Ctrl+K) goes on Ctrl+K's recent list.
     useEffect(() => {
         if (selectedBiography?.handle) {
@@ -1028,29 +1077,27 @@ function App() {
         };
     }, [viewMode, showDrivePanel, showDrive, navigationOrientation]);
 
-    // The title bar layout puts the navigation icons in the title bar (smaller, but the same choices as the rail's).
+    // The title bar layout puts the sections in the title bar, as binder tabs after the workspace (the same choices as
+    // the rail's). They wait while a dialog is open (TitleBar locks them); with the video sidebar open, a tab closes it
+    // the way its own X does, so an unsaved edit asks first (Save / Discard / Cancel) and Cancel stays put.
+    const leaveSidebarThen = (go: () => void) => () => {
+        if (!sidebarOpen) { go(); return; }
+        const close = () => { setSidebarOpen(false); go(); };
+        if (sidebarRef.current) sidebarRef.current.requestLeave(close);
+        else close();
+    };
     const barIcon = (active: boolean) =>
         `flex items-center justify-center w-[22px] h-[22px] rounded transition-colors cursor-pointer ${active ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`;
-    const navIcon = (active: boolean, name: string, icon: ReactNode, onClick: () => void) => (
-        <button
-            onClick={onClick}
-            title={name}
-            className={`flex items-center justify-center w-[22px] h-[22px] rounded transition-colors cursor-pointer ${active ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-white hover:bg-[#272727]'}`}
-        >
-            {icon}
-        </button>
-    );
-    const titleBarToolbar = navigationOrientation === 'titlebar' ? (
-        <div className="flex items-center gap-0.5">
-            {showSearch && navIcon(viewMode === 'search', labels.aliasSearch, <Search className="w-3.5 h-3.5 shrink-0" />, afterDialogs(() => setViewMode('search')))}
-            {flags.viewVisible.library && navIcon(viewMode === 'library', labels.aliasLibrary, <BookMarked className="w-3.5 h-3.5 shrink-0" />, afterDialogs(() => setViewMode('library')))}
-            {flags.viewVisible.glossary && navIcon(viewMode === 'glossary', labels.aliasGlossary, <BookA className="w-3.5 h-3.5 shrink-0" />, afterDialogs(() => { setGlossarySearchQuery(""); setViewMode('glossary'); }))}
-            {showBiography && navIcon(viewMode === 'biography', labels.aliasBiography, <UserSearch className="w-3.5 h-3.5 shrink-0" />, afterDialogs(() => { setBiographySearchQuery(""); setViewMode('biography'); }))}
-        </div>
-    ) : undefined;
-    // The layout toggle and Settings: on the left of the title bar, after the workspace button. The title bar sits above
-    // the dialogs, so a click here closes any open one first (afterDialogs), then does its thing; Settings toggles.
-    const titleBarLeftTools = navigationOrientation === 'titlebar' ? (
+    const tabIcon = 'w-3 h-3 shrink-0';
+    const titleBarTabs: TitleBarTab[] | undefined = navigationOrientation === 'titlebar' ? [
+        ...(showSearch ? [{ key: 'search', label: labels.aliasSearch, icon: <Search className={tabIcon} />, active: viewMode === 'search', onClick: leaveSidebarThen(() => setViewMode('search')) }] : []),
+        ...(flags.viewVisible.library ? [{ key: 'library', label: labels.aliasLibrary, icon: <BookMarked className={tabIcon} />, active: viewMode === 'library', onClick: leaveSidebarThen(() => setViewMode('library')) }] : []),
+        ...(flags.viewVisible.glossary ? [{ key: 'glossary', label: labels.aliasGlossary, icon: <BookA className={tabIcon} />, active: viewMode === 'glossary', onClick: leaveSidebarThen(() => { setGlossarySearchQuery(""); setViewMode('glossary'); }) }] : []),
+        ...(showBiography ? [{ key: 'biography', label: labels.aliasBiography, icon: <UserSearch className={tabIcon} />, active: viewMode === 'biography', onClick: leaveSidebarThen(() => { setBiographySearchQuery(""); setViewMode('biography'); }) }] : []),
+    ] : undefined;
+    // The layout toggle and Settings: on the right of the title bar, before What's New. A click here closes any open
+    // dialog first (afterDialogs), then does its thing; Settings toggles.
+    const titleBarTools = navigationOrientation === 'titlebar' ? (
         <>
             <div className="flex items-center gap-0.5">
             {flags.showListModeToggle && (
@@ -1090,8 +1137,8 @@ function App() {
                 workspaceButton={navigationOrientation === 'titlebar' ? (showName => <WorkspaceSwitcher variant="icon" name={labels.workspaceName} showName={showName} />) : undefined}
                 // Not in the horizontal layout, whose page header already shows the workspace's name.
                 workspaceName={navigationOrientation === 'horizontal' ? undefined : labels.workspaceName}
-                leftTools={titleBarLeftTools}
-                toolbar={titleBarToolbar}
+                toolbar={titleBarTools}
+                tabs={titleBarTabs}
             />
 
             {/* Navigation - conditional rendering */}
@@ -1454,7 +1501,7 @@ function App() {
                                 onBulkSelectRange={handleBulkSelectRange}
                                 onBulkContextMenu={handleBulkContextMenu}
                                 driveLabel={showDrivePanel
-                                    ? (driveFilterLabel ? (driveFilterAlias ? `${driveFilterLabel} (${driveFilterAlias})` : driveFilterLabel) : 'All')
+                                    ? (driveFilterLabel ? (selectedDriveAlias ? `${driveFilterLabel} (${selectedDriveAlias})` : driveFilterLabel) : 'All')
                                     : undefined}
                                 driveLabelPrefix={showDrivePanel ? driveLabelPrefix.text : undefined}
                                 driveLabelPrefixTooltip={driveLabelPrefix.tooltip}
@@ -1469,6 +1516,9 @@ function App() {
                     <div ref={scrollContainerRef} className="h-full overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable] custom-scrollbar relative">
                         {viewMode === 'glossary' ? (
                             <GlossaryView
+                                // A "Manage tags" request opens it afresh on its tags list, even if it's already showing.
+                                key={`glossary-${glossaryTagsRequest}`}
+                                startInTags={glossaryTagsRequest > 0}
                                 searchQuery={glossarySearchQuery}
                                 onSearchInLibrary={handleSearchInLibrary}
                                 onOpenVideo={handleSelectVideo}
@@ -1546,6 +1596,7 @@ function App() {
 
             <Sidebar
                 ref={sidebarRef}
+                startAt={playerStart && playerStart.videoId === selectedVideo?.id ? playerStart.at : undefined}
                 isOpen={sidebarOpen}
                 onClose={() => {
                     setSidebarOpen(false);
@@ -1592,6 +1643,13 @@ function App() {
                 onSelectDrive={showDrive ? goToLibraryDrive : undefined}
                 driveContext={library.wdbsFilter}
                 onVideoSelect={handleSelectVideo}
+                // "Manage tags in <Glossary>" (the tag dropdown): the Glossary, on its tags list. The sidebar has already
+                // closed (through its unsaved-changes check) when this runs.
+                onManageTags={flags.viewVisible.glossary && flags.showQuickTags ? () => {
+                    setGlossarySearchQuery('');
+                    setGlossaryTagsRequest(n => n + 1);
+                    setViewMode('glossary');
+                } : undefined}
             />
 
             <SettingsModal
@@ -1712,6 +1770,20 @@ function App() {
                     message={`Are you sure you want to delete "${library.confirmDelete.video.title}"?`}
                     onConfirm={runConfirmedDelete}
                     onCancel={() => library.setConfirmDelete(null)}
+                />
+            )}
+
+            {pendingExternal && (
+                <ConfirmDialog
+                    title="Open External Website"
+                    confirmLabel="Open Website"
+                    message={`"${pendingExternal.title}" is a link to an external website. Kinesis will open it in your web browser:\n\n${pendingExternal.url}\n\nOnly continue if you trust this website.`}
+                    onCancel={() => setPendingExternal(null)}
+                    onConfirm={() => {
+                        const url = pendingExternal.url;
+                        setPendingExternal(null);
+                        void openExternalUrl(url);
+                    }}
                 />
             )}
 

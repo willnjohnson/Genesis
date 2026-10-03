@@ -1,6 +1,9 @@
 import type { ReactNode } from 'react';
-import { decodeWdbs, openExternalUrl } from '../api';
-import { linkKindLabel, openInternalLink, parseInternalHref } from '../lib/internal-links';
+import { decodeWdbs } from '../api';
+import { parseInternalHref, openInternalLink, linkKindLabel } from '../lib/internal-links';
+import { openExternalUrlGuarded } from '../lib/external-links';
+import { formatClock } from '../lib/remark-timestamps';
+import { useCreatorMenu } from './CreatorMenu';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { useBioLinkPreview, useGlossaryPreview } from './GlossaryPreview';
 import { useSequenceLinkPreview } from './SequenceCard';
@@ -22,6 +25,8 @@ export function MarkdownLink({ href, title, children, 'data-embed': embed }: { h
     const sequencePreview = useSequenceLinkPreview(internal?.kind === 'playlist' ? internal.key : '');
     // A video link previews as the video's card.
     const videoPreview = useVideoPreview(internal?.kind === 'video' ? internal.key : '');
+    // A biography link's right-click: Visit YouTube Channel, Open Biography.
+    const creatorMenu = useCreatorMenu(internal?.kind === 'bio' ? internal.key : null);
     if (internal) {
         const target = internal.kind === 'drive' ? decodeWdbs(internal.key) || internal.key : internal.key;
         const hover = internal.kind === 'glossary' ? preview
@@ -35,10 +40,11 @@ export function MarkdownLink({ href, title, children, 'data-embed': embed }: { h
                     href="#"
                     onClick={(e) => {
                         e.preventDefault();
-                        openInternalLink(internal.kind, internal.key);
+                        openInternalLink(internal.kind, internal.key, internal.at);
                     }}
-                    title={hover ? undefined : `${linkKindLabel(internal.kind, labels)}: ${target}`}
+                    title={hover ? undefined : `${linkKindLabel(internal.kind, labels)}: ${target}${internal.at !== undefined ? ` at ${formatClock(internal.at)}` : ''}`}
                     {...(hover ? hover.handlers : {})}
+                    onContextMenu={creatorMenu.onContextMenu}
                     // The real target doesn't otherwise survive into the DOM (href above is just
                     // "#") — this is what a Terms chip's jump-to-summary click looks for
                     // (see Sidebar.tsx's handleJumpToTerm).
@@ -46,13 +52,18 @@ export function MarkdownLink({ href, title, children, 'data-embed': embed }: { h
                     className="text-red-500 hover:text-red-400 underline decoration-dotted decoration-red-500/60 underline-offset-4"
                 >
                     {children}
+                    {/* A video link that starts partway through says where, after its text. */}
+                    {internal.at !== undefined && (
+                        <span className="ml-1 font-mono text-[0.85em] no-underline inline-block opacity-80" aria-label={`at ${formatClock(internal.at)}`}>▸ {formatClock(internal.at)}</span>
+                    )}
                 </a>
                 {hover?.card}
+                {creatorMenu.menu}
             </>
         );
         // On a line of its own (lib/remark-embeds.ts marks it), a video or playlist link shows as its card; the plain
         // link is what shows if the target is gone.
-        if (embed && internal.kind === 'video') return <VideoEmbed videoId={internal.key} fallback={link} />;
+        if (embed && internal.kind === 'video') return <VideoEmbed videoId={internal.key} at={internal.at} fallback={link} />;
         if (embed && internal.kind === 'playlist') return <PlaylistEmbed drive={internal.key} fallback={link} />;
         return link;
     }
@@ -62,7 +73,7 @@ export function MarkdownLink({ href, title, children, 'data-embed': embed }: { h
             title={title}
             onClick={(e) => {
                 e.preventDefault();
-                if (href) openExternalUrl(href);
+                if (href) openExternalUrlGuarded(href, typeof children === 'string' ? children : title);
             }}
             className="text-red-500 hover:text-red-400 underline decoration-red-500/30 underline-offset-4"
         >

@@ -7,6 +7,15 @@ export function foldName(name: string): string {
     return name.replace(/[A-Z]/g, c => c.toLowerCase());
 }
 
+/** The Quick Tags every workspace has, in the order the Glossary lists them (its "Essential" section). The same names as
+ *  src-tauri/src/db/glossary.rs's BUILT_IN_TAGS, which makes sure they exist and refuses to delete or rename them. */
+export const BUILT_IN_TAGS = ['Watch Later', 'Favorite', 'Revisit', 'Key Source', 'Follow Up'] as const;
+
+/** Whether an entry is one of the BUILT_IN_TAGS: a Quick Tag (no definition, no Drives) by one of those names, any case. */
+export function isBuiltInTag(entry: GlossaryTerm): boolean {
+    return entry.definition.trim() === '' && entry.drives.length === 0 && BUILT_IN_TAGS.some(t => foldName(t) === foldName(entry.term.trim()));
+}
+
 /** Which definition of `term` to show when a term has several (one per set of Drives): the one
  *  filed under a Drive in `preferredDrives` (a video's Drives, or the Drive being browsed), else the
  *  uncategorized one, else the first. */

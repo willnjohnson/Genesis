@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import { createPortal } from 'react-dom';
 import {
     ArrowRightLeft, ArrowUpDown, BookA, Check, Link2, ChevronDown, ChevronRight, Film, FolderInput, FolderTree, Inbox,
-    LayoutDashboard, Library, ListOrdered, Merge, Pencil, Plus, Search, Trash2,
+    LayoutDashboard, Library, ListOrdered, Loader2, Merge, Pencil, Plus, Search, Trash2,
 } from 'lucide-react';
 import {
     addVideoWdbsLink, bulkUpdateVideoWdbs, createDrive, decodeWdbs, deleteDrive, encodeWdbs, getDriveManageTree,
@@ -249,7 +249,6 @@ export function DriveManagerModal({ onClose, onChanged, onRelocated, onOpenVideo
                             node={selectedNode}
                             byDisplay={byDisplay}
                             suggestions={suggestions}
-                            onReload={reload}
                             onChanged={changed}
                             onRelocated={async (report) => {
                                 onRelocated(encodeWdbs(report.from), encodeWdbs(report.to));
@@ -764,7 +763,7 @@ function UnsortedPane({ suggestions, onChanged, onOpenVideo }: { suggestions: st
                 initialFacets={searchFacets}
                 initialQuery={searchText}
                 loading={false}
-                placeholder="Look up unsorted videos and transcripts"
+                placeholder="Look up Videos and Transcripts"
                 className=""
             />
             <div className="flex items-center justify-end gap-2">
@@ -878,7 +877,6 @@ function NodePane(props: {
     node: ManageNode;
     byDisplay: Map<string, ManageNode>;
     suggestions: string[];
-    onReload: () => Promise<void>;
     onChanged: () => Promise<void>;
     onRelocated: (report: RelocateReport) => Promise<void>;
     onDeleted: () => Promise<void>;
@@ -923,9 +921,9 @@ function NodePane(props: {
                     <DriveMarks node={node} />
                     <h3 className="text-xl font-bold text-white truncate">{node.alias ?? node.segment}</h3>
                     <div className="flex-1" />
-                    <button onClick={props.onShowInLibrary} disabled={node.total === 0} className={neutralButton} title="Show this Drive's videos in the Library">
+                    <button onClick={props.onShowInLibrary} disabled={node.total === 0} className={neutralButton} title={`Show this Drive's videos in the ${labels.aliasLibrary}`}>
                         <Library className="w-3.5 h-3.5" />
-                        Show in Library
+                        Show in {labels.aliasLibrary}
                     </button>
                 </div>
                 <div className="flex gap-1 mt-4">
@@ -955,7 +953,7 @@ function NodePane(props: {
 
 // ── Details: stats, looks, structure ─────────────────────────────────────────
 
-function DetailsTab({ node, byDisplay, suggestions, onReload, onChanged, onRelocated, onDeleted, onSelectDrive }: Parameters<typeof NodePane>[0]) {
+function DetailsTab({ node, byDisplay, suggestions, onChanged, onRelocated, onDeleted, onSelectDrive }: Parameters<typeof NodePane>[0]) {
     const { labels } = useWorkspace();
     const sequenceLabel = labels.aliasSequence;
     const sequenceLower = sequenceLabel.toLowerCase();
@@ -978,7 +976,7 @@ function DetailsTab({ node, byDisplay, suggestions, onReload, onChanged, onReloc
         try {
             await run();
             close?.();
-            await onReload();
+            await onChanged();
         } catch (e) {
             setLooksError(errorText(e));
         } finally {
@@ -999,9 +997,17 @@ function DetailsTab({ node, byDisplay, suggestions, onReload, onChanged, onReloc
     const [deleteError, setDeleteError] = useState<string | null>(null);
     const [pending, setPending] = useState<{ title: string; label: string; message: ReactNode; run: () => Promise<void> } | null>(null);
     const [working, setWorking] = useState(false);
+    // Which preview is being worked out. It reads every text for links and tries the change out, which takes
+    // a moment on a big library: the buttons wait for it rather than starting another behind it.
+    const [checking, setChecking] = useState<'Rename' | 'Move' | 'Merge' | 'Delete' | null>(null);
+    const busy = checking !== null || pending !== null;
+    const verbIcon = (verb: NonNullable<typeof checking>, icon: ReactNode) =>
+        checking === verb ? <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" /> : icon;
 
     const previewRelocate = async (to: string, verb: 'Rename' | 'Move' | 'Merge') => {
+        if (busy) return;
         setStructureError(null);
+        setChecking(verb);
         try {
             const r = await relocateDrive(node.display, to, true);
             const effects = [
@@ -1031,6 +1037,8 @@ function DetailsTab({ node, byDisplay, suggestions, onReload, onChanged, onReloc
             });
         } catch (e) {
             setStructureError(errorText(e));
+        } finally {
+            setChecking(null);
         }
     };
 
@@ -1050,8 +1058,10 @@ function DetailsTab({ node, byDisplay, suggestions, onReload, onChanged, onReloc
         void previewRelocate(target.startsWith(':') ? target : `:${target}`, 'Merge');
     };
     const remove = async () => {
+        if (busy) return;
         setStructureError(null);
         setDeleteError(null);
+        setChecking('Delete');
         try {
             const r = await deleteDrive(node.display, true);
             setPending({
@@ -1065,6 +1075,8 @@ function DetailsTab({ node, byDisplay, suggestions, onReload, onChanged, onReloc
             });
         } catch (e) {
             setDeleteError(errorText(e));
+        } finally {
+            setChecking(null);
         }
     };
 
@@ -1075,8 +1087,8 @@ function DetailsTab({ node, byDisplay, suggestions, onReload, onChanged, onReloc
     return (
         <div className="space-y-8">
             <div className="grid grid-cols-2 gap-2">
-                <Stat label="Filed Here" value={node.filed} hint="Videos whose Primary Drive is exactly this one. Not its sub-Drives', and not ones only here through Also In." />
-                <Stat label="Also In Here" value={node.linked} hint="Videos with another Primary Drive that are also filed exactly here (Also In)." />
+                <Stat label="Videos Filed Here" value={node.filed} hint="Videos whose Primary Drive is exactly this one. Not its sub-Drives', and not ones only here through Also In." />
+                <Stat label="Also In Here" value={node.linked} hint="Videos with another Primary Drive that are also filed exactly here." />
                 <Stat label="Sub-Drives" value={subDrives} hint="Drives beneath this one, at every level." />
                 <Stat label={`In ${sequenceLabel}`} value={node.sequence} hint={`Videos in this Drive's own ${sequenceLower} (its watch-through order).`} />
                 <div className="col-span-2">
@@ -1112,8 +1124,8 @@ function DetailsTab({ node, byDisplay, suggestions, onReload, onChanged, onReloc
                 <StructureRow title="Rename" hint="Everything filed in it, or beneath it, follows.">
                     <div className="flex items-center gap-2">
                         <DriveNameInput prefix={parent ? `${parent}-` : ':'} value={renameTo} onChange={setRenameTo} onEnter={rename} placeholder={node.segment} />
-                        <button onClick={rename} disabled={!renameTo || renameTo === node.segment} className={neutralButton} title="Rename this Drive (a preview of what changes comes first)">
-                            <Pencil className="w-3.5 h-3.5" /> Rename
+                        <button onClick={rename} disabled={busy || !renameTo || renameTo === node.segment} className={neutralButton} title="Rename this Drive (a preview of what changes comes first)">
+                            {verbIcon('Rename', <Pencil className="w-3.5 h-3.5" />)} {checking === 'Rename' ? 'Checking…' : 'Rename'}
                         </button>
                     </div>
                 </StructureRow>
@@ -1121,8 +1133,8 @@ function DetailsTab({ node, byDisplay, suggestions, onReload, onChanged, onReloc
                 <StructureRow title="Move" hint={`Under another Drive, with everything beneath it.${parent ? ' Leave it blank to make it top-level.' : ''}`}>
                     <div className="flex items-center gap-2">
                         <DriveComboBox value={moveUnder} onValueChange={setMoveUnder} suggestions={parentChoices} suggestedDrives={[]} placeholder=":CS-ML" onEnter={move} className={driveField} />
-                        <button onClick={move} disabled={!moveUnder.trim() && !parent} className={neutralButton} title="Move this Drive (a preview of what changes comes first)">
-                            <ArrowRightLeft className="w-3.5 h-3.5" /> Move
+                        <button onClick={move} disabled={busy || (!moveUnder.trim() && !parent)} className={neutralButton} title="Move this Drive (a preview of what changes comes first)">
+                            {verbIcon('Move', <ArrowRightLeft className="w-3.5 h-3.5" />)} {checking === 'Move' ? 'Checking…' : 'Move'}
                         </button>
                     </div>
                 </StructureRow>
@@ -1130,17 +1142,17 @@ function DetailsTab({ node, byDisplay, suggestions, onReload, onChanged, onReloc
                 <StructureRow title="Merge Into" hint="Everything here joins that Drive, and this one goes away. Sub-Drives with the same name merge too.">
                     <div className="flex items-center gap-2">
                         <DriveComboBox value={mergeInto} onValueChange={setMergeInto} suggestions={[...new Set([...suggestionsElsewhere, ...parentChoices])]} suggestedDrives={[]} placeholder=":CS-ML-REINF" onEnter={merge} className={driveField} />
-                        <button onClick={merge} disabled={!mergeInto.trim()} className={neutralButton} title="Merge this Drive into the one given (a preview of what changes comes first)">
-                            <Merge className="w-3.5 h-3.5" /> Merge
+                        <button onClick={merge} disabled={busy || !mergeInto.trim()} className={neutralButton} title="Merge this Drive into the one given (a preview of what changes comes first)">
+                            {verbIcon('Merge', <Merge className="w-3.5 h-3.5" />)} {checking === 'Merge' ? 'Checking…' : 'Merge'}
                         </button>
                     </div>
                 </StructureRow>
 
                 <StructureRow title="Delete" hint="Only an empty Drive can be deleted: move, unfile or merge what's in it first.">
                     <div className="flex items-center gap-3">
-                        <button onClick={() => void remove()} className={deleteButton} title="Delete this Drive and the empty Drives beneath it">
-                            <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                            Delete
+                        <button onClick={() => void remove()} disabled={busy} className={deleteButton} title="Delete this Drive and the empty Drives beneath it">
+                            {verbIcon('Delete', <Trash2 className="w-3.5 h-3.5 shrink-0" />)}
+                            {checking === 'Delete' ? 'Checking…' : 'Delete'}
                         </button>
                         {deleteError && <p className="text-xs text-red-400 min-w-0">{deleteError}</p>}
                     </div>

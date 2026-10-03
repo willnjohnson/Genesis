@@ -5,6 +5,29 @@ fn invalid(msg: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg.into())))
 }
 
+/// Quick Tags every workspace has, for keeping track of videos (src/lib/glossary.ts lists the same names, for the
+/// Glossary to show them as built in). Always uncategorized and without a definition; they can't be deleted, renamed or
+/// turned into a Term, so they're always there to tag with. Names ignore case, like every term's.
+pub const BUILT_IN_TAGS: [&str; 5] = ["Watch Later", "Favorite", "Revisit", "Key Source", "Follow Up"];
+
+/// Whether `term` is one of the BUILT_IN_TAGS (ignoring case).
+pub fn is_built_in_tag(term: &str) -> bool {
+    BUILT_IN_TAGS.iter().any(|t| t.eq_ignore_ascii_case(term.trim()))
+}
+
+/// Puts back any built-in tag the workspace is missing, as it opens (workspaces.rs::activate). One already there, in
+/// any capitalization, is left as it is. Rows, not schema, so a production database gets them too.
+pub fn ensure_built_in_tags(db_path: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    for tag in BUILT_IN_TAGS {
+        conn.execute(
+            "INSERT INTO Glossary (term, definition, drives) SELECT ?1, '', '' WHERE NOT EXISTS (SELECT 1 FROM Glossary WHERE term = ?1 AND drives = '')",
+            params![tag],
+        )?;
+    }
+    Ok(())
+}
+
 /// A Drive *root*: ":" followed by exactly one level (":CRYPTO"). Deeper paths (":CRYPTO-DOAC") and
 /// the bare ":" placeholder are not roots. Glossary terms can only be filed at this level.
 pub fn is_root_path(path: &str) -> bool {
@@ -91,6 +114,9 @@ pub fn delete_glossary_group(db_path: &str, term: &str, drives: &[String]) -> Re
 
 /// `delete_glossary_group`, returning the texts whose links to the term were removed (the Trash puts them back).
 pub fn delete_glossary_group_recorded(db_path: &str, term: &str, drives: &[String]) -> Result<Vec<super::links::TextChange>> {
+    if is_built_in_tag(term) && drives.iter().all(|d| d.is_empty()) {
+        return Err(invalid(format!("\"{}\" is a built-in tag, so it can't be deleted.", term.trim())));
+    }
     let conn = Connection::open(db_path)?;
     conn.execute("DELETE FROM Glossary WHERE term = ?1 AND drives = ?2", params![term, encode_drives(drives)])?;
     let left: i64 = conn.query_row("SELECT COUNT(*) FROM Glossary WHERE term = ?", params![term], |r| r.get(0))?;
@@ -119,6 +145,17 @@ pub fn save_glossary_group(
     let term = term.trim();
     if term.is_empty() {
         return Err(invalid("A term needs a name."));
+    }
+    // A built-in tag stays as it is: the same name, uncategorized, no definition.
+    if let Some((orig_term, orig_drives)) = original {
+        if is_built_in_tag(orig_term) && orig_drives.iter().all(|d| d.is_empty()) {
+            if !orig_term.trim().eq_ignore_ascii_case(term) {
+                return Err(invalid(format!("\"{}\" is a built-in tag, so it can't be renamed.", orig_term.trim())));
+            }
+            if !definition.trim().is_empty() {
+                return Err(invalid(format!("\"{}\" is a built-in tag, so it stays a tag (without a definition).", orig_term.trim())));
+            }
+        }
     }
     let mut targets = if definition.trim().is_empty() { Vec::new() } else { validated_drives(drives)? };
     let orig: Option<(String, String)> = original.map(|(t, d)| (t.to_string(), encode_drives(d)));
@@ -450,5 +487,55 @@ mod case_insensitive_name_tests {
             .unwrap();
         save_glossary_group(&db, Some(("Mtor", &[])), "mTOR", "Kinase.", &[]).unwrap();
         assert!(summary_of(&db, "v").contains("kinesis://glossary/"), "still a link");
+    }
+}
+
+#[cfg(test)]
+mod built_in_tag_tests {
+    use super::*;
+    use crate::db::init_db;
+
+    fn temp_db(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("kinesis_builtin_tags_{}_{}.db", name, std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let p = path.to_string_lossy().to_string();
+        init_db(&p).unwrap();
+        ensure_built_in_tags(&p).unwrap();
+        p
+    }
+
+    fn tags(db: &str) -> Vec<String> {
+        get_glossary_terms(db).unwrap().into_iter().filter(|e| e.definition.is_empty() && e.drives.is_empty()).map(|e| e.term).collect()
+    }
+
+    #[test]
+    fn every_workspace_has_them_and_they_stay() {
+        let db = temp_db("stay");
+        for tag in BUILT_IN_TAGS {
+            assert!(tags(&db).iter().any(|t| t == tag), "{tag} is there");
+        }
+        let none: &[String] = &[];
+        assert!(delete_glossary_group(&db, "Watch Later", none).unwrap_err().to_string().contains("can't be deleted"));
+        assert!(delete_glossary_group(&db, "watch later", none).is_err(), "names ignore case");
+        assert!(save_glossary_group(&db, Some(("Favorite", none)), "Favourite", "", none).unwrap_err().to_string().contains("can't be renamed"));
+        assert!(save_glossary_group(&db, Some(("Favorite", none)), "Favorite", "A definition", none).unwrap_err().to_string().contains("stays a tag"));
+        // Opening again doesn't add a second copy.
+        ensure_built_in_tags(&db).unwrap();
+        assert_eq!(tags(&db).iter().filter(|t| t.as_str() == "Favorite").count(), 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn one_already_there_is_kept_as_written_and_put_back_if_gone() {
+        let db = temp_db("kept");
+        let conn = Connection::open(&db).unwrap();
+        // As if written as "key source" before, and "Revisit" removed outside the app (a sync, say).
+        conn.execute("UPDATE Glossary SET term = 'key source' WHERE term = 'Key Source'", []).unwrap();
+        conn.execute("DELETE FROM Glossary WHERE term = 'Revisit'", []).unwrap();
+        ensure_built_in_tags(&db).unwrap();
+        let now = tags(&db);
+        assert!(now.iter().any(|t| t == "key source") && !now.iter().any(|t| t == "Key Source"), "not duplicated: {now:?}");
+        assert!(now.iter().any(|t| t == "Revisit"), "put back");
+        let _ = std::fs::remove_file(&db);
     }
 }

@@ -37,7 +37,7 @@ impl LinkKind {
         }
     }
 
-    fn parse(s: &str) -> Option<LinkKind> {
+    pub fn parse(s: &str) -> Option<LinkKind> {
         match s {
             "glossary" => Some(LinkKind::Glossary),
             "bio" => Some(LinkKind::Bio),
@@ -56,6 +56,9 @@ pub struct InternalLink {
     pub kind: LinkKind,
     /// The decoded key (the term, handle, video id or Drive path).
     pub key: String,
+    /// A video link's starting point, as written after `?t=` (`83`, `1:23` or `1:02:03`): not part of the key, so a
+    /// timed link is still a link to that video, and it's kept as it is when the link is rewritten.
+    pub at: Option<String>,
 }
 
 /// Percent-encodes a key for use in a link address. Everything but letters, digits and `-_.~` is
@@ -71,14 +74,28 @@ pub fn build_link(text: &str, kind: LinkKind, key: &str) -> String {
 fn link_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\[([^\[\]]*)\]\(kinesis://(glossary|bio|video|drive|playlist)/([A-Za-z0-9\-._~%]+)\)").unwrap()
+        Regex::new(r"\[([^\[\]]*)\]\(kinesis://(glossary|bio|video|drive|playlist)/([A-Za-z0-9\-._~%]+)(?:\?t=([0-9:]+))?\)").unwrap()
     })
 }
 
 fn parse_captures(caps: &Captures) -> Option<InternalLink> {
     let kind = LinkKind::parse(&caps[2])?;
+    // Only a video has a moment to start at; on any other kind the suffix makes it not a link.
+    let at = caps.get(4).map(|m| m.as_str().to_string());
+    if at.is_some() && kind != LinkKind::Video {
+        return None;
+    }
     let key = urlencoding::decode(&caps[3]).ok()?.into_owned();
-    Some(InternalLink { text: caps[1].to_string(), kind, key })
+    Some(InternalLink { text: caps[1].to_string(), kind, key, at })
+}
+
+/// `build_link`, with a video link's starting point (`?t=`) after the key when it has one.
+fn build_link_at(text: &str, kind: LinkKind, key: &str, at: Option<&str>) -> String {
+    let link = build_link(text, kind, key);
+    match at {
+        Some(at) => format!("{}?t={at})", &link[..link.len() - 1]),
+        None => link,
+    }
 }
 
 /// What to do with one link found while rewriting text.
@@ -108,7 +125,7 @@ pub fn rewrite_links(text: &str, mut decide: impl FnMut(&InternalLink) -> LinkAc
             }
             LinkAction::Retarget(new_key) => {
                 changed = true;
-                build_link(&link.text, link.kind, &new_key)
+                build_link_at(&link.text, link.kind, &new_key, link.at.as_deref())
             }
             LinkAction::ReplaceWith(replacement) => {
                 changed = true;
@@ -133,10 +150,12 @@ pub fn to_wikilinks(text: &str, resolve: impl Fn(LinkKind, &str) -> Option<Strin
     rewrite_links(text, |link| {
         let visible: String = link.text.chars().filter(|c| !matches!(c, '|' | '[' | ']')).collect();
         let visible = visible.trim().to_string();
+        // A wiki link has no place for a video's starting point, so it follows the link, as text.
+        let at = link.at.as_deref().map(|at| format!(" ({at})")).unwrap_or_default();
         match resolve(link.kind, &link.key) {
-            Some(note) if visible.is_empty() || visible == note => LinkAction::ReplaceWith(format!("[[{note}]]")),
-            Some(note) => LinkAction::ReplaceWith(format!("[[{note}|{visible}]]")),
-            None => LinkAction::ReplaceWith(if visible.is_empty() { link.key.clone() } else { visible }),
+            Some(note) if visible.is_empty() || visible == note => LinkAction::ReplaceWith(format!("[[{note}]]{at}")),
+            Some(note) => LinkAction::ReplaceWith(format!("[[{note}|{visible}]]{at}")),
+            None => LinkAction::ReplaceWith(format!("{}{at}", if visible.is_empty() { link.key.clone() } else { visible })),
         }
     })
     .unwrap_or_else(|| text.to_string())
@@ -250,13 +269,16 @@ pub fn apply_link_edits_recorded(db_path: &str, edits: &[LinkEdit]) -> Result<Ve
     Ok(changed)
 }
 
-/// How many stored texts hold at least one link to any of `keys` (all of one `kind`): what a rename or
-/// delete of those targets would rewrite, counted up front for its confirmation.
-pub fn count_texts_linking(db_path: &str, kind: LinkKind, keys: &[String]) -> Result<usize> {
-    if keys.is_empty() {
+/// How many stored texts hold at least one link to any of the `targets` (each a kind and its keys): what
+/// a rename or delete of those targets would rewrite, counted up front for its confirmation. A text
+/// linking to several of them counts once.
+pub fn count_texts_linking(db_path: &str, targets: &[(LinkKind, &[String])]) -> Result<usize> {
+    if targets.iter().all(|(_, keys)| keys.is_empty()) {
         return Ok(0);
     }
+    // One pass over every text for all the targets: the scan (transcripts included) is the slow part.
     let conn = Connection::open(db_path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
     let mut count = 0;
     for (table, column) in TEXT_COLUMNS {
         if !table_exists(&conn, table)? {
@@ -267,12 +289,154 @@ pub fn count_texts_linking(db_path: &str, kind: LinkKind, keys: &[String]) -> Re
         ))?;
         let texts = stmt.query_map(params![SCHEME], |r| r.get::<_, String>(0))?;
         for text in texts.filter_map(|r| r.ok()) {
-            if find_links(&text).iter().any(|l| l.kind == kind && keys.iter().any(|k| same_key(kind, k, &l.key))) {
+            let links = find_links(&text);
+            if targets.iter().any(|(kind, keys)| links.iter().any(|l| l.kind == *kind && keys.iter().any(|k| same_key(*kind, k, &l.key)))) {
                 count += 1;
             }
         }
     }
     Ok(count)
+}
+
+/// One stored text that links to something: where it is, and what it says around the link (a row of its Backlinks).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Backlink {
+    /// Which text it is: a video's "summary", "transcript" or "note", a person's "bio", or a term's "definition".
+    pub source: &'static str,
+    /// The video the text belongs to (summary, transcript, note).
+    pub video_id: Option<String>,
+    /// The person's handle (bio) or the term (definition), to open it by.
+    pub key: Option<String>,
+    /// What to call it: the video's title, the person's name, the term.
+    pub title: String,
+    /// The moments its links start at (timed video links), as written, each once.
+    pub times: Vec<String>,
+    /// How many links in it point at the target.
+    pub links: usize,
+    /// The words around its first link to the target, links reduced to their text.
+    pub excerpt: String,
+}
+
+/// Characters of text kept on each side of the link in an excerpt.
+const EXCERPT_SIDE: usize = 70;
+
+/// `text` with every internal link reduced to its visible words, and where the first link to the target ended up in it
+/// (byte range), with the target's links (the times they start at, how many) — or None when nothing in it links there.
+fn plain_around_target(text: &str, kind: LinkKind, key: &str) -> Option<(String, std::ops::Range<usize>, Vec<String>, usize)> {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut first: Option<std::ops::Range<usize>> = None;
+    let mut times: Vec<String> = Vec::new();
+    let mut count = 0;
+    for caps in link_re().captures_iter(text) {
+        let whole = caps.get(0).expect("a match has a whole");
+        out.push_str(&text[last..whole.start()]);
+        let start = out.len();
+        out.push_str(&caps[1]);
+        if let Some(link) = parse_captures(&caps) {
+            if link.kind == kind && same_key(kind, key, &link.key) {
+                count += 1;
+                first.get_or_insert(start..out.len());
+                if let Some(at) = link.at {
+                    if !times.contains(&at) {
+                        times.push(at);
+                    }
+                }
+            }
+        }
+        last = whole.end();
+    }
+    out.push_str(&text[last..]);
+    first.map(|range| (out, range, times, count))
+}
+
+/// About EXCERPT_SIDE characters each side of `range` in `plain`, on one line, with an ellipsis where it was cut.
+fn excerpt(plain: &str, range: std::ops::Range<usize>) -> String {
+    let before: String = plain[..range.start].chars().rev().take(EXCERPT_SIDE).collect::<Vec<_>>().into_iter().rev().collect();
+    let after: String = plain[range.end..].chars().take(EXCERPT_SIDE).collect();
+    let cut_before = before.len() < range.start;
+    let cut_after = after.len() < plain.len() - range.end;
+    let joined = format!("{}{}{}{}{}", if cut_before { "…" } else { "" }, before, &plain[range], after, if cut_after { "…" } else { "" });
+    // One line, without the markdown that would only be noise in a one-line excerpt.
+    let cleaned = joined.replace("**", "").replace("==", "");
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Every stored text that links to `key` (of `kind`), for its Backlinks list. A text links once however many links
+/// it has there (the count and the times say how many and where). The target's own texts aren't listed (a video's
+/// summary linking to moments of the same video, a person's bio naming themselves): that's the thing itself, not
+/// something pointing at it. One pass over the texts holding any internal link, so it's always current.
+pub fn find_backlinks(db_path: &str, kind: LinkKind, key: &str) -> Result<Vec<Backlink>> {
+    let conn = Connection::open(db_path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    let mut found: Vec<Backlink> = Vec::new();
+    let mut add = |source: &'static str, video_id: Option<String>, item_key: Option<String>, title: String, text: &str| {
+        if let Some((plain, range, times, links)) = plain_around_target(text, kind, key) {
+            found.push(Backlink { source, video_id, key: item_key, title, times, links, excerpt: excerpt(&plain, range) });
+        }
+    };
+    let own_video = |id: &str| kind == LinkKind::Video && id == key;
+
+    if table_exists(&conn, "Videos")? {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT video_id, COALESCE(title, ''), summary, transcript FROM Videos
+             WHERE INSTR(summary, '{SCHEME}') > 0 OR INSTR(transcript, '{SCHEME}') > 0"
+        ))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?)))?;
+        for (id, title, summary, transcript) in rows.filter_map(|r| r.ok()) {
+            if own_video(&id) {
+                continue;
+            }
+            let title = if title.trim().is_empty() { id.clone() } else { title };
+            if let Some(text) = summary {
+                // Not its "Channel Info: [Creator](kinesis://bio/...)" footer: every summary has one, so a person's
+                // backlinks would just be all their videos again. Only links written in the summary itself count.
+                let body = text.find(super::summaries::CHANNEL_INFO).map_or(text.as_str(), |at| &text[..at]);
+                add("summary", Some(id.clone()), None, title.clone(), body);
+            }
+            if let Some(text) = transcript {
+                add("transcript", Some(id.clone()), None, title.clone(), &text);
+            }
+        }
+    }
+    if table_exists(&conn, "VideoNotes")? {
+        let videos = table_exists(&conn, "Videos")?;
+        let sql = if videos {
+            format!("SELECT n.video_id, COALESCE(NULLIF(v.title, ''), n.video_id), n.note FROM VideoNotes n LEFT JOIN Videos v ON v.video_id = n.video_id WHERE INSTR(n.note, '{SCHEME}') > 0")
+        } else {
+            format!("SELECT video_id, video_id, note FROM VideoNotes WHERE INSTR(note, '{SCHEME}') > 0")
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        for (id, title, text) in rows.filter_map(|r| r.ok()) {
+            if !own_video(&id) {
+                add("note", Some(id), None, title, &text);
+            }
+        }
+    }
+    if table_exists(&conn, "Biographies")? {
+        let mut stmt = conn.prepare(&format!("SELECT handle, display_name, bio FROM Biographies WHERE INSTR(bio, '{SCHEME}') > 0"))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?)))?;
+        for (handle, name, text) in rows.filter_map(|r| r.ok()) {
+            if kind == LinkKind::Bio && same_key(LinkKind::Bio, key, &handle) {
+                continue;
+            }
+            let title = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| handle.clone());
+            add("bio", None, Some(handle), title, &text);
+        }
+    }
+    if table_exists(&conn, "Glossary")? {
+        let mut stmt = conn.prepare(&format!("SELECT term, definition FROM Glossary WHERE INSTR(definition, '{SCHEME}') > 0 ORDER BY term, drives"))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for (term, text) in rows.filter_map(|r| r.ok()) {
+            if kind == LinkKind::Glossary && same_key(LinkKind::Glossary, key, &term) {
+                continue;
+            }
+            add("definition", None, Some(term.clone()), term, &text);
+        }
+    }
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -294,13 +458,65 @@ mod tests {
         assert_eq!(link, "[the halving](kinesis://glossary/Bitcoin%20%28BTC%29%20Halving)");
         let found = find_links(&format!("see {link} and {}", build_link("Ann", LinkKind::Bio, "ann_b")));
         assert_eq!(found.len(), 2);
-        assert_eq!(found[0], InternalLink { text: "the halving".into(), kind: LinkKind::Glossary, key: "Bitcoin (BTC) Halving".into() });
+        assert_eq!(found[0], InternalLink { text: "the halving".into(), kind: LinkKind::Glossary, key: "Bitcoin (BTC) Halving".into(), at: None });
         assert_eq!(found[1].kind, LinkKind::Bio);
         // Non-ASCII keys (Drive paths start with θψ) survive the round trip.
         let drive = build_link("UAP", LinkKind::Drive, "θψUAP_GERB");
         assert_eq!(find_links(&drive)[0].key, "θψUAP_GERB");
         // Ordinary and unknown links are not internal links.
         assert!(find_links("[x](https://example.com) [y](kinesis://nothing/here)").is_empty());
+    }
+
+    #[test]
+    fn backlinks_list_each_text_once_with_its_times_and_not_the_target_itself() {
+        let db = temp_db("backlinks");
+        save_video(&db, "target00001", "The Target", "A", 60, "words", 1, "2026-01-01T00:00:00Z", "@a", Some("Its own summary links [itself at 1:00](kinesis://video/target00001?t=1:00).")).unwrap();
+        save_video(&db, "other000001", "Other Talk", "B", 60, "plain transcript", 1, "2026-01-01T00:00:00Z", "@b",
+            Some("First see [the target](kinesis://video/target00001?t=5:50), then **again** [here](kinesis://video/target00001?t=5:50) and [later](kinesis://video/target00001?t=12:00).")).unwrap();
+        save_video(&db, "unrelated01", "Unrelated", "C", 60, "words", 1, "2026-01-01T00:00:00Z", "@c", Some("Links [someone else](kinesis://video/other000001).")).unwrap();
+        crate::db::upsert_biography_from_video(&db, "@ann", "Ann", None, -1).unwrap();
+        crate::db::update_biography_details(&db, "@ann", "Ann talks in [The Target](kinesis://video/target00001).", "", "", "", "", "", "", "", "", "", "", "").unwrap();
+
+        let found = find_backlinks(&db, LinkKind::Video, "target00001").unwrap();
+        assert_eq!(found.len(), 2, "{found:#?}");
+        let talk = found.iter().find(|b| b.source == "summary").unwrap();
+        assert_eq!((talk.video_id.as_deref(), talk.title.as_str(), talk.links), (Some("other000001"), "Other Talk", 3));
+        assert_eq!(talk.times, vec!["5:50".to_string(), "12:00".to_string()], "each moment once, in order");
+        assert!(talk.excerpt.starts_with("First see the target, then again here"), "links read as their words, no markdown: {}", talk.excerpt);
+        let bio = found.iter().find(|b| b.source == "bio").unwrap();
+        assert_eq!((bio.key.as_deref(), bio.title.as_str(), bio.times.len()), (Some("@ann"), "Ann", 0));
+        // A video's own summary isn't listed as linking to it.
+        assert!(found.iter().all(|b| b.video_id.as_deref() != Some("target00001")));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn a_long_text_is_cut_to_the_words_around_the_link() {
+        let filler = "word ".repeat(60);
+        let text = format!("{filler}[the link](kinesis://video/abc) {filler}");
+        let (plain, range, _, _) = plain_around_target(&text, LinkKind::Video, "abc").unwrap();
+        let cut = excerpt(&plain, range);
+        assert!(cut.starts_with('…') && cut.ends_with('…') && cut.contains("the link"), "{cut}");
+        assert!(cut.chars().count() < 2 * EXCERPT_SIDE + 20, "{cut}");
+    }
+
+    #[test]
+    fn a_video_link_can_start_at_a_moment_and_is_still_a_link_to_that_video() {
+        let text = "[talk](kinesis://video/DeIm6oNPVEc?t=1:23) and [whole](kinesis://video/DeIm6oNPVEc)";
+        let found = find_links(text);
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[0].key.as_str(), found[0].at.as_deref()), ("DeIm6oNPVEc", Some("1:23")));
+        assert_eq!((found[1].key.as_str(), found[1].at.as_deref()), ("DeIm6oNPVEc", None));
+        // Deleting the video unlinks both, timed or not.
+        assert_eq!(apply_edits(text, &[LinkEdit::Unlink(LinkKind::Video, "DeIm6oNPVEc".into())]).unwrap(), "talk and whole");
+        // A rewrite keeps the moment.
+        let moved = apply_edits(text, &[LinkEdit::Retarget(LinkKind::Video, "DeIm6oNPVEc".into(), "newid123456".into())]).unwrap();
+        assert_eq!(moved, "[talk](kinesis://video/newid123456?t=1:23) and [whole](kinesis://video/newid123456)");
+        // Only a video starts somewhere.
+        assert!(find_links("[x](kinesis://glossary/Halving?t=1:23)").is_empty());
+        // Export puts the moment after the wiki link.
+        let resolve = |_: LinkKind, _: &str| Some("Talk".to_string());
+        assert_eq!(to_wikilinks("[talk](kinesis://video/DeIm6oNPVEc?t=83)", resolve), "[[Talk|talk]] (83)");
     }
 
     #[test]

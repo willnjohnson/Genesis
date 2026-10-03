@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, X } from 'lucide-react';
+import { BookA, Plus, X } from 'lucide-react';
+import { useWorkspace } from '../../hooks/useWorkspace';
 import type { GlossaryTerm } from '../../api';
 import { resolveEntry, termKinds } from '../../lib/glossary';
+import { builtInTagIcon, builtInTagRank } from '../../lib/built-in-tags';
 import { AddQuickTagModal } from '../AddQuickTagModal';
 
 interface Props {
@@ -36,6 +38,8 @@ interface Props {
      *  for either tab). */
     canEdit?: boolean;
     onGlossaryChanged?: () => void;
+    /** `kind="tags"` only: the dropdown's "Manage tags in <Glossary>", which goes to the Glossary's tags list. */
+    onManageTags?: () => void;
 }
 
 /** Displays a video's terms or tags as chips. Tags keep the "add" dropdown/remove-X pair filtered
@@ -45,8 +49,9 @@ interface Props {
  *  not something added or removed here — a chip click instead jumps to and highlights that link
  *  (`onJumpToTerm`). The dropdown closes on an outside click. Renders just the tag row — the
  *  surrounding card/header is owned by Sidebar.tsx's Tags/Similar Videos tab switcher. */
-export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, preferredDrives, onAddTag, onRemoveTag, onSelectTerm, onJumpToTerm, priorityTerms, priorityLabel, canEdit = true, onGlossaryChanged }: Props) {
+export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, preferredDrives, onAddTag, onRemoveTag, onSelectTerm, onJumpToTerm, priorityTerms, priorityLabel, canEdit = true, onGlossaryChanged, onManageTags }: Props) {
     const noun = kind === 'terms' ? 'term' : 'tag';
+    const { labels } = useWorkspace();
     // Terms are never user-editable any more — see the doc comment above.
     const editable = canEdit && kind === 'tags';
     // A Quick Tag is a name with no definition in any Drive; a term has one in at least one.
@@ -108,8 +113,14 @@ export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, 
     }, [showTagDropdown, handleClickOutside]);
 
     // Terms: exactly what's linked in the text on screen, in reading order (not alphabetized — that
-    // order matches jumping to them top-to-bottom). Tags: everything applied, alphabetized as before.
-    const filtered = kind === 'terms' ? (detectedTerms ?? []) : [...videoTags].filter(tag => ofKind.includes(tag)).sort((a, b) => a.localeCompare(b));
+    // order matches jumping to them top-to-bottom). Tags: everything applied, in the dropdown's order: the built-in
+    // ones first in their own order, then the rest alphabetized.
+    const tagOrder = (a: string, b: string) => {
+        const [ra, rb] = [builtInTagRank(a), builtInTagRank(b)];
+        if (ra >= 0 || rb >= 0) return ra < 0 ? 1 : rb < 0 ? -1 : ra - rb;
+        return a.localeCompare(b);
+    };
+    const filtered = kind === 'terms' ? (detectedTerms ?? []) : [...videoTags].filter(tag => ofKind.includes(tag)).sort(tagOrder);
     const availableTerms = ofKind.filter(name =>
         !videoTags.includes(name) &&
         name.toLowerCase().includes(tagFilter.toLowerCase())
@@ -117,6 +128,12 @@ export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, 
     // The video's Drive's own terms go first; the rest follow without repeating them.
     const prioritized = priorityTerms ? availableTerms.filter(name => priorityTerms.has(name)) : [];
     const others = priorityTerms ? availableTerms.filter(name => !priorityTerms.has(name)) : availableTerms;
+    // Tags: the built-in ones (Watch Later, Favorite, ...) first, in their own order and with their icons, then the
+    // rest under "Custom".
+    const essentials = kind === 'tags'
+        ? others.filter(name => builtInTagRank(name) >= 0).sort((a, b) => builtInTagRank(a) - builtInTagRank(b))
+        : [];
+    const custom = kind === 'tags' ? others.filter(name => builtInTagRank(name) < 0) : others;
     // A label with a rule running out to the right ("IN :UAP ────"), in the dropdown's own border colour.
     const groupHeader = (text: string) => (
         <div className="flex items-center gap-2 px-4 pt-3 pb-1 select-none">
@@ -124,24 +141,33 @@ export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, 
             <span className="flex-1 h-px bg-[#383838]" />
         </div>
     );
-    const termButton = (name: string) => (
-        <button
-            key={name}
-            onClick={() => {
-                onAddTag?.(name);
-                setShowTagDropdown(false);
-                setTagFilter("");
-            }}
-            className="w-full text-left px-4 py-2 text-[11px] text-white hover:bg-[#2a2a2a] transition-colors cursor-pointer rounded"
-        >
-            {name}
-        </button>
-    );
+    const termButton = (name: string) => {
+        const Icon = kind === 'tags' ? builtInTagIcon(name) : undefined;
+        return (
+            <button
+                key={name}
+                onClick={() => {
+                    onAddTag?.(name);
+                    setShowTagDropdown(false);
+                    setTagFilter("");
+                }}
+                className="w-full flex items-center gap-2 text-left px-4 py-2 text-[11px] text-white hover:bg-[#2a2a2a] transition-colors cursor-pointer rounded"
+            >
+                {/* Up a pixel: the text's line keeps room below for descenders, so its letters sit above its middle. */}
+                {Icon && <Icon className="w-3 h-3 shrink-0 -translate-y-px text-[#aaaaaa]" />}
+                {name}
+            </button>
+        );
+    };
 
     return (
             // A video can have dozens of terms: past this height the chips scroll, as the Similar Videos list does.
             <div className="flex flex-wrap items-center gap-1.5 max-h-[280px] overflow-y-auto custom-scrollbar pr-1">
-                {filtered.map((tag) => (
+                {filtered.map((tag) => {
+                    // A built-in tag's chip stands out: its icon, and a thicker border (the padding gives back the extra
+                    // pixel, so every chip stays the same height).
+                    const BuiltInIcon = kind === 'tags' ? builtInTagIcon(tag) : undefined;
+                    return (
                     <button
                         key={tag}
                         onClick={(e) => {
@@ -157,8 +183,9 @@ export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, 
                                 onSelectTerm(term);
                             }
                         }}
-                        className="group flex items-center gap-1 px-2.5 py-1 bg-[#222222] border border-[#383838] rounded-md text-[11px] text-white hover:bg-[#333333] transition-all cursor-pointer"
+                        className={`group flex items-center gap-1 bg-[#222222] rounded-md text-[11px] text-white hover:bg-[#333333] transition-all cursor-pointer ${BuiltInIcon ? 'px-[9px] py-[3px] border-2 border-[#505050]' : 'px-2.5 py-1 border border-[#383838]'}`}
                     >
+                        {BuiltInIcon && <BuiltInIcon className="w-3 h-3 shrink-0 -translate-y-px text-[#aaaaaa]" />}
                         {tag}
                         {editable && (
                         <button
@@ -166,13 +193,14 @@ export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, 
                                 e.stopPropagation();
                                 onRemoveTag?.(tag);
                             }}
-                            className="text-[#666666] hover:text-red-500 transition-colors ml-1"
+                            className="text-[#666666] hover:text-red-500 transition-colors ml-1 cursor-pointer"
                         >
                             <X className="w-3 h-3" />
                         </button>
                         )}
                     </button>
-                ))}
+                    );
+                })}
 
                 {editable && filtered.length === 0 && (
                     <span className="text-[11px] text-[#666666] font-medium italic select-none">
@@ -230,7 +258,11 @@ export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, 
                                                 {others.length > 0 && groupHeader(`All ${noun}s`)}
                                             </>
                                         )}
-                                        {others.map(termButton)}
+                                        {/* Headings only when both groups have something to show. */}
+                                        {essentials.length > 0 && custom.length > 0 && groupHeader('Essentials')}
+                                        {essentials.map(termButton)}
+                                        {essentials.length > 0 && custom.length > 0 && groupHeader('Custom')}
+                                        {custom.map(termButton)}
                                     </>
                                 )}
                             </div>
@@ -246,6 +278,19 @@ export function VideoTagsPanel({ kind, videoTags, detectedTerms, glossaryTerms, 
                                     <Plus className="w-3.5 h-3.5" />
                                     Create new tag
                                 </button>
+                                {kind === 'tags' && onManageTags && (
+                                    <button
+                                        onClick={() => {
+                                            setShowTagDropdown(false);
+                                            setTagFilter('');
+                                            onManageTags();
+                                        }}
+                                        className="w-full flex items-center gap-2 px-4 py-2 text-left text-[11px] font-semibold text-gray-300 hover:bg-[#2a2a2a] hover:text-white transition-colors cursor-pointer rounded"
+                                    >
+                                        <BookA className="w-3.5 h-3.5" />
+                                        Manage tags in {labels.aliasGlossary}
+                                    </button>
+                                )}
                             </div>
                         </div>,
                         document.body,
